@@ -133,9 +133,6 @@ def apply_filter(videos: list[Video], min_views: int = 0, min_interactions: int 
         reason = _length_reason(video, length_limits or {})
         if reason:
             skipped[reason] = skipped.get(reason, 0) + 1
-            note = f"Bỏ vì thời lượng: {reason}."
-            if note not in video.notes:
-                video.notes.append(note)
         elif passes(video, min_views, min_interactions, min_ratio_follow, match_all):
             kept.append(video)
     if length_notes is not None:
