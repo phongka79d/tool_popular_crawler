@@ -1,9 +1,10 @@
-"""Ghi, đọc và kiểm tra cookie Facebook ở định dạng Netscape (yt-dlp đọc được, PLAN §11.3).
+"""Nhập cookie JSON/Netscape và xuất phiên Facebook cho yt-dlp (PLAN §11.1, §11.3).
 
 Tệp cookie chứa phiên đăng nhập: chỉ để trong data/, không gửi cho người khác.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -99,6 +100,44 @@ def read_netscape(path: Path | str = config.COOKIE_FILE) -> list[dict]:
             "secure": secure == "TRUE",
         })
     return cookies
+
+
+def convert_cookie_editor(data: list[dict]) -> list[dict]:
+    """Đổi Cookie-Editor/EditThisCookie sang cookie Playwright, bỏ khóa riêng của tiện ích."""
+    same_sites = {"no_restriction": "None", "none": "None", "lax": "Lax", "strict": "Strict"}
+    converted: list[dict] = []
+    for cookie in data:
+        if not isinstance(cookie, dict) or "name" not in cookie or "value" not in cookie:
+            continue
+        converted.append({
+            "name": cookie["name"],
+            "value": cookie["value"],
+            "domain": cookie.get("domain", ""),
+            "path": cookie.get("path", "/"),
+            "expires": -1 if cookie.get("session") else cookie.get("expirationDate", -1),
+            "secure": bool(cookie.get("secure", False)),
+            "httpOnly": bool(cookie.get("httpOnly", False)),
+            "sameSite": same_sites.get(str(cookie.get("sameSite") or "").lower(), "Lax"),
+        })
+    return converted
+
+
+def load_cookie_file(path: Path | str) -> list[dict]:
+    """Đọc JSON của Cookie-Editor/EditThisCookie hoặc Netscape để nhập vào Playwright.
+
+    Tệp không đúng định dạng gây ValueError; lỗi đọc tệp được giữ nguyên.
+    Không đưa nội dung cookie vào thông báo lỗi.
+    """
+    text = Path(path).read_text(encoding="utf-8-sig")
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        if not _looks_netscape(text):
+            raise ValueError("Tệp cookie không đúng định dạng JSON hoặc Netscape.") from None
+        return read_netscape(path)
+    if not isinstance(data, list):
+        raise ValueError("Tệp cookie JSON phải là danh sách cookie.")
+    return convert_cookie_editor(data)
 
 
 def _is_data_line(line: str) -> bool:

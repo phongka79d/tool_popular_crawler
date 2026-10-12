@@ -12,6 +12,7 @@ import re
 import threading
 import time
 from collections.abc import Iterator
+from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 from playwright.sync_api import BrowserContext
@@ -23,7 +24,7 @@ from playwright.sync_api import sync_playwright
 
 import config
 from collectors import graphql
-from collectors.cookies import has_login_cookies, write_netscape
+from collectors.cookies import has_login_cookies, load_cookie_file, write_netscape
 from errors import LoginRequired
 from models import Page
 from normalize import is_older_than, parse_count
@@ -134,6 +135,31 @@ def login_interactive(timeout_s: int = 600) -> bool:
             time.sleep(LOGIN_POLL_S)
     logger.warning("Hết thời gian chờ đăng nhập Facebook.")
     return False
+
+
+def import_cookies(path: Path | str) -> bool:
+    """Nhập Cookie-Editor, EditThisCookie hoặc Netscape vào profile và lưu cho yt-dlp.
+
+    Chỉ xuất cookie khi context có đủ c_user và xs của Facebook.
+    Tệp không đọc được, cookie không hợp lệ hoặc thiếu phiên đăng nhập trả False.
+    """
+    try:
+        imported = load_cookie_file(path)
+        if not imported:
+            logger.warning("Tệp cookie không chứa cookie để nhập.")
+            return False
+        with _persistent_context(headless=True) as ctx:
+            ctx.add_cookies(imported)
+            current = ctx.cookies(list(FB_COOKIE_URLS))
+            if not has_login_cookies(current):
+                logger.warning("Cookie đã nhập thiếu c_user hoặc xs của Facebook.")
+                return False
+            write_netscape(current)
+    except (OSError, ValueError, PlaywrightError):
+        logger.warning("Không nhập được cookie Facebook. Kiểm tra tệp cookie và trình duyệt.")
+        return False
+    logger.info("Đã nhập và lưu cookie Facebook.")
+    return True
 
 
 class _Collector:
@@ -272,10 +298,10 @@ class FacebookScanner:
 
     def _scroll_once(self) -> None:
         page = self._require_page()
-        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        page.mouse.wheel(0, random.randint(*WHEEL_PX))
         try:
-            page.wait_for_response(lambda resp: GRAPHQL_MARK in resp.url, timeout=RESPONSE_WAIT_MS)
+            with page.expect_response(lambda resp: GRAPHQL_MARK in resp.url, timeout=RESPONSE_WAIT_MS):
+                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                page.mouse.wheel(0, random.randint(*WHEEL_PX))
         except PlaywrightTimeoutError:
             logger.debug("Không thấy phản hồi GraphQL sau khi cuộn.")
 

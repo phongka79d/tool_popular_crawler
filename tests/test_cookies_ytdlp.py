@@ -1,14 +1,17 @@
 """Test offline cho collectors.cookies và collectors.ytdlp: không mở trình duyệt, không gọi mạng."""
 from __future__ import annotations
 
+import contextlib
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yt_dlp
 from yt_dlp.utils import DownloadError
 
 import config
-from collectors import cookies, ytdlp
+from collectors import cookies, facebook, ytdlp
 from models import Video
 
 
@@ -121,6 +124,196 @@ def test_has_login_cookies_requires_both_c_user_and_xs():
     assert cookies.has_login_cookies([_xs()]) is False
     assert cookies.has_login_cookies([_c_user(), _xs(value="")]) is False
     assert cookies.has_login_cookies([]) is False
+
+
+@pytest.mark.parametrize(
+    "same_site, expected",
+    [("no_restriction", "None"), ("lax", "Lax"), ("strict", "Strict"),
+     ("unspecified", "Lax"), (None, "Lax")],
+)
+def test_convert_cookie_editor_maps_fields(same_site, expected):
+    source = {
+        "name": "xs", "value": "test-session", "domain": ".facebook.com", "path": "/videos",
+        "expirationDate": 1_800_000_000.5, "secure": True, "httpOnly": True,
+        "sameSite": same_site, "hostOnly": False, "storeId": "0", "id": 1,
+    }
+    assert cookies.convert_cookie_editor([source]) == [{
+        "name": "xs", "value": "test-session", "domain": ".facebook.com", "path": "/videos",
+        "expires": 1_800_000_000.5, "secure": True, "httpOnly": True, "sameSite": expected,
+    }]
+    assert source["expirationDate"] == 1_800_000_000.5
+
+
+def test_convert_cookie_editor_session_defaults_and_missing_fields():
+    result = cookies.convert_cookie_editor([
+        {"name": "xs", "value": "", "domain": ".facebook.com", "session": True,
+         "expirationDate": 1_800_000_000},
+        {"name": "c_user", "value": "test-user", "domain": ".facebook.com"},
+        {"name": "missing-value"}, {"value": "missing-name"}, None,
+    ])
+    assert len(result) == 2
+    assert all(c["expires"] == -1 for c in result)
+    assert all(c["path"] == "/" and c["sameSite"] == "Lax" for c in result)
+    assert all(c["secure"] is False and c["httpOnly"] is False for c in result)
+    assert result[0]["value"] == ""
+
+
+@pytest.mark.parametrize("export_format", ["cookie_editor", "edit_this_cookie", "netscape"])
+def test_load_cookie_file_supported_formats(tmp_path, export_format):
+    path = tmp_path / "export.txt"
+    if export_format == "netscape":
+        cookies.write_netscape([_c_user(), _xs()], path)
+    else:
+        data = [
+            {"name": "c_user", "value": "100012345", "domain": ".facebook.com", "path": "/",
+             "expirationDate": 1_800_000_000, "secure": True, "httpOnly": False,
+             "sameSite": "no_restriction", "session": False},
+            {"name": "xs", "value": "41%3Aabc", "domain": ".facebook.com", "path": "/",
+             "expirationDate": 1_800_000_000, "secure": True, "httpOnly": True,
+             "sameSite": "lax", "session": True},
+        ]
+        if export_format == "edit_this_cookie":
+            for index, cookie in enumerate(data):
+                cookie.update({"id": index, "storeId": "0", "hostOnly": False})
+        path.write_text(json.dumps(data), encoding="utf-8")
+    loaded = cookies.load_cookie_file(path)
+    assert cookies.has_login_cookies(loaded)
+    assert loaded[0]["expires"] == 1_800_000_000
+    assert loaded[1]["expires"] == -1
+    assert loaded[1]["httpOnly"] is True
+    assert all(c["secure"] and c["path"] == "/" and c["domain"] == ".facebook.com" for c in loaded)
+    assert [c["value"] for c in loaded] == ["100012345", "41%3Aabc"]
+    if export_format != "netscape":
+        assert [c["sameSite"] for c in loaded] == ["None", "Lax"]
+
+
+@pytest.mark.parametrize("text", ['{"c_user": "test"}', "không phải cookie"])
+def test_load_cookie_file_rejects_unknown_format(tmp_path, text):
+    path = tmp_path / "invalid.txt"
+    path.write_text(text, encoding="utf-8")
+    with pytest.raises(ValueError):
+        cookies.load_cookie_file(path)
+
+
+@pytest.mark.parametrize("valid_login", [True, False])
+def test_import_cookies_adds_verifies_and_exports(tmp_path, monkeypatch, valid_login):
+    path = tmp_path / "import.txt"
+    imported = [_c_user(), _xs()] if valid_login else [_c_user()]
+    cookies.write_netscape(imported, path)
+    calls = []
+    current = cookies.load_cookie_file(path)
+    output = tmp_path / "saved.txt"
+
+    class FakeContext:
+        def add_cookies(self, values):
+            calls.append(("add", values))
+
+        def cookies(self, urls):
+            calls.append(("verify", urls))
+            return current
+
+    @contextlib.contextmanager
+    def persistent_context(headless):
+        assert headless is True
+        yield FakeContext()
+
+    monkeypatch.setattr(facebook, "_persistent_context", persistent_context)
+    monkeypatch.setattr(facebook, "write_netscape", lambda values: cookies.write_netscape(values, output))
+    assert facebook.import_cookies(path) is valid_login
+    assert calls == [("add", current), ("verify", list(facebook.FB_COOKIE_URLS))]
+    assert output.exists() is valid_login
+    if valid_login:
+        assert cookies.read_netscape(output) == current
+
+
+def test_import_cookies_invalid_file_does_not_open_browser(tmp_path, monkeypatch):
+    def unexpected_browser(*args, **kwargs):
+        raise AssertionError("Không được mở trình duyệt cho tệp sai")
+
+    monkeypatch.setattr(facebook, "_persistent_context", unexpected_browser)
+    assert facebook.import_cookies(tmp_path / "missing.txt") is False
+
+
+@pytest.mark.parametrize("timeout", [True, False])
+@pytest.mark.parametrize(
+    "batches, max_rounds, expected_rounds",
+    [([[], [], []], 10, 2), ([["1"], [], ["2"], [], []], 10, 5),
+     ([["1"], ["2"], ["3"], ["4"]], 3, 3)],
+)
+def test_scan_page_expect_response_timeout_stall_and_round_cap(
+    monkeypatch, timeout, batches, max_rounds, expected_rounds,
+):
+    actions = []
+
+    class FakePage:
+        def __init__(self):
+            self.rounds = 0
+            self.waiting = False
+            self.mouse = SimpleNamespace(wheel=self.wheel)
+            self.listener = None
+
+        def on(self, event, handler):
+            assert event == "response"
+            self.listener = handler
+
+        def remove_listener(self, event, handler):
+            assert event == "response" and handler is self.listener
+            self.listener = None
+
+        def content(self):
+            return ""
+
+        @contextlib.contextmanager
+        def expect_response(self, predicate, timeout):
+            assert timeout == 8000
+            assert predicate(SimpleNamespace(url="https://www.facebook.com/api/graphql/"))
+            assert not predicate(SimpleNamespace(url="https://www.facebook.com/other"))
+            actions.append("expect")
+            self.waiting = True
+            try:
+                yield
+            finally:
+                self.waiting = False
+            if timeout_enabled:
+                raise facebook.PlaywrightTimeoutError("Hết thời gian chờ")
+
+        def evaluate(self, script):
+            assert self.waiting
+            assert script == "window.scrollTo(0, document.body.scrollHeight)"
+            actions.append("scroll")
+
+        def wheel(self, x, y):
+            assert self.waiting and x == 0 and 600 <= y <= 1200
+            actions.append("wheel")
+            batch = batches[self.rounds]
+            self.rounds += 1
+            if batch:
+                self.listener(SimpleNamespace(
+                    url="https://www.facebook.com/api/graphql/", status=200,
+                    text=lambda: json.dumps(batch),
+                ))
+
+    timeout_enabled = timeout
+    page = FakePage()
+    scanner = facebook.FacebookScanner(settings={"scan": {
+        "max_scroll_rounds": max_rounds, "stall_rounds": 2,
+    }})
+    scanner._page = page
+    monkeypatch.setattr(scanner, "_open", lambda url: None)
+    monkeypatch.setattr(scanner, "_raise_if_blocked", lambda: None)
+    monkeypatch.setattr(scanner, "_export_cookies", lambda: None)
+    monkeypatch.setattr(facebook, "_human_pause", lambda *args: None)
+    monkeypatch.setattr(facebook.graphql, "parse_initial_html", lambda html: [])
+    monkeypatch.setattr(facebook.graphql, "parse_graphql_response", lambda body: [
+        {"video_id": video_id, "format": "reel"} for video_id in json.loads(body)
+    ])
+    videos = scanner.scan_page("https://www.facebook.com/TestPage", 30, {"reel"}, 100)
+    assert page.rounds == expected_rounds
+    assert actions == ["expect", "scroll", "wheel"] * expected_rounds
+    assert page.listener is None
+    assert [video["video_id"] for video in videos] == [
+        video_id for batch in batches[:expected_rounds] for video_id in batch
+    ]
 
 
 # ---------- yt-dlp helpers ----------
