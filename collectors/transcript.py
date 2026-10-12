@@ -200,14 +200,11 @@ def hook_3s(words: list[dict]) -> str:
 
 
 def first_lines_hook(caption: str, transcript: str) -> str:
-    """Hook dự phòng khi không có timestamp (vyralforge `_first_lines`): dòng đầu caption
-    (tối đa 200 ký tự); không có caption thì 30 từ đầu của thoại."""
+    """Hook dự phòng: dòng đầu caption (≤200 ký tự) và 30 từ đầu thoại, nối bằng xuống dòng."""
     lines = (caption or "").strip().splitlines()
-    if lines:
-        first = lines[0].strip()[:CAPTION_HOOK_CHARS].strip()
-        if first:
-            return first
-    return " ".join((transcript or "").split()[:TRANSCRIPT_HOOK_WORDS])
+    first = lines[0].strip()[:CAPTION_HOOK_CHARS].strip() if lines else ""
+    spoken = " ".join((transcript or "").split()[:TRANSCRIPT_HOOK_WORDS])
+    return "\n".join(part for part in (first, spoken) if part)
 
 
 # --- orchestration ---------------------------------------------------------
@@ -239,23 +236,29 @@ def _save(video: Video, text: str, status: str, words: list[dict], minutes: floa
     return minutes
 
 
-def _transcribe(audio: Path, api_key: str, stt: dict, keyterms: list[str]) -> tuple[dict | None, float]:
-    """Trả (kết quả, phút Deepgram đã tính phí). Kết quả None nếu không nguồn nào lấy được thoại."""
+def _transcribe(audio: Path, api_key: str, stt: dict, keyterms: list[str],
+                warnings: list[str]) -> tuple[dict | None, float]:
+    """Trả (kết quả, phút Deepgram đã tính phí); ghi cảnh báo hạn mức và trạng thái dự phòng."""
     try:
         result = transcribe_deepgram(audio, api_key, stt, keyterms)
         return result, result["duration"] / 60.0
-    except (AuthError, QuotaError) as exc:
+    except QuotaError as exc:
         log.warning("Deepgram không dùng được: %s", exc)
 
+    warning = "Tài khoản Deepgram đã hết credit/hạn mức."
     if stt.get("fallback") != "local_whisper":
+        warnings.append(f"{warning} Không dùng local whisper (đã tắt dự phòng).")
         return None, 0.0
 
     model_size = stt.get("whisper_model", "small")
     log.info("Chuyển sang faster-whisper (%s) chạy máy", model_size)
     try:
-        return transcribe_local(audio, model_size), 0.0
+        result = transcribe_local(audio, model_size)
+        warnings.append(f"{warning} Đã dùng local whisper.")
+        return result, 0.0
     except Exception:
         log.exception("faster-whisper lỗi, bỏ qua thoại của video")
+        warnings.append(f"{warning} Đã thử local whisper nhưng không lấy được thoại.")
         return None, 0.0
 
 
@@ -269,11 +272,14 @@ def _remove(path: Path | None) -> None:
 
 
 def get_transcript(video: Video, api_key: str, stt_settings: dict,
-                   keyterms: list[str], tmp_dir: Path | str) -> float:
+                   keyterms: list[str], tmp_dir: Path | str,
+                   warnings: list[str] | None = None) -> float:
     """Điền video.transcript, transcript_status, hook (và ghi chú). Trả số phút Deepgram đã tính phí.
 
     Cache: transcript "ok" hoặc "no_speech" trong SQLite được dùng lại, không tải lại audio.
     Transcript "failed" không nằm trong cache nên lần chạy sau sẽ thử lại.
+    AuthError được chuyển cho bên gọi để tạm dừng; chỉ QuotaError dùng local whisper.
+    Nếu truyền `warnings`, thêm cảnh báo hạn mức và kết quả dự phòng vào danh sách này.
     """
     cached = db.get_transcript(video.video_id)
     if cached is not None and cached[1] in _CACHED_STATUSES:
@@ -292,7 +298,8 @@ def get_transcript(video: Video, api_key: str, stt_settings: dict,
             log.warning("Không có audio để chuyển thoại: %s", video.video_id)
             return _save(video, "", STATUS_FAILED, [], 0.0)
 
-        result, minutes = _transcribe(audio, api_key, stt_settings, keyterms)
+        result, minutes = _transcribe(audio, api_key, stt_settings, keyterms,
+                                     warnings if warnings is not None else [])
         if result is None:
             return _save(video, "", STATUS_FAILED, [], minutes)
 

@@ -138,7 +138,9 @@ def harness(monkeypatch, tmp_path):
     monkeypatch.setattr(pipeline.export_excel, "export", export)
     state.params = pipeline.RunParams(14, {"reel", "video"}, 100_000, {"views": 50_000}, "viral_tuyet_doi")
     state.settings = settings
-    state.run = lambda stop=None: pipeline.run(state.params, settings, state.progress.append, stop or Event())
+    state.run = lambda stop=None, ask_user=None: pipeline.run(
+        state.params, settings, state.progress.append, stop or Event(), ask_user
+    )
     return state
 
 
@@ -278,3 +280,139 @@ def test_cli_builds_requested_params(harness, monkeypatch):
     assert seen[0].days == 14
     assert seen[0].formats == {"reel", "video"}
     assert seen[0].preset == "no_bat_thuong"
+
+
+def test_missing_views_are_filled_and_persisted_before_filtering(harness, monkeypatch):
+    h = harness
+    h.rows["large"][0]["views"] = None
+    filled = []
+
+    def fill(video):
+        filled.append(video.video_id)
+        video.views = 90_000
+
+    monkeypatch.setattr(pipeline.ytdlp, "fill_missing", fill)
+    h.run()
+    assert filled == ["v1"]
+    assert len(h.video_saved) == 2
+    assert h.exports[0][0][0].views == 90_000
+    assert h.exports[0][2]["pages"][0]["passed"] == 1
+    assert h.jev_calls == ["v1"]
+
+
+@pytest.mark.parametrize("missing", ["views", "reactions", "comments", "shares", "posted_at", "duration_s", "caption"])
+def test_each_missing_field_triggers_metadata_fallback_even_if_filtered_out(harness, monkeypatch, missing):
+    row = harness.rows["large"][0]
+    row.update(views=1, posted_at="2026-10-01T00:00:00Z", duration_s=60, caption="Nội dung")
+    row[missing] = "" if missing == "caption" else None
+    calls = []
+    monkeypatch.setattr(pipeline.ytdlp, "fill_missing", lambda video: calls.append(video.video_id))
+    harness.run()
+    assert calls == ["v1"]
+    assert harness.exports[0][0] == []
+
+
+def test_metadata_error_is_a_video_note_and_run_continues(harness, monkeypatch):
+    def fail(video):
+        raise ValueError("Không lấy được metadata")
+
+    monkeypatch.setattr(pipeline.ytdlp, "fill_missing", fail)
+    harness.run()
+    assert "Không lấy được metadata" in harness.exports[0][0][0].notes
+    assert harness.jev_calls == ["v1"]
+
+
+def test_stop_during_metadata_fallback_prevents_more_calls(harness, monkeypatch):
+    h = harness
+    h.rows["large"].append(dict(h.rows["large"][0], video_id="v2"))
+    stop = Event()
+    calls = []
+
+    def fill(video):
+        calls.append(video.video_id)
+        stop.set()
+
+    monkeypatch.setattr(pipeline.ytdlp, "fill_missing", fill)
+    h.run(stop)
+    assert calls == ["v1"]
+    assert h.transcript_calls == []
+    assert h.commentary_calls == []
+
+
+def test_deepgram_auth_pauses_and_exports_partial(harness, monkeypatch):
+    def fail(*args):
+        raise AuthError("deepgram", "Key bị từ chối")
+
+    monkeypatch.setattr(pipeline.transcript, "get_transcript", fail)
+    harness.run()
+    assert len(harness.exports[0][0]) == 1
+    assert harness.exports[0][2]["messages"] == [
+        "API key [Deepgram] không hợp lệ. Vào Cài đặt để nhập lại."
+    ]
+    assert harness.jev_calls == []
+    assert harness.commentary_calls == []
+    assert harness.progress[-1].message == "Đã xuất kết quả một phần."
+
+
+def test_deepgram_quota_warning_is_logged_and_analysis_continues(harness, monkeypatch):
+    warning = "Tài khoản Deepgram đã hết credit/hạn mức. Đã dùng local whisper."
+
+    def get(video, key, stt, terms, tmp, warnings):
+        warnings.append(warning)
+        video.transcript = "Thoại dự phòng"
+        return 0.0
+
+    monkeypatch.setattr(pipeline.transcript, "get_transcript", get)
+    harness.run()
+    assert warning in harness.exports[0][2]["messages"]
+    assert harness.exports[0][2]["usage"]["deepgram_minutes"] == 0.0
+    assert harness.jev_calls == ["v1"]
+
+
+@pytest.mark.parametrize("choice", ["pause", "continue", None])
+def test_llm_quota_choice_controls_remaining_analysis(harness, choice):
+    h = harness
+    h.rows["large"].append(dict(h.rows["large"][0], video_id="v2"))
+    h.llm_error = QuotaError("llm", "Tài khoản LLM đã hết credit/hạn mức.")
+    questions = []
+
+    def ask(kind, message, options):
+        questions.append((kind, message, options))
+        return choice
+
+    h.run(ask_user=ask if choice is not None else None)
+    assert h.analysis_calls == ["v1"]
+    assert h.commentary_calls == []
+    assert h.jev_calls == (["v1"] if choice == "pause" else ["v1", "v2"])
+    assert len(h.exports[0][0]) == 2
+    if choice is None:
+        assert questions == []
+        assert any("mặc định CLI" in text for text in h.exports[0][2]["messages"])
+    else:
+        assert questions == [("llm_quota", "Tài khoản LLM đã hết credit/hạn mức.",
+                              [("continue", "Chạy tiếp không có gợi ý"), ("pause", "Tạm dừng")])]
+    decision = "tạm dừng" if choice == "pause" else "tiếp tục không có gợi ý"
+    assert any(decision in text for text in h.exports[0][2]["messages"])
+    assert h.progress[-1].message == (
+        "Đã xuất kết quả một phần." if choice == "pause" else "Đã xuất kết quả."
+    )
+
+
+@pytest.mark.parametrize("choice", ["pause", "continue", None])
+def test_commentary_quota_uses_same_user_choice(harness, monkeypatch, choice):
+    def fail(*args):
+        raise QuotaError("llm", "Hết credit")
+
+    monkeypatch.setattr(pipeline.llm_client, "write_commentary", fail)
+    questions = []
+
+    def ask(*args):
+        questions.append(args)
+        return choice
+
+    harness.run(ask_user=ask if choice is not None else None)
+    assert len(harness.exports) == 1
+    assert len(questions) == (0 if choice is None else 1)
+    assert harness.progress[-1].message == (
+        "Đã xuất kết quả một phần." if choice == "pause" else "Đã xuất kết quả."
+    )

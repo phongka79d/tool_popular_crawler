@@ -125,7 +125,7 @@ def test_hook_returns_empty_when_no_word_starts_in_first_3s():
 
 def test_first_lines_hook_uses_first_caption_line_cut_to_200_chars():
     caption = "x" * 250 + "\nDòng hai"
-    assert transcript.first_lines_hook(caption, "lời thoại") == "x" * 200
+    assert transcript.first_lines_hook(caption, "lời thoại") == "x" * 200 + "\nlời thoại"
 
 
 def test_first_lines_hook_strips_blank_leading_space_and_keeps_first_line_only():
@@ -135,6 +135,13 @@ def test_first_lines_hook_strips_blank_leading_space_and_keeps_first_line_only()
 def test_first_lines_hook_falls_back_to_first_30_transcript_words_without_caption():
     text = " ".join(f"t{i}" for i in range(40))
     assert transcript.first_lines_hook("", text) == " ".join(f"t{i}" for i in range(30))
+
+
+def test_first_lines_hook_combines_caption_and_30_transcript_words():
+    text = " ".join(f"t{i}" for i in range(40))
+    assert transcript.first_lines_hook("Dòng một\nDòng hai", text) == (
+        "Dòng một\n" + " ".join(f"t{i}" for i in range(30))
+    )
 
 
 def test_first_lines_hook_empty_inputs_return_empty_string():
@@ -411,13 +418,14 @@ def test_deepgram_success_saves_ok_bills_minutes_and_removes_temp_audio(env, tmp
     assert not env.raw_path.exists()
 
 
-@pytest.mark.parametrize("error", [AuthError("deepgram", AUTH_MSG), QuotaError("deepgram", QUOTA_MSG)])
-def test_auth_or_quota_error_falls_back_to_local_whisper(env, tmp_path, error):
-    env.deepgram = error
+def test_quota_error_falls_back_to_local_whisper_and_warns(env, tmp_path):
+    env.deepgram = QuotaError("deepgram", QUOTA_MSG)
     env.local = {"text": "Chủ nhà thuốc.", "duration": 4.0, "words": TIMED_WORDS}
     video = _video()
 
-    minutes = transcript.get_transcript(video, "dg-key", STT, [], tmp_path / "tmp")
+    warnings = []
+    minutes = transcript.get_transcript(video, "dg-key", STT, [], tmp_path / "tmp", warnings)
+    assert warnings == [QUOTA_MSG + " Đã dùng local whisper."]
 
     assert minutes == 0.0
     assert env.local_calls == [(env.audio_path, "small")]
@@ -430,12 +438,14 @@ def test_auth_or_quota_error_falls_back_to_local_whisper(env, tmp_path, error):
     assert not env.raw_path.exists()
 
 
-def test_auth_error_without_fallback_marks_failed_with_note(env, tmp_path):
-    env.deepgram = AuthError("deepgram", AUTH_MSG)
+def test_quota_error_without_fallback_marks_failed_with_note(env, tmp_path):
+    env.deepgram = QuotaError("deepgram", QUOTA_MSG)
     stt = {**STT, "fallback": "none"}
     video = _video()
 
-    minutes = transcript.get_transcript(video, "dg-key", stt, [], tmp_path / "tmp")
+    warnings = []
+    minutes = transcript.get_transcript(video, "dg-key", stt, [], tmp_path / "tmp", warnings)
+    assert warnings == [QUOTA_MSG + " Không dùng local whisper (đã tắt dự phòng)."]
 
     assert minutes == 0.0
     assert env.local_calls == []
@@ -526,3 +536,19 @@ def test_cached_failed_transcript_is_retried(env, tmp_path):
     assert minutes == pytest.approx(0.1)
     assert video.transcript_status == "ok"
     assert env.saved[0][2] == "ok"
+
+
+@pytest.mark.parametrize("fallback", ["local_whisper", "none"])
+def test_auth_error_propagates_without_local_fallback_and_cleans_files(env, tmp_path, fallback):
+    error = AuthError("deepgram", AUTH_MSG)
+    env.deepgram = error
+    warnings = []
+    with pytest.raises(AuthError) as caught:
+        transcript.get_transcript(_video(), "dg-key", {**STT, "fallback": fallback},
+                                  [], tmp_path / "tmp", warnings)
+    assert caught.value is error
+    assert env.local_calls == []
+    assert env.saved == []
+    assert warnings == []
+    assert not env.audio_path.exists()
+    assert not env.raw_path.exists()

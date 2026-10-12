@@ -94,14 +94,22 @@ def _tokens(usage: dict | int | None) -> int:
 class _Stopped(Exception):
     pass
 
+class _Paused(Exception):
+    pass
+
+
 
 def run(
     params: RunParams,
     settings: dict,
     on_progress: Callable[[Progress], None],
     stop_event: threading.Event,
+    ask_user: Callable[[str, str, list[tuple[str, str]]], str] | None = None,
 ) -> Path | None:
-    """Chạy một lượt; lỗi dịch vụ hoặc Dừng vẫn xuất phần dữ liệu đã thu được."""
+    """Chạy một lượt; lỗi dịch vụ hoặc Dừng vẫn xuất dữ liệu đã có.
+
+    `ask_user` chờ lựa chọn khi LLM hết hạn mức; CLI mặc định tiếp tục không có gợi ý.
+    """
     config.ensure_dirs()
     db.init_db()
     params_log = asdict(params)
@@ -156,6 +164,18 @@ def run(
             checkpoint()
             llm = llm_client.make_client(settings["llm"]["base_url"], credentials["llm"])
         return llm
+
+    def handle_llm_quota() -> bool:
+        nonlocal llm_unavailable
+        message = "Tài khoản LLM đã hết credit/hạn mức."
+        options = [("continue", "Chạy tiếp không có gợi ý"), ("pause", "Tạm dừng")]
+        choice = ask_user("llm_quota", message, options) if ask_user else "continue"
+        llm_unavailable = True
+        decision = "tạm dừng" if choice == "pause" else "tiếp tục không có gợi ý"
+        default = " (mặc định CLI)" if ask_user is None else ""
+        add_error(f"{message} Lựa chọn: {decision}{default}.")
+        return choice == "pause"
+
 
     try:
         try:
@@ -221,6 +241,20 @@ def run(
                         scanner.polite_page_pause(stop_event=stop_event)
                         checkpoint()
             checkpoint()
+            for video in collected:
+                checkpoint()
+                page_url = video.page_url
+                page_index = channels.index(page_url) + 1
+                if not video.caption or any(
+                    getattr(video, metric) is None
+                    for metric in ("views", "reactions", "comments", "shares", "posted_at", "duration_s")
+                ):
+                    try:
+                        ytdlp.fill_missing(video)
+                    except Exception as exc:
+                        video.notes.append(add_error(exc))
+                    db.upsert_video(video)
+                    checkpoint()
             emit("filter", "Đang tính chỉ số và lọc video…")
             filters.compute_metrics(collected)
             passed = filters.apply_filter(collected, params.rules)
@@ -239,14 +273,15 @@ def run(
                 page_index = channels.index(page_url) + 1
                 emit("analyze", "Đang phân tích video…")
                 try:
-                    if any(getattr(video, metric) is None for metric in ("views", "reactions", "comments", "shares")):
-                        ytdlp.fill_missing(video)
-                        checkpoint()
-                        db.upsert_video(video)
+                    warnings: list[str] = []
                     minutes = transcript.get_transcript(
                         video, credentials["deepgram"], settings["stt"], keyterms, config.DATA_DIR / "tmp",
+                        warnings,
                     )
                     run_log["usage"]["deepgram_minutes"] += float(minutes or 0)
+                    for warning in warnings:
+                        run_log["messages"].append(warning)
+                        emit("analyze", warning)
                     checkpoint()
                     raw, usage = jev_client.ask_labels(jev_instance(), video, taxonomy, settings)
                     run_log["usage"]["jev_tokens"] += _tokens(usage)
@@ -289,10 +324,10 @@ def run(
                 except QuotaError as exc:
                     if exc.service != "llm":
                         raise
-                    llm_unavailable = True
                     video.llm["goi_y_nhan_ban"] = []
-                    add_error(f"{_safe_message(exc, credentials)} Lựa chọn: tiếp tục không có gợi ý.")
-                except (AuthError, NetworkError, LoginRequired, _Stopped):
+                    if handle_llm_quota():
+                        raise _Paused()
+                except (AuthError, NetworkError, LoginRequired, _Stopped, _Paused):
                     raise
                 except Exception as exc:
                     video.notes.append(add_error(exc))
@@ -301,9 +336,16 @@ def run(
             if not collected:
                 return None
             partial = True
+        except _Paused:
+            partial = True
         except _Stopped:
             partial = True
             run_log["messages"].append("Đã dừng theo yêu cầu; xuất dữ liệu đã có.")
+        except AuthError as exc:
+            message = ("API key [Deepgram] không hợp lệ. Vào Cài đặt để nhập lại."
+                       if exc.service == "deepgram" else exc)
+            add_error(message)
+            partial = True
         except ServiceError as exc:
             add_error(exc)
             partial = True
@@ -324,7 +366,11 @@ def run(
                 summary["commentary"], usage = llm_client.write_commentary(llm_instance(), settings["llm"]["model"], summary)
                 run_log["usage"]["llm_tokens"] += _tokens(usage)
             except QuotaError as exc:
-                add_error(f"{_safe_message(exc, credentials)} Lựa chọn: tiếp tục không có gợi ý.")
+                if exc.service != "llm":
+                    add_error(exc)
+                    partial = True
+                else:
+                    partial = handle_llm_quota()
             except ServiceError as exc:
                 add_error(exc)
                 partial = True
