@@ -173,6 +173,54 @@ def test_small_page_is_scanned_without_follower_gate(harness):
     assert h.pauses == [True]
 
 
+def test_length_filter_runs_before_paid_analysis_and_logs_counts(harness):
+    h = harness
+    template = h.rows["large"][0]
+    h.rows["large"] = [
+        dict(template, video_id=ident, format=kind, duration_s=duration)
+        for ident, kind, duration in (
+            ("video-ok", "video", 180), ("video-short", "video", 179),
+            ("reel-ok", "reel", 90), ("reel-long", "reel", 120),
+            ("live-video", "video_live", 180), ("live-reel-long", "reel_live", 91),
+            ("unknown", "reel", None))
+    ]
+    h.params.length_limits = {"video": (180, None), "reel": (None, 90)}
+    assert h.run() is not None
+    expected = ["video-ok", "reel-ok", "live-video", "unknown"]
+    assert h.transcript_calls == expected
+    assert h.jev_calls == expected
+    assert h.analysis_calls == expected
+    videos, _, log = h.exports[0]
+    assert log["params"]["length_limits"] == h.params.length_limits
+    assert log["pages"][0]["passed"] == 4
+    assert "Bỏ 1 video ngắn hơn 3 phút." in log["pages"][0]["errors"]
+    assert "Bỏ 2 reel dài hơn 90 giây." in log["pages"][0]["errors"]
+    assert any("Đạt ngưỡng: 4/7" in event.message for event in h.progress)
+    assert any("Chưa biết thời lượng" in note for note in videos[-1].notes)
+
+
+def test_partial_run_still_enforces_length_limits(harness):
+    h = harness
+    h.params.length_limits = {"video": (180, None)}
+    h.rows["large"][0].update(duration_s=120)
+    stop = Event()
+    h.scan_stop = stop
+    assert h.run(stop) is not None
+    assert h.exports[0][0] == []
+    assert h.exports[0][2]["pages"][0]["passed"] == 0
+    assert h.transcript_calls == []
+
+
+def test_post_run_ignores_video_length_limits(harness):
+    h = harness
+    h.params = pipeline.RunParams(14, {"post"}, min_interactions=160,
+                                  length_limits={"video": (180, None), "reel": (None, 90)})
+    h.rows["large"][0].update(format="post", caption="Bài đăng", duration_s=1)
+    assert h.run() is not None
+    assert len(h.exports[0][0]) == 1
+    assert h.analysis_calls == ["v1"]
+
+
 def test_post_run_skips_metadata_transcript_and_deepgram(harness, monkeypatch):
     h = harness
     h.params = pipeline.RunParams(14, {"post"}, min_interactions=160)
@@ -376,6 +424,25 @@ def test_cli_ratio_and_any(harness, monkeypatch):
     assert (seen[0].min_views, seen[0].min_ratio_follow, seen[0].match_all) == (50_000, 5, False)
     assert pipeline.main(["--min-ratio", "0.5"]) == 0
     assert (seen[1].min_ratio_follow, seen[1].match_all) == (0.5, True)
+
+
+def test_cli_length_limits_restore_settings_and_allow_zero_override(harness, monkeypatch):
+    seen = []
+    harness.settings["scan"]["length_limits"] = {"video": [180, None], "reel": [None, 90]}
+    monkeypatch.setattr(pipeline, "run", lambda params, settings, progress, stop: seen.append(params) or Path("result.xlsx"))
+    assert pipeline.main([]) == 0
+    assert seen[0].length_limits == {"video": (180, None), "reel": (None, 90)}
+    assert pipeline.main(["--video-min-seconds", "0", "--reel-max-seconds", "60"]) == 0
+    assert seen[1].length_limits == {"video": (None, None), "reel": (None, 60)}
+
+
+@pytest.mark.parametrize("args", [
+    ["--video-min-seconds", "180", "--video-max-seconds", "90"],
+    ["--reel-max-seconds", "-1"],
+])
+def test_cli_rejects_invalid_length_limits(harness, args):
+    with pytest.raises(SystemExit):
+        pipeline.main(args)
 
 
 def test_missing_views_are_filled_and_persisted_before_filtering(harness, monkeypatch):

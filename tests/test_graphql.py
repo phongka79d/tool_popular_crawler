@@ -502,6 +502,33 @@ def test_videos_tab_tiles_become_records_with_play_count_as_views():
     }
 
 
+def test_recent_videos_tab_replay_is_video_live_not_reel():
+    # Sanitized Pharmacity /videos/ HTML: a three-hour broadcast replay and a reel.
+    replay = _channel_tile("1001", "https://www.facebook.com/Example/videos/1001/")
+    video = replay["node"]["channel_tab_thumbnail_renderer"]["video"]
+    video["savable_title"] = {"text": "Example broadcast replay"}
+    video["publish_time"] = 1791777617
+    video["video_thumbnail_overlays_renderer"]["video"].update({
+        "id": "1001", "playable_duration_in_ms": 10819930,
+        "playable_duration": 10820, "broadcast_status": "VOD_READY",
+        "is_live_streaming": False,
+    })
+    reel = _channel_tile("1002", "https://www.facebook.com/reel/1002/")
+    reel["node"]["channel_tab_thumbnail_renderer"]["video"]["savable_title"] = {"text": "Example reel"}
+    html = '<script data-sjs>' + json.dumps({
+        "data": {"node": {"__typename": "VirtualVideosChannel",
+                          "all_videos": {"edges": [replay, reel]}}},
+    }) + "</script>"
+
+    records = gql.parse_initial_html(html)
+
+    assert [(row["video_id"], row["format"], row["is_live"]) for row in records] == [
+        ("1001", "video", True), ("1002", "reel", False),
+    ]
+    assert records[0]["posted_at"] == 1791777617
+    assert records[0]["duration_s"] == pytest.approx(10819.93)
+
+
 def test_config_loads_and_every_alternative_is_a_non_empty_path():
     def alternatives(value):
         if isinstance(value, dict):

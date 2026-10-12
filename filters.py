@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import statistics
+import math
 
 from models import Video
 
@@ -14,6 +15,52 @@ _POST_MEDIAN_NOTES = (
     "Trung vị tương tác của page bằng 0, không tính được hệ số trung vị",
 )
 _ALL_MEDIAN_NOTES = (*_MEDIAN_NOTES, *_POST_MEDIAN_NOTES)
+LengthLimits = dict[str, tuple[float | None, float | None]]
+NOTE_UNKNOWN_DURATION = "Chưa biết thời lượng; giữ mục để xét các ngưỡng còn lại."
+
+
+def validate_length_limits(limits: LengthLimits) -> str | None:
+    for kind, (minimum, maximum) in limits.items():
+        label = "Video" if kind == "video" else "Reel"
+        if any(value is not None and (not math.isfinite(value) or value < 0)
+               for value in (minimum, maximum)):
+            return f"Thời lượng {label} phải là số không âm."
+        if minimum and maximum and minimum > maximum:
+            return f"Thời lượng {label}: tối thiểu không được lớn hơn tối đa."
+    return None
+
+
+def length_limit_text(bounds: tuple[float | None, float | None]) -> str:
+    minimum, maximum = bounds
+    if not minimum and not maximum:
+        return "Không giới hạn"
+    unit = "phút" if all(not value or value % 60 == 0 for value in bounds) else "giây"
+    divisor = 60 if unit == "phút" else 1
+    if minimum and maximum:
+        return f"{minimum / divisor:g}–{maximum / divisor:g} {unit}"
+    return f"{'≥' if minimum else '≤'} {(minimum or maximum) / divisor:g} {unit}"
+
+
+def _length_reason(video: Video, limits: LengthLimits) -> str | None:
+    if video.format == "post":
+        return None
+    base = video.format.removesuffix("_live")
+    minimum, maximum = limits.get(base, (None, None))
+    if not minimum and not maximum:
+        return None
+    if video.duration_s is None:
+        if NOTE_UNKNOWN_DURATION not in video.notes:
+            video.notes.append(NOTE_UNKNOWN_DURATION)
+        return None
+    if minimum and video.duration_s < minimum:
+        return f"{base} ngắn hơn {_seconds_text(minimum)}"
+    if maximum and video.duration_s > maximum:
+        return f"{base} dài hơn {_seconds_text(maximum)}"
+    return None
+
+
+def _seconds_text(seconds: float) -> str:
+    return f"{seconds / 60:g} phút" if seconds % 60 == 0 else f"{seconds:g} giây"
 
 
 def compute_metrics(videos: list[Video]) -> None:
@@ -53,7 +100,8 @@ def _engagement(video: Video) -> float | None:
 
 
 def passes(video: Video, min_views: int = 0, min_interactions: int = 0,
-           min_ratio_follow: float = 0, match_all: bool = True) -> bool:
+           min_ratio_follow: float = 0, match_all: bool = True,
+           length_limits: LengthLimits | None = None) -> bool:
     """Ngưỡng bao gồm giá trị bằng; 0 tắt lọc, số liệu chưa biết không đạt.
 
     Bài đăng chỉ dùng tương tác. Video dùng lượt xem và tỷ lệ lượt xem/follower:
@@ -61,6 +109,8 @@ def passes(video: Video, min_views: int = 0, min_interactions: int = 0,
     """
     if video.format == "post":
         return min_interactions <= 0 or (video.interactions is not None and video.interactions >= min_interactions)
+    if _length_reason(video, length_limits or {}):
+        return False
     results = []
     if min_views > 0:
         results.append(video.views is not None and video.views >= min_views)
@@ -73,9 +123,24 @@ def passes(video: Video, min_views: int = 0, min_interactions: int = 0,
 
 
 def apply_filter(videos: list[Video], min_views: int = 0, min_interactions: int = 0,
-                 min_ratio_follow: float = 0, match_all: bool = True) -> list[Video]:
-    return [video for video in videos
-            if passes(video, min_views, min_interactions, min_ratio_follow, match_all)]
+                 min_ratio_follow: float = 0, match_all: bool = True,
+                 length_limits: LengthLimits | None = None,
+                 length_notes: list[str] | None = None) -> list[Video]:
+    """Thời lượng luôn là điều kiện bắt buộc, kể cả khi các ngưỡng dùng HOẶC."""
+    kept = []
+    skipped: dict[str, int] = {}
+    for video in videos:
+        reason = _length_reason(video, length_limits or {})
+        if reason:
+            skipped[reason] = skipped.get(reason, 0) + 1
+            note = f"Bỏ vì thời lượng: {reason}."
+            if note not in video.notes:
+                video.notes.append(note)
+        elif passes(video, min_views, min_interactions, min_ratio_follow, match_all):
+            kept.append(video)
+    if length_notes is not None:
+        length_notes.extend(f"Bỏ {count} {reason}." for reason, count in skipped.items())
+    return kept
 
 
 def formula_score(

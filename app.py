@@ -27,6 +27,7 @@ import jev_client
 import keys
 import llm_client
 import pipeline
+import filters
 from collectors import cookies, facebook, transcript
 from collectors.facebook import page_url_problem
 from errors import ServiceError
@@ -784,6 +785,7 @@ def _scan_options(settings: dict, locked: bool) -> pipeline.RunParams:
         scan_kind = st.radio("Loại quét", ["Video", "Bài đăng"], horizontal=True, disabled=locked,
                              help="Bài đăng lấy nội dung chữ/ảnh từ bảng tin chính; phân tích caption, không tải audio.")
         formats = {"post"}
+        length_limits = {}
         if scan_kind == "Video":
             saved = settings["scan"].get("video_kinds", ["video", "reel"])
             formats = {
@@ -795,6 +797,26 @@ def _scan_options(settings: dict, locked: bool) -> pipeline.RunParams:
             }
             if not formats:
                 st.caption("Chọn ít nhất một loại video để quét.")
+            for kind, label in (("video", "Video"), ("reel", "Reel")):
+                if not formats & {kind, f"{kind}_live"}:
+                    continue
+                st.markdown(f"**Thời lượng {label}**")
+                saved_bounds = settings["scan"].get("length_limits", {}).get(kind, (None, None))
+                bounds = []
+                for column, index, bound, caption in zip(
+                        st.columns(2), (0, 1), ("min", "max"), ("Tối thiểu", "Tối đa")):
+                    with column:
+                        key = f"scan_length_{kind}_{bound}"
+                        value = float(st.number_input(
+                            f"{caption} {label} (giây)", min_value=0.0,
+                            value=float(saved_bounds[index] or 0), step=1.0, format="%g",
+                            key=key, disabled=locked, help="0 = không giới hạn. Live dùng cùng giới hạn."))
+                        bounds.append(value or None)
+                length_limits[kind] = tuple(bounds)
+                _length_preset_buttons(kind, locked)
+            problem = filters.validate_length_limits(length_limits)
+            if problem:
+                st.error(problem)
         else:
             previous = settings["scan"].get("read_images", False)
             enabled = st.checkbox(
@@ -845,7 +867,8 @@ def _scan_options(settings: dict, locked: bool) -> pipeline.RunParams:
             choice = st.radio("Cách kết hợp", [both, "Đạt một trong hai"], index=0 if match_all else 1,
                               horizontal=True, key="scan_match_all", disabled=locked)
             match_all = choice == both
-        params = pipeline.RunParams(days, formats, min_views=minimum, min_ratio_follow=ratio, match_all=match_all)
+        params = pipeline.RunParams(days, formats, min_views=minimum, min_ratio_follow=ratio,
+                                    match_all=match_all, length_limits=length_limits)
         st.markdown(f"*{_filter_summary(params)}*")
     return params
 
@@ -860,18 +883,43 @@ def _preset_buttons(key: str, values: tuple, label, locked: bool) -> None:
                       disabled=locked, width="stretch")
 
 
+def _length_preset_buttons(kind: str, locked: bool) -> None:
+    presets = (("≥ 1 phút", 60.0, 0.0), ("≥ 3 phút", 180.0, 0.0)) if kind == "video" else (
+        ("≤ 60 giây", 0.0, 60.0), ("≤ 90 giây", 0.0, 90.0))
+
+    def choose(minimum: float, maximum: float) -> None:
+        st.session_state[f"scan_length_{kind}_min"] = minimum
+        st.session_state[f"scan_length_{kind}_max"] = maximum
+
+    for column, (label, minimum, maximum) in zip(st.columns(2), presets):
+        with column:
+            st.button(label, key=f"scan_length_{kind}_preset_{minimum}_{maximum}",
+                      on_click=choose, args=(minimum, maximum), disabled=locked, width="stretch")
+
+
 def _filter_summary(params: pipeline.RunParams) -> str:
     parts = []
     if params.min_views > 0:
         parts.append(f"≥ {params.min_views:,} lượt xem".replace(",", "."))
     if params.min_ratio_follow > 0:
         parts.append(f"≥ {params.min_ratio_follow:g}× follower")
-    if not parts:
-        return "Không lọc: giữ mọi video."
-    return "Giữ video có " + (" VÀ " if params.match_all else " HOẶC ").join(parts)
+    summary = ("Giữ video có " + (" VÀ " if params.match_all else " HOẶC ").join(parts)
+               if parts else "Không lọc: giữ mọi video.")
+    lengths = [
+        f"{label} {filters.length_limit_text(params.length_limits.get(kind, (None, None)))}"
+        for kind, label in (("video", "Video"), ("reel", "Reel"))
+        if params.formats & {kind, f"{kind}_live"} and any(params.length_limits.get(kind, (None, None)))
+    ]
+    if lengths:
+        return (summary + " · " if parts else "") + " · ".join(lengths)
+    return summary
 
 
 def _start_scan(settings: dict, params: pipeline.RunParams) -> None:
+    problem = filters.validate_length_limits(params.length_limits)
+    if not pipeline.is_post_run(params) and problem:
+        _show_error(problem)
+        return
     if any(_refresh_keys(settings, require_deepgram=not pipeline.is_post_run(params)).values()):
         st.rerun()  # Panel Trạng thái API key sẽ hiện lỗi sau khi làm mới.
     channels = config.load_lines("config/channels.txt")
@@ -882,7 +930,9 @@ def _start_scan(settings: dict, params: pipeline.RunParams) -> None:
         settings["scan"]["min_interactions"] = params.min_interactions
     else:
         settings["scan"].update(min_views=params.min_views, min_ratio_follow=params.min_ratio_follow,
-                                match_all=params.match_all, video_kinds=sorted(params.formats))
+                                match_all=params.match_all, video_kinds=sorted(params.formats),
+                                length_limits={**settings["scan"].get("length_limits", {}),
+                                               **params.length_limits})
     config.save_settings(settings)
     events, stop = queue.Queue(), threading.Event()
     worker = threading.Thread(target=_scan_worker, args=(params, copy.deepcopy(settings), events, stop),
@@ -906,7 +956,8 @@ def _scan_page(settings: dict) -> None:
     _key_status_panel(settings, locked, require_deepgram=not pipeline.is_post_run(params))
     accepted = _terms_gate(settings, locked)
     if st.button("Bắt đầu quét", type="primary", width="stretch",
-                 disabled=locked or not params.formats or not accepted, icon=":material/play_arrow:"):
+                 disabled=locked or not params.formats or not accepted
+                 or bool(filters.validate_length_limits(params.length_limits)), icon=":material/play_arrow:"):
         _start_scan(settings, params)
 
 

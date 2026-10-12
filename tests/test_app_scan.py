@@ -102,6 +102,8 @@ class FilterUI(ScanUI):
     def number_input(self, label, **kwargs):
         if label.startswith("Lượt xem tối thiểu so với"):
             return self.ratio
+        if label.endswith("(giây)"):
+            return kwargs["value"]
         return kwargs["value"] if self.views is None else self.views
 
     def radio(self, label, options, **kwargs):
@@ -135,6 +137,74 @@ def test_start_persists_ratio_and_combination(monkeypatch):
     app._start_scan(deepcopy(app.DEFAULT_SETTINGS),
                     pipeline.RunParams(14, {"video"}, min_views=0, min_ratio_follow=10, match_all=False))
     assert (saved[0]["scan"]["min_ratio_follow"], saved[0]["scan"]["match_all"]) == (10, False)
+
+
+def test_length_summary_and_validation():
+    params = pipeline.RunParams(14, {"video", "reel"}, length_limits={
+        "video": (180, 1200), "reel": (None, 90)})
+    assert app._filter_summary(params) == "Video 3–20 phút · Reel ≤ 90 giây"
+    assert app.filters.validate_length_limits({"video": (181, 180)})
+    assert app.filters.validate_length_limits({"reel": (-1, 90)})
+    assert app.filters.validate_length_limits({"video": (180, None), "reel": (None, 90)}) is None
+
+
+def test_length_inputs_restore_only_selected_base_types(monkeypatch):
+    settings = deepcopy(app.DEFAULT_SETTINGS)
+    settings["scan"].update(video_kinds=["reel_live"], length_limits={"video": [180, None], "reel": [None, 90]})
+    monkeypatch.setattr(app, "st", ScanUI())
+    params = app._scan_options(settings, False)
+    assert params.length_limits == {"reel": (None, 90)}
+
+
+def test_start_persists_length_limits_and_preserves_unselected_type(monkeypatch):
+    ui = ScanUI()
+    ui.rerun = lambda: None
+    monkeypatch.setattr(app, "st", ui)
+    monkeypatch.setattr(app, "_refresh_keys", lambda *args, **kwargs: {})
+    monkeypatch.setattr(app.config, "load_lines", lambda *args: ["page"])
+    monkeypatch.setattr(app.config, "save_settings", lambda settings: None)
+    monkeypatch.setattr(app.threading, "Thread", lambda **kwargs: SimpleNamespace(start=lambda: None))
+    settings = deepcopy(app.DEFAULT_SETTINGS)
+    settings["scan"]["length_limits"] = {"video": [180, None]}
+    app._start_scan(settings, pipeline.RunParams(14, {"reel"}, length_limits={"reel": (None, 90)}))
+    assert settings["scan"]["length_limits"] == {"video": [180, None], "reel": (None, 90)}
+
+
+def test_invalid_length_limits_block_start_before_services(monkeypatch):
+    errors = []
+    monkeypatch.setattr(app, "_show_error", errors.append)
+    monkeypatch.setattr(app, "_refresh_keys", lambda *args, **kwargs: pytest.fail("must not check keys"))
+    app._start_scan({}, pipeline.RunParams(14, {"video"}, length_limits={"video": (180, 90)}))
+    assert errors == ["Thời lượng Video: tối thiểu không được lớn hơn tối đa."]
+
+
+def test_invalid_length_range_disables_scan_button(monkeypatch):
+    ui = TermsUI(ticked=False)
+    errors = []
+    ui.error = errors.append
+    settings = deepcopy(app.DEFAULT_SETTINGS)
+    settings["terms_accepted_at"] = "2026-10-12"
+    settings["scan"]["length_limits"] = {"video": [180, 90]}
+    _terms_page(monkeypatch, ui, settings)
+    assert ui.start_disabled is True
+    assert errors == ["Thời lượng Video: tối thiểu không được lớn hơn tối đa."]
+
+
+@pytest.mark.parametrize("kind,preset,expected", [
+    ("video", "≥ 3 phút", (180.0, 0.0)),
+    ("reel", "≤ 90 giây", (0.0, 90.0)),
+])
+def test_length_presets_set_both_bounds(monkeypatch, kind, preset, expected):
+    ui = ScanUI()
+    ui.session_state = {}
+    callbacks = {}
+    ui.button = lambda label, **kwargs: callbacks.update({label: kwargs}) or False
+    monkeypatch.setattr(app, "st", ui)
+    app._length_preset_buttons(kind, False)
+    choice = callbacks[preset]
+    choice["on_click"](*choice["args"])
+    assert (ui.session_state[f"scan_length_{kind}_min"],
+            ui.session_state[f"scan_length_{kind}_max"]) == expected
 
 
 class TermsUI(ScanUI):

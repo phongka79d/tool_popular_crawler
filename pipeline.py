@@ -9,7 +9,7 @@ import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -46,6 +46,7 @@ class RunParams:
     min_interactions: int = 0
     min_ratio_follow: float = 0
     match_all: bool = True
+    length_limits: filters.LengthLimits = field(default_factory=dict)
 
 
 def is_post_run(params: RunParams) -> bool:
@@ -640,7 +641,8 @@ def run(
                     emit("filter", f"Tính chỉ số và lọc {len(page_items)} {item_label} theo ngưỡng…")
                     filters.compute_metrics(page_items)
                     page_passed = filters.apply_filter(page_items, params.min_views, params.min_interactions,
-                                                       params.min_ratio_follow, params.match_all)
+                                                       params.min_ratio_follow, params.match_all,
+                                                       params.length_limits, entry["errors"])
                     passed.extend(page_passed)
                     filtered_pages.add(page_url)
                     entry["passed"] = len(page_passed)
@@ -680,12 +682,21 @@ def run(
         if partial:
             remaining = [video for video in collected if video.page_url not in filtered_pages]
             filters.compute_metrics(remaining)
-            extra = filters.apply_filter(remaining, params.min_views, params.min_interactions,
-                                         params.min_ratio_follow, params.match_all)
+            extra = []
+            for entry in run_log["pages"]:
+                page_remaining = [video for video in remaining if video.page_url == entry["url"]]
+                extra.extend(filters.apply_filter(
+                    page_remaining, params.min_views, params.min_interactions,
+                    params.min_ratio_follow, params.match_all, params.length_limits, entry["errors"]))
             passed_ids = {video.video_id for video in passed + extra}
             passed = [video for video in collected if video.video_id in passed_ids]
             for entry in run_log["pages"]:
                 entry["passed"] = sum(video.page_url == entry["url"] for video in passed)
+                for video in remaining:
+                    if video.page_url == entry["url"]:
+                        for note in video.notes:
+                            if note not in entry["errors"]:
+                                entry["errors"].append(note)
         if stop_event.is_set() and not collected:
             emit("done", "Đã dừng theo yêu cầu.", done=True)
             return None
@@ -741,6 +752,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--min-interactions", type=int, default=None)
     parser.add_argument("--min-ratio", type=float, default=None,
                         help="Lượt xem tối thiểu so với follower (×); 0 tắt")
+    for kind in ("video", "reel"):
+        for bound in ("min", "max"):
+            parser.add_argument(f"--{kind}-{bound}-seconds", type=float, default=None,
+                                help="Thời lượng tính bằng giây; 0 = không giới hạn")
     parser.add_argument("--any", action="store_true",
                         help="Giữ video đạt một trong các điều kiện (mặc định: đạt tất cả)")
     args = parser.parse_args(argv)
@@ -754,7 +769,19 @@ def main(argv: list[str] | None = None) -> int:
     if min_views < 0 or min_interactions < 0 or min_ratio < 0:
         parser.error("Ngưỡng tối thiểu không được âm.")
     match_all = False if args.any else settings["scan"].get("match_all", True)
-    params = RunParams(args.days, formats, min_views, min_interactions, min_ratio, match_all)
+    length_limits = {}
+    for kind in ("video", "reel"):
+        saved = settings["scan"].get("length_limits", {}).get(kind, (None, None))
+        length_limits[kind] = tuple(
+            (getattr(args, f"{kind}_{bound}_seconds") if getattr(args, f"{kind}_{bound}_seconds") is not None
+             else saved[index]) or None
+            for index, bound in enumerate(("min", "max"))
+        )
+    problem = filters.validate_length_limits(length_limits)
+    if problem:
+        parser.error(problem)
+    params = RunParams(args.days, formats, min_views, min_interactions, min_ratio, match_all,
+                       length_limits if formats != {"post"} else {})
     stop = threading.Event()
     import signal
     previous = signal.signal(signal.SIGINT, lambda *_: stop.set())

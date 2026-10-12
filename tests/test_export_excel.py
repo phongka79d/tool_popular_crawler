@@ -212,6 +212,24 @@ def test_run_log_shows_ratio_and_combination(tmp_path):
     assert "Đạt một trong hai" in cells
 
 
+@pytest.mark.parametrize("limits,video_text,reel_text", [
+    ({"video": [180, 1200], "reel": [None, 90]}, "3–20 phút", "≤ 90 giây"),
+    ({}, "Không giới hạn", "Không giới hạn"),
+])
+def test_length_limits_appear_in_overview_and_log(tmp_path, limits, video_text, reel_text):
+    params = {"formats": ["video", "reel"], "length_limits": limits}
+    path = xl.export([], {}, {"params": params}, out_dir=tmp_path, now=NOW)
+    workbook = load_workbook(path)
+    try:
+        for name in ("Tổng quan", "Nhật ký"):
+            rows = {row[0]: row[1] for row in workbook[name].iter_rows(values_only=True)
+                    if len(row) > 1 and isinstance(row[0], str)}
+            assert rows["Thời lượng Video"] == video_text
+            assert rows["Thời lượng Reel"] == reel_text
+    finally:
+        workbook.close()
+
+
 def test_sheet_names_in_order(wb) -> None:
     assert wb.sheetnames == ["Tổng quan", "Chi tiết video", "Tổng hợp công thức", "Nhật ký"]
     assert wb.active.title == "Tổng quan"

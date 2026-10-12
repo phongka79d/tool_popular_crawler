@@ -2,6 +2,7 @@
 
 Chỉ số lấy từ phản hồi GraphQL mà trình duyệt nhận khi cuộn và từ JSON nhúng trong HTML ban đầu
 (qua collectors.graphql). Các selector và tên tab nằm trong config/selectors.json.
+Tiến độ cuối tab báo riêng số mục trong ngày quét bị bỏ qua vì chưa chọn loại (kể cả Live/phát lại).
 """
 from __future__ import annotations
 
@@ -314,6 +315,7 @@ class _Collector:
         self._old_formats: set[str] = set()
         self._old_post_ids: set[str] = set()
         self._live_ids: set[str] = set()
+        self._excluded_by_tab: dict[str, dict[str, str]] = {}
 
     def add(self, items: list[dict], tab_format: str) -> None:
         for item in items:
@@ -321,7 +323,17 @@ class _Collector:
             fmt = item.get("format")
             if video_id and ("post" not in self._formats or fmt == "post"):
                 self.items_seen += 1
-            if not video_id or fmt not in self._base_formats:
+            if not video_id:
+                continue
+            if fmt not in self._base_formats:
+                posted_at = item.get("posted_at")
+                if (fmt in {"video", "reel", "post"} and posted_at is not None
+                        and not is_older_than(posted_at, self._days)):
+                    key = _dedupe_key(item)
+                    if item.get("is_live"):
+                        self._live_ids.add(key)
+                    self._excluded_by_tab.setdefault(tab_format, {})[key] = video_kind(
+                        fmt, key in self._live_ids)
                 continue
             posted_at = item.get("posted_at")
             if posted_at is not None and is_older_than(posted_at, self._days):
@@ -339,8 +351,11 @@ class _Collector:
             if item.get("is_live"):
                 self._live_ids.add(key)
             is_live = key in self._live_ids
-            if video_kind(fmt, is_live) not in self._formats:
-                self._by_id.pop(key, None)
+            kind = video_kind(fmt, is_live)
+            if kind not in self._formats:
+                existing = self._by_id.pop(key, None)
+                if posted_at is not None or existing is not None and existing.get("posted_at") is not None:
+                    self._excluded_by_tab.setdefault(tab_format, {})[key] = kind
                 continue
             existing = self._by_id.get(key)
             if existing is None:
@@ -349,6 +364,18 @@ class _Collector:
                     self._by_id[key]["is_live"] = True
                 continue
             graphql.merge_record(existing, item)
+
+    def excluded_summary(self, tab_format: str) -> str:
+        """Count distinct excluded items in this tab only when their date is in range."""
+        labels = {"video": "Video thường", "reel": "Reel", "video_live": "Video (Live)",
+                  "reel_live": "Reel (Live)", "post": "Bài đăng"}
+        counts: dict[str, int] = {}
+        for kind in self._excluded_by_tab.get(tab_format, {}).values():
+            counts[kind] = counts.get(kind, 0) + 1
+        return " · ".join(
+            f"bỏ qua {counts[kind]} mục {label} vì chưa chọn {label} (trong số ngày quét)"
+            for kind, label in labels.items() if kind in counts
+        )
 
     def count(self) -> int:
         return sum(item.get("posted_at") is not None for item in self._by_id.values())
@@ -666,12 +693,14 @@ class FacebookScanner:
                     self.scan_errors.append(f"Tab {label}: {reason}")
                     logger.warning("Tab %s của %s: %s", tab, page_url, reason)
                 found = collector.count() - found_before
-                logger.info("Tab %s của %s: %d %s, dừng vì %s", tab, page_url, found, noun, reason)
+                excluded = collector.excluded_summary(fmt)
+                note = f" · {excluded}" if excluded else ""
+                logger.info("Tab %s của %s: %d %s, dừng vì %s%s", tab, page_url, found, noun, reason, note)
                 if found_before:
                     report(f"Tab {label} xong: thêm {found} {noun} mới (không tính {noun} đã thấy ở tab trước), "
-                           f"dừng vì {reason}")
+                           f"dừng vì {reason}{note}")
                 else:
-                    report(f"Tab {label} xong: {found} {noun}, dừng vì {reason}")
+                    report(f"Tab {label} xong: {found} {noun}, dừng vì {reason}{note}")
         finally:
             page.remove_listener("requestfinished", on_finished)
             self._export_cookies()

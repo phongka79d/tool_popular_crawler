@@ -158,6 +158,35 @@ def test_post_ignores_ratio():
     assert not passes(make_video(format="post", interactions=10), min_interactions=200, min_ratio_follow=10, match_all=False)
 
 
+@pytest.mark.parametrize("kind,expected", [("video", True), ("reel", False),
+                                          ("video_live", True), ("reel_live", False)])
+def test_length_limits_are_independent_and_live_uses_base(kind, expected):
+    video = make_video(format=kind, duration_s=120, views=100_000)
+    limits = {"video": (60, None), "reel": (None, 90)}
+    assert passes(video, min_views=50_000, match_all=False, length_limits=limits) is expected
+
+
+def test_length_boundaries_order_counts_and_unknown_note():
+    videos = [make_video(str(index), format="reel", duration_s=duration)
+              for index, duration in enumerate((30, 90, 91, None, 29))]
+    notes = []
+    kept = apply_filter(videos, length_limits={"reel": (30, 90)}, length_notes=notes)
+    assert [video.video_id for video in kept] == ["0", "1", "3"]
+    assert notes == ["Bỏ 1 reel dài hơn 90 giây.", "Bỏ 1 reel ngắn hơn 30 giây."]
+    assert any("Chưa biết thời lượng" in note for note in videos[3].notes)
+    apply_filter(videos, length_limits={"reel": (30, 90)})
+    assert sum("Chưa biết thời lượng" in note for note in videos[3].notes) == 1
+
+
+def test_no_length_limits_preserve_defaults_and_posts_ignore_them():
+    video = make_video(duration_s=None)
+    assert apply_filter([video]) == [video]
+    assert video.notes == []
+    post = make_video(format="post", duration_s=1, interactions=200)
+    assert passes(post, min_interactions=200, length_limits={"post": (180, None), "video": (180, None)})
+    assert post.notes == []
+
+
 @pytest.mark.parametrize("parts,total", [((10, 20, 30), 60), ((10, None, 5), 15), ((None, None, None), None), ((0, None, None), 0)])
 def test_interactions_sum_known_components(parts, total):
     video = make_video(format="post", reactions=parts[0], comments=parts[1], shares=parts[2])

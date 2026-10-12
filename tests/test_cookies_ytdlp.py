@@ -454,6 +454,70 @@ def test_reel_seen_on_reels_and_videos_tabs_is_one_record_with_merged_counts():
     assert (rows[0]["views"], rows[0]["comments"], rows[0]["shares"]) == (454108, 12, 7)
 
 
+def test_excluded_kinds_count_unique_in_range_items_per_tab(monkeypatch):
+    monkeypatch.setattr(facebook, "is_older_than", lambda timestamp, days: timestamp == 1)
+    collector = facebook._Collector({"reel"}, 30, 100)
+    replay = {"video_id": "1001", "format": "video", "is_live": True,
+              "url": "https://www.facebook.com/Example/videos/1001/", "posted_at": 2}
+    duplicate = {**replay, "video_id": "different-story-id"}
+    ordinary = {**replay, "video_id": "1002", "is_live": False,
+                "url": "https://www.facebook.com/Example/videos/1002/"}
+    collector.add([replay, duplicate, ordinary,
+                   {**ordinary, "video_id": "old", "posted_at": 1,
+                    "url": "https://www.facebook.com/Example/videos/1003/"},
+                   {**ordinary, "video_id": "unknown", "posted_at": None,
+                    "url": "https://www.facebook.com/Example/videos/1004/"}], "video")
+    note = collector.excluded_summary("video")
+    assert "bỏ qua 1 mục Video (Live) vì chưa chọn Video (Live)" in note
+    assert "bỏ qua 1 mục Video thường vì chưa chọn Video thường" in note
+    assert "(trong số ngày quét)" in note
+    assert collector.excluded_summary("reel") == ""
+
+
+def test_reel_does_not_hide_different_ordinary_video_with_same_story_id():
+    collector = facebook._Collector({"video", "reel"}, 30, 100)
+    reel = {"video_id": "shared-story-id", "format": "reel", "posted_at": 1_900_000_000,
+            "url": "https://www.facebook.com/reel/1001/"}
+    ordinary = {**reel, "format": "video", "duration_s": 240,
+                "url": "https://www.facebook.com/Example/videos/1002/"}
+    collector.add([reel], "reel")
+    collector.add([ordinary], "video")
+    assert [(row["format"], row["url"]) for row in collector.videos()] == [
+        ("reel", reel["url"]), ("video", ordinary["url"]),
+    ]
+
+
+@pytest.mark.parametrize("include_live", [False, True])
+def test_scan_page_reports_unselected_replays_without_counting_them_twice(
+    monkeypatch, caplog, include_live,
+):
+    progress = []
+    scanner = facebook.FacebookScanner(settings={"scan": {}})
+    scanner._page = SimpleNamespace(on=lambda *args: None, remove_listener=lambda *args: None)
+    monkeypatch.setattr(scanner, "_export_cookies", lambda: None)
+    reel = {"video_id": "1002", "format": "reel", "posted_at": 1_900_000_000,
+            "url": "https://www.facebook.com/reel/1002/"}
+    replay = {"video_id": "1001", "format": "video", "is_live": True,
+              "posted_at": 1_900_000_000, "duration_s": 10819.93,
+              "url": "https://www.facebook.com/Example/videos/1001/"}
+
+    def scan_tab(url, fmt, collector, *args):
+        collector.add([reel, replay, dict(replay)], fmt)
+        return "không có video mới sau 4 lần cuộn"
+
+    monkeypatch.setattr(scanner, "_scan_tab", scan_tab)
+    caplog.set_level("INFO", logger="collectors.facebook")
+    formats = {"video", "reel", "video_live"} if include_live else {"video", "reel"}
+    rows = scanner.scan_page("https://www.facebook.com/Example", 30, formats, 100,
+                             on_progress=progress.append)
+    assert len(rows) == (2 if include_live else 1)
+    completed = next(message for message in progress if message.startswith("Tab Video xong"))
+    assert "thêm 0 video mới" in completed
+    note = "bỏ qua 1 mục Video (Live) vì chưa chọn Video (Live) (trong số ngày quét)"
+    assert (note in completed) is not include_live
+    assert (note in caplog.text) is not include_live
+
+
 def test_posts_without_media_id_in_link_dedupe_by_post_id():
     collector = facebook._Collector({"post"}, 30, 100)
     collector.add([{"video_id": "a", "format": "post", "posted_at": 1_900_000_000, "url": "https://www.facebook.com/photo/?fbid=1&set=a.2"},

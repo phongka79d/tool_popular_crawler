@@ -19,6 +19,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
 import config
+from filters import length_limit_text
 from models import KIND_LABELS, Video, video_kind
 from normalize import to_vn_datetime
 
@@ -549,11 +550,17 @@ def _param_rows(params: dict) -> list[list[Any]]:
     """Render scan parameters identically in the overview and run log."""
     rows = []
     for key, value in params.items():
+        if key == "length_limits":
+            continue
         if key == "formats":
             value = ", ".join(KIND_LABELS.get(kind, kind) for kind in sorted(value))
         elif key == "match_all":
             value = "Đạt cả hai điều kiện" if value else "Đạt một trong hai"
         rows.append([_PARAM_LABELS.get(key, key), value])
+    if set(params.get("formats") or []) != {"post"}:
+        limits = params.get("length_limits") or {}
+        for kind, label in (("video", "Video"), ("reel", "Reel")):
+            rows.append([f"Thời lượng {label}", length_limit_text(limits.get(kind, (None, None)))])
     return rows
 
 
