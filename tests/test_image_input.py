@@ -119,7 +119,8 @@ def test_describe_images_sends_all_resized_images_once():
             image = Image.open(io.BytesIO(base64.b64decode(part["image_url"]["url"].split(",")[1])))
             assert image.size == (1024, 256)
             assert image.format == "JPEG"
-        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="Read image text"))], usage=None)
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="Read image text"))],
+                               usage=SimpleNamespace(total_tokens=1800))
     client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
-    assert llm_client.describe_images(client, "model", [data.getvalue()] * 2, "Caption", "low") == "Read image text"
+    assert llm_client.describe_images(client, "model", [data.getvalue()] * 2, "Caption", "low") == ("Read image text", 1800)
     assert len(calls) == 1

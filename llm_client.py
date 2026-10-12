@@ -133,8 +133,8 @@ def check_vision(base_url: str, api_key: str, model: str) -> bool:
 
 
 def describe_images(client: OpenAI, model: str, images: list[bytes], caption: str,
-                    reasoning_effort: str | None) -> str:
-    """Read all post images in one request; never invent illegible image text."""
+                    reasoning_effort: str | None) -> tuple[str, int]:
+    """Read all post images in one request; never invent illegible image text. Returns (text, total tokens)."""
     content = [{"type": "text", "text": (
         "Đọc các ảnh theo thứ tự. Với từng ảnh, chép nguyên văn toàn bộ chữ nhìn thấy; "
         "chữ không đọc rõ thì ghi không đọc rõ, không đoán. Sau đó mô tả ngắn bố cục "
@@ -148,8 +148,8 @@ def describe_images(client: OpenAI, model: str, images: list[bytes], caption: st
             buffer = io.BytesIO()
             image.save(buffer, format="JPEG", quality=85)
         content.append(_image_part(buffer.getvalue(), "image/jpeg"))
-    text, _, _ = _chat(client, model, [{"role": "user", "content": content}], None, False, reasoning_effort)
-    return text
+    text, tokens, _ = _chat(client, model, [{"role": "user", "content": content}], None, False, reasoning_effort)
+    return text, tokens
 
 
 

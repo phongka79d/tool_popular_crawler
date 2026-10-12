@@ -295,10 +295,11 @@ def run(
                         images = download_images(video.image_urls)
                         say(f"AI đọc {len(images)} ảnh…")
                         if images:
-                            video.transcript = llm_client.describe_images(
+                            video.transcript, image_tokens = llm_client.describe_images(
                                 llm_instance(), settings["llm"]["model"], images, video.caption,
                                 llm_client.reasoning_effort(settings),
                             )
+                            add_usage("llm_tokens", image_tokens)
                             if video.transcript:
                                 video.transcript_status = "images"
                                 db.save_transcript(video.video_id, video.transcript, "images", video.hook)

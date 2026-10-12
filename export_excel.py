@@ -542,7 +542,14 @@ def _text_height(text: str, chars_per_line: int) -> float:
 def _fmt_time(value: Any) -> str | None:
     if value is None or value == "":
         return None
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError:
+            return value
     if isinstance(value, datetime):
+        if value.tzinfo is not None:  # thời điểm lưu theo UTC: đổi sang giờ Việt Nam
+            value = to_vn_datetime(int(value.timestamp()))
         return value.strftime("%d/%m/%Y %H:%M:%S")
     if isinstance(value, (int, float)):
         return to_vn_datetime(int(value)).strftime("%d/%m/%Y %H:%M:%S")

@@ -43,7 +43,7 @@ SUMMARY = {
 
 RUN_LOG = {
     "started_at": 1_760_000_000,
-    "finished_at": "2026-10-12 09:04:00",
+    "finished_at": "2026-10-12T08:27:31.344983+00:00",
     "params": {
         "days": 14,
         "formats": {"video", "reel"},
@@ -374,8 +374,8 @@ def test_summary_sheet_tables_and_commentary(wb) -> None:
 
 def test_run_log_sheet_contents(wb) -> None:
     ws = wb["Nhật ký"]
-    assert ws.cell(_find_row(ws, "Kết thúc"), 2).value == "2026-10-12 09:04:00"
-    assert isinstance(ws.cell(_find_row(ws, "Bắt đầu"), 2).value, str)
+    assert ws.cell(_find_row(ws, "Kết thúc"), 2).value == "12/10/2026 15:27:31"  # UTC+7
+    assert ws.cell(_find_row(ws, "Bắt đầu"), 2).value == "09/10/2025 15:53:20"
 
     assert ws.cell(_find_row(ws, "Lượt xem tối thiểu"), 2).value == 10000
     assert ws.cell(_find_row(ws, "Tương tác tối thiểu"), 2).value == 0
