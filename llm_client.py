@@ -300,12 +300,15 @@ def _chat(
     Endpoint từ chối response_format, thinking, reasoning_effort hoặc temperature (400; Claude 4.7+ chỉ nhận
     temperature 1) thì gọi lại không kèm tham số đó; endpoint bắt buộc max_tokens thì gọi lại kèm max_tokens.
     """
+    # Anthropic (đo thật): response_format json_object và temperature < 1 (Claude 4.7+) bị từ chối 400,
+    # reasoning_effort bị bỏ qua. Không gửi các tham số đó để mỗi lần gọi chỉ còn 1 request.
+    anthropic = is_anthropic(str(getattr(client, "base_url", "")))
     kwargs: dict[str, Any] = {"model": model, "messages": messages}
-    if temperature is not None:
+    if temperature is not None and not anthropic:
         kwargs["temperature"] = temperature
     if not thinking:
         kwargs["extra_body"] = THINKING_OFF
-    elif reasoning_effort:
+    elif reasoning_effort and not anthropic:
         kwargs["reasoning_effort"] = reasoning_effort
 
     def create(**extra: Any) -> Any:
@@ -330,7 +333,7 @@ def _chat(
                 else:
                     raise
 
-    if json_mode:
+    if json_mode and not anthropic:
         try:
             resp = create(response_format=JSON_RESPONSE_FORMAT)
         except Exception as exc:

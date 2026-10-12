@@ -166,7 +166,17 @@ class TestWriteAnalysis:
 
         assert "reasoning_effort" not in comp.calls[0]
 
-    def test_claude_temperature_and_required_max_tokens_are_handled(self):
+    def test_anthropic_gets_one_request_without_params_it_rejects(self):
+        client, comp = fake_client(_reply(json.dumps(VALID), total=5))
+        client.base_url = "https://api.anthropic.com/v1/"
+
+        out = llm_client.write_analysis(client, "claude-haiku-5-5", VIDEO, LABELS, SETTINGS)
+
+        assert out == {**VALID, "_usage": 5}
+        (call,) = comp.calls
+        assert not {"response_format", "temperature", "reasoning_effort"} & set(call)
+
+    def test_rejected_temperature_and_required_max_tokens_are_handled(self):
         temperature = FakeStatusError("Error code: 400 - temperature: only 1 is supported for this model")
         max_tokens = FakeStatusError("Error code: 400 - max_tokens: Field required")
         client, comp = fake_client(temperature, max_tokens, _reply(json.dumps(VALID), total=9))
