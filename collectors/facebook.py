@@ -606,7 +606,11 @@ class FacebookScanner:
                     logger.warning("Tab %s của %s: %s", tab, page_url, reason)
                 found = collector.count() - found_before
                 logger.info("Tab %s của %s: %d %s, dừng vì %s", tab, page_url, found, noun, reason)
-                report(f"Tab {label} xong: {found} {noun}, dừng vì {reason}")
+                if found_before:
+                    report(f"Tab {label} xong: thêm {found} {noun} mới (không tính {noun} đã thấy ở tab trước), "
+                           f"dừng vì {reason}")
+                else:
+                    report(f"Tab {label} xong: {found} {noun}, dừng vì {reason}")
         finally:
             page.remove_listener("response", on_response)
             self._export_cookies()
