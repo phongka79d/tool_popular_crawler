@@ -127,3 +127,12 @@ def test_storage_is_not_secure_when_backend_lookup_fails(stub, monkeypatch):
 )
 def test_mask_shows_only_last_four_characters_of_long_keys(key, expected):
     assert keys.mask(key) == expected
+
+
+def test_set_key_refuses_plaintext_backend_and_stores_nothing(stub, monkeypatch):
+    monkeypatch.setattr(
+        sys.modules["keyring"], "get_keyring", lambda: _backend("keyring.backends.file", "PlaintextKeyring")
+    )
+    with pytest.raises(RuntimeError):
+        keys.set_key("jev", "sk-jev-test-a91f")
+    assert stub == {}

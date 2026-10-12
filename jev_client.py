@@ -111,7 +111,7 @@ def build_questions(taxonomy: dict) -> dict[str, Choice | Noul | Score]:
             criteria=dict(taxonomy["structure"]),
         ),
         "cta": Choice(
-            instructions="Kêu gọi hành động ở cuối là gì?",
+            instructions="Lời kêu gọi hành động trong `transcript` hoặc `caption` là gì? Chọn `khong_co` nếu không có CTA, hoặc `khac` nếu có CTA nhưng không thuộc các nhóm liệt kê.",
             criteria=dict(taxonomy["cta"]),
         ),
         "hook_strength": Score(

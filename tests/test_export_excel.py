@@ -18,6 +18,7 @@ HEADERS = [
     "View", "Cảm xúc", "Bình luận", "Chia sẻ", "View/Follower", "Hệ số so trung vị kênh",
     "Tỷ lệ tương tác", "Tỷ lệ share",
     "Chủ đề bài", "Tóm tắt", "Caption", "Nội dung thoại", "Hook gốc",
+    "Góc nhìn", "Mẫu hook điền chỗ trống", "Vị trí CTA",
     "Nhóm chủ đề", "Kiểu hook", "Độ mạnh hook", "Cấu trúc", "CTA",
     "Liên quan ngành (%)", "Làm lại được (%)", "Điểm công thức (0–100)", "Cờ rủi ro",
     "Lý do viral", "Gợi ý 1", "Gợi ý 2", "Gợi ý 3",
@@ -108,6 +109,9 @@ def _videos() -> list[Video]:
                 "chu_de_bai": "Dấu hiệu nhận biết bệnh",
                 "tom_tat": "Tóm tắt A",
                 "hook_goc": "Bạn có biết…",
+                "goc_nhin": "Góc nhìn của dược sĩ tư vấn tại quầy",
+                "mau_hook_dien_cho_trong": "Bạn có biết [dấu hiệu] báo hiệu [vấn đề] không?",
+                "vi_tri_cta": "Cuối video, sau phần giải thích dấu hiệu",
                 "ly_do_viral": "Giả thuyết A",
                 "goi_y_nhan_ban": [
                     {"hook_moi": "Chủ nhà thuốc nào cũng…", "y_tuong": "Kể tình huống"},
@@ -183,7 +187,7 @@ def test_sheet_names_in_order(wb) -> None:
 
 
 def test_detail_header_order_matches_plan(detail) -> None:
-    assert detail.max_column == len(HEADERS) == 34
+    assert detail.max_column == len(HEADERS) == 37
     assert [detail.cell(1, c).value for c in range(1, len(HEADERS) + 1)] == HEADERS
 
 
@@ -200,7 +204,7 @@ def test_rows_sorted_by_score_desc_with_missing_score_last(detail) -> None:
 
 def test_freeze_panes_and_autofilter(detail) -> None:
     assert detail.freeze_panes == "C2"
-    assert detail.auto_filter.ref == "A1:AH5"
+    assert detail.auto_filter.ref == "A1:AK5"
 
 
 def test_risky_row_has_light_yellow_fill(detail) -> None:
@@ -234,7 +238,10 @@ def test_number_and_percent_formats(detail) -> None:
 
 
 def test_long_text_columns_wrap_at_width_60(detail) -> None:
-    for header in ("Tóm tắt", "Caption", "Nội dung thoại", "Hook gốc", "Gợi ý 1", "Ghi chú"):
+    for header in (
+        "Tóm tắt", "Caption", "Nội dung thoại", "Hook gốc",
+        "Góc nhìn", "Mẫu hook điền chỗ trống", "Vị trí CTA", "Gợi ý 1", "Ghi chú",
+    ):
         col = _col(header)
         assert _width(detail, col) == 60, header
         assert detail.cell(2, col).alignment.wrap_text is True, header
@@ -265,6 +272,16 @@ def test_detail_values_map_from_jev_llm_and_metrics(detail) -> None:
     )
     assert detail.cell(row, _col("Gợi ý 3")).value == "Hook: H3\nÝ tưởng: Y3"
     assert detail.cell(row, _col("Ghi chú")).value is None
+
+
+@pytest.mark.parametrize(("header", "expected"), [
+    ("Góc nhìn", "Góc nhìn của dược sĩ tư vấn tại quầy"),
+    ("Mẫu hook điền chỗ trống", "Bạn có biết [dấu hiệu] báo hiệu [vấn đề] không?"),
+    ("Vị trí CTA", "Cuối video, sau phần giải thích dấu hiệu"),
+])
+def test_analysis_formula_fields_export_from_llm(detail, header, expected) -> None:
+    assert detail.cell(4, _col(header)).value == expected
+    assert detail.cell(5, _col(header)).value is None
 
 
 def test_risk_flags_uncertain_labels_and_failed_transcript_in_notes(detail) -> None:

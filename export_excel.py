@@ -172,6 +172,9 @@ COLUMNS: tuple[_Column, ...] = (
     _Column("Caption", lambda v, _: v.caption, long=True),
     _Column("Nội dung thoại", lambda v, _: v.transcript, long=True),
     _Column("Hook gốc", lambda v, _: _llm(v, "hook_goc") or v.hook, long=True),
+    _Column("Góc nhìn", lambda v, _: _llm(v, "goc_nhin"), long=True),
+    _Column("Mẫu hook điền chỗ trống", lambda v, _: _llm(v, "mau_hook_dien_cho_trong"), long=True),
+    _Column("Vị trí CTA", lambda v, _: _llm(v, "vi_tri_cta"), long=True),
     # Công thức
     _Column("Nhóm chủ đề", lambda v, _: _jev(v, "topic"), width=24),
     _Column("Kiểu hook", lambda v, _: _jev(v, "hook_type"), width=22),

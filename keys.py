@@ -38,11 +38,16 @@ def get_key(name: str) -> str | None:
 
 
 def set_key(name: str, value: str) -> None:
-    """Store a key after trimming whitespace. Backend errors propagate; nothing falls back to a file."""
+    """Store a key after trimming whitespace. Refuses insecure backends (never plaintext); backend errors propagate."""
     _check_name(name)
     cleaned = value.strip()
     if not cleaned:
         raise ValueError(f"API key [{name}] đang trống.")
+    if not storage_secure():
+        raise RuntimeError(
+            "Kho bảo mật của hệ điều hành không an toàn hoặc không khả dụng. "
+            "Không lưu key dạng chữ thường."
+        )
     _keyring().set_password(SERVICE_NAME, name, cleaned)
     logger.info("Đã lưu key [%s]: %s", name, mask(cleaned))
 

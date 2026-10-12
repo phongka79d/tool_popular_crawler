@@ -231,14 +231,51 @@ def test_build_questions_covers_every_label_question():
 
 
 def test_taxonomy_has_escape_options_and_labels_for_every_code():
-    for key in ("topic", "hook_type", "structure"):
+    for key in jev_client.CHOICE_KEYS:
         assert "khac" in TAXONOMY[key]
-    assert "khong_co" in TAXONOMY["cta"]
-    for key in ("topic", "hook_type", "structure", "cta"):
+        assert list(TAXONOMY[key])[-1] == "khac"
         for code in TAXONOMY[key]:
-            assert code in TAXONOMY["labels"], code
+            assert TAXONOMY["labels"][code], code
+    assert "khong_co" in TAXONOMY["cta"]
     assert "risk_absolute" in TAXONOMY["labels"]
     assert "risk_compare" in TAXONOMY["labels"]
+
+
+def test_cta_question_references_both_source_fields_and_escape_options():
+    question = jev_client.build_questions(TAXONOMY)["cta"]
+    assert "`transcript`" in question.instructions
+    assert "`caption`" in question.instructions
+    assert question.criteria == TAXONOMY["cta"]
+    assert question.criteria["khac"] != question.criteria["khong_co"]
+    assert "Có lời kêu gọi hành động" in question.criteria["khac"]
+    assert "Không có lời kêu gọi hành động" in question.criteria["khong_co"]
+
+
+@pytest.mark.parametrize("code", [
+    "chuyen_gia_uy_tin", "pha_mach_bat_ngo", "hua_hen_ket_qua",
+    "goc_nhin_ca_nhan", "hanh_trinh_thay_doi", "menh_lenh_truc_tiep",
+    "xung_dot_tranh_cai", "tiet_lo_ket_qua_truoc",
+])
+def test_reference_hook_types_have_examples_and_display_labels(raw, code):
+    criteria = jev_client.build_questions(TAXONOMY)["hook_type"].criteria
+    assert code in criteria
+    assert "Ví dụ:" in criteria[code]
+    raw["hook_type"] = _choice(code)
+    out = jev_client.interpret_labels(raw, SETTINGS, TAXONOMY)
+    assert out["hook_type_code"] == code
+    assert out["hook_type"] == TAXONOMY["labels"][code]
+
+
+def test_hot_take_uses_stable_existing_code():
+    assert "hot take" in TAXONOMY["hook_type"]["xung_dot_tranh_cai"]
+    assert "quan_diem_gay_tranh_cai" not in TAXONOMY["hook_type"]
+
+
+def test_other_cta_is_preserved_as_distinct_from_no_cta(raw):
+    raw["cta"] = _choice("khac")
+    out = jev_client.interpret_labels(raw, SETTINGS, TAXONOMY)
+    assert out["cta_code"] == "khac"
+    assert out["cta"] == "Khác"
 
 
 # --- ask_labels ----------------------------------------------------------------
