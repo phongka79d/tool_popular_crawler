@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import logging
 import os
 import queue
 import subprocess
@@ -10,7 +11,6 @@ import sys
 import tempfile
 import threading
 import time
-import traceback
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
@@ -20,6 +20,7 @@ from urllib.parse import urlsplit
 import streamlit as st
 from openpyxl import load_workbook
 
+import applog
 import config
 import export_excel
 import filters
@@ -28,7 +29,10 @@ import keys
 import llm_client
 import pipeline
 from collectors import cookies, facebook, transcript
+from collectors.facebook import page_url_problem
 from errors import ServiceError
+
+logger = logging.getLogger("app.ui")
 
 
 SERVICE_LABELS = {"jev": "Jev", "deepgram": "Deepgram", "llm": "LLM"}
@@ -87,9 +91,21 @@ def _redact(text: str, secrets: tuple[str, ...] = ()) -> str:
 
 
 def _error_message(exc: Exception, secrets: tuple[str, ...] = ()) -> str:
+    """Câu báo lỗi cho giao diện; đồng thời ghi lỗi vào nhật ký (lỗi lạ kèm traceback)."""
+    applog.protect(secrets)
     if isinstance(exc, ServiceError):
-        return _redact(str(exc), secrets)
-    return "Không thể hoàn tất thao tác. Kiểm tra kết nối, quyền truy cập và cấu hình rồi thử lại."
+        message = _redact(str(exc), secrets)
+        logger.warning("%s", message)
+        return message
+    logger.error("Lỗi không mong đợi: %s", type(exc).__name__, exc_info=exc)
+    return ("Không thể hoàn tất thao tác. Kiểm tra kết nối, quyền truy cập và cấu hình rồi thử lại. "
+            "Chi tiết trong Nhật ký.")
+
+
+def _show_error(message: str, exc: BaseException | None = None) -> None:
+    """Hiện lỗi vừa xảy ra và ghi vào nhật ký. Chỉ gọi nơi lỗi xảy ra, không ở phần vẽ lại mỗi giây."""
+    logger.warning("%s", message, exc_info=exc)
+    st.error(message)
 
 
 def _install_chromium() -> None:
@@ -109,11 +125,14 @@ def _install_chromium() -> None:
         # Giống playwright/_impl/_transport.py: bản đóng gói tìm Chromium trong chính thư mục ứng dụng.
         env.setdefault("PLAYWRIGHT_BROWSERS_PATH", "0")
     print("Đang tải Chromium lần đầu (~150 MB), vui lòng chờ...", flush=True)
-    # Kế thừa cửa sổ console để người dùng thấy tiến độ và lỗi tải.
+    # Không mở cửa sổ console; tiến độ và lỗi tải ghi vào nhật ký (data/app.log khi chạy bản đóng gói).
     # --no-shell: tool luôn chạy trình duyệt có cửa sổ, không dùng Headless Shell.
-    result = subprocess.run([*command, "install", "chromium", "--no-shell"], env=env)
+    sys.stdout.flush()
+    result = subprocess.run([*command, "install", "chromium", "--no-shell"], env=env,
+                            stdout=sys.stdout, stderr=subprocess.STDOUT,
+                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     if result.returncode or not _browsers_installed(executable):
-        print(f"Tải Chromium thất bại (mã {result.returncode}); thiếu {executable}", flush=True)
+        logger.error("Tải Chromium thất bại (mã %s); thiếu %s", result.returncode, executable)
         raise RuntimeError("Không thể tải Chromium. Kiểm tra mạng và dung lượng ổ đĩa rồi thử lại.")
 
 
@@ -133,7 +152,7 @@ def ensure_browser() -> bool:
         try:
             executor.submit(_install_chromium).result()
         except Exception:
-            traceback.print_exc()  # chẩn đoán trên cửa sổ console; giao diện chỉ hiện thông báo ngắn
+            logger.exception("Không chuẩn bị được trình duyệt quét")
             raise
     return True
 
@@ -224,11 +243,11 @@ def _connect(name: str, candidate: str, base_url: str) -> None:
     cache = st.session_state.svc_models
     if not candidate:
         cache.pop(name, None)
-        st.error("Vui lòng nhập API key trước khi kết nối.")
+        _show_error("Vui lòng nhập API key trước khi kết nối.")
         return
     if name == "llm" and not _is_http_url(base_url):
         cache.pop(name, None)
-        st.error("Địa chỉ endpoint phải bắt đầu bằng https:// hoặc http://.")
+        _show_error("Địa chỉ endpoint phải bắt đầu bằng https:// hoặc http://.")
         return
     try:
         with st.spinner("Đang kết nối..."):
@@ -239,7 +258,7 @@ def _connect(name: str, candidate: str, base_url: str) -> None:
         return
     if not items:
         cache.pop(name, None)
-        st.error("Dịch vụ không trả về model nào. Kiểm tra lại " + ("key và endpoint." if name == "llm" else "key."))
+        _show_error("Dịch vụ không trả về model nào. Kiểm tra lại " + ("key và endpoint." if name == "llm" else "key."))
         return
     cache[name] = {"tag": _model_tag(name, candidate, base_url), "items": items}
 
@@ -413,13 +432,13 @@ def _apply_selection(settings: dict, name: str, selection: dict) -> None:
 
 def _save_service(name: str, candidate: str, settings: dict, selection: dict) -> None:
     if not keys.storage_secure():
-        st.error("Không thể lưu API key: kho bảo mật chưa khả dụng. Hãy bật Windows Credential Manager.")
+        _show_error("Không thể lưu API key: kho bảo mật chưa khả dụng. Hãy bật Windows Credential Manager.")
         return
     if not candidate:
-        st.error("Vui lòng nhập API key trước khi kiểm tra.")
+        _show_error("Vui lòng nhập API key trước khi kiểm tra.")
         return
     if name == "llm" and not _is_http_url(selection["base_url"]):
-        st.error("Địa chỉ endpoint phải bắt đầu bằng https:// hoặc http://.")
+        _show_error("Địa chỉ endpoint phải bắt đầu bằng https:// hoặc http://.")
         return
     try:
         with st.spinner("Đang kiểm tra model đã chọn..."):
@@ -469,7 +488,7 @@ def _import_cookie_file(upload) -> None:
     finally:
         path.unlink(missing_ok=True)
     if not imported:
-        st.error("Không tìm thấy cookie đăng nhập Facebook trong file. Hãy xuất cookie khi đã đăng nhập tài khoản phụ rồi thử lại.")
+        _show_error("Không tìm thấy cookie đăng nhập Facebook trong file. Hãy xuất cookie khi đã đăng nhập tài khoản phụ rồi thử lại.")
         return
     st.session_state.notice = "Đã nạp cookie và lưu phiên Facebook."
     st.rerun()
@@ -480,15 +499,17 @@ def _saved_channels() -> list[str]:
     if not path.exists():
         return []
     lines = (raw.strip() for raw in path.read_text(encoding="utf-8").splitlines())
-    return [line for line in lines if line and not line.startswith("#") and _is_http_url(line)]
+    return [line for line in lines if line and not line.startswith("#") and page_url_problem(line) is None]
 
 
 def _channel_problems(text: str) -> list[str]:
     problems = []
     for number, raw in enumerate(text.splitlines(), start=1):
         line = raw.strip()
-        if line and not line.startswith("#") and not _is_http_url(line):
-            problems.append(f"dòng {number}: {line[:60]}")
+        if line and not line.startswith("#"):
+            problem = page_url_problem(line)
+            if problem:
+                problems.append(f"Dòng {number} ({line[:50]}): {problem}")
     return problems
 
 
@@ -599,26 +620,31 @@ def _service_card(name: str, settings: dict, locked: bool, *, configured: bool, 
 
 def _channels_section(locked: bool) -> None:
     channels_file = config.CONFIG_DIR / "channels.txt"
+    saved_text = channels_file.read_text(encoding="utf-8") if channels_file.exists() else ""
     with st.container(border=True):
         st.markdown("**Kênh cần quét**")
+        saved_problems = _channel_problems(saved_text)
+        if saved_problems:
+            # Danh sách cũ có thể có link nhóm/bài viết: báo ngay, trước khi người dùng bấm Chạy.
+            st.warning("Các link sau sẽ bị bỏ qua khi quét:\n\n" + "\n".join(f"- {p}" for p in saved_problems))
         with st.form("channels_form", border=False):
-            st.caption("Mỗi dòng là một link trang Facebook, bắt đầu bằng https://. Dòng bắt đầu bằng # là ghi chú và bị bỏ qua.")
+            st.caption("Mỗi dòng là link trang chính của một page (fanpage), ví dụ https://www.facebook.com/ten-page. "
+                       "Không hỗ trợ nhóm (group). Dòng bắt đầu bằng # là ghi chú.")
             channels = st.text_area(
-                "Danh sách link kênh", height=160, key="channels_editor", disabled=locked,
-                value=channels_file.read_text(encoding="utf-8") if channels_file.exists() else "")
+                "Danh sách link kênh", height=160, key="channels_editor", disabled=locked, value=saved_text)
             if st.form_submit_button("Lưu danh sách kênh", type="primary", disabled=locked):
                 problems = _channel_problems(channels)
                 if problems:
-                    more = " ..." if len(problems) > 5 else ""
-                    st.error("Chưa lưu. Các dòng sau không phải link bắt đầu bằng https://: " + "; ".join(problems[:5]) + more)
+                    _show_error("Chưa lưu. Sửa các dòng sau:\n\n" + "\n".join(f"- {p}" for p in problems))
                 else:
                     lines = [raw.strip() for raw in channels.splitlines() if raw.strip()]
                     try:
                         channels_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
-                    except OSError:
-                        st.error("Không thể lưu danh sách kênh. Kiểm tra quyền ghi thư mục config.")
+                    except OSError as exc:
+                        _show_error("Không thể lưu danh sách kênh. Kiểm tra quyền ghi thư mục config.", exc)
                     else:
-                        st.session_state.notice = f"Đã lưu {len(lines)} kênh cần quét."
+                        count = sum(1 for line in lines if not line.startswith("#"))
+                        st.session_state.notice = f"Đã lưu {count} kênh cần quét."
                         st.rerun()
 
 
@@ -680,6 +706,9 @@ def _refresh_keys(settings: dict) -> dict:
         with st.spinner("Đang kiểm tra 3 API key..."):
             result = pipeline.check_all_keys(settings)
         result = {name: _redact(str(result[name])) if result[name] else None for name in SERVICE_LABELS}
+        for name, reason in result.items():
+            if reason:
+                logger.warning("Key %s: %s", SERVICE_LABELS[name], reason)
     except Exception as exc:
         message = _error_message(exc)
         result = {name: message for name in SERVICE_LABELS}
@@ -748,7 +777,7 @@ def _start_scan(settings: dict, params: pipeline.RunParams) -> None:
     if any(_refresh_keys(settings).values()):
         st.rerun()  # Panel Trạng thái API key sẽ hiện lỗi sau khi làm mới.
     if not config.load_lines("config/channels.txt"):
-        st.error("Danh sách kênh trống. Vào Cài đặt để nhập các kênh cần quét.")
+        _show_error("Danh sách kênh trống. Vào Cài đặt để nhập các kênh cần quét.")
         return
     events, stop = queue.Queue(), threading.Event()
     worker = threading.Thread(target=_scan_worker, args=(params, copy.deepcopy(settings), events, stop),
@@ -798,8 +827,42 @@ def _download_button(path: Path) -> None:
         with path.open("rb") as data:
             st.download_button("Tải file Excel", data=data, file_name=path.name, mime=XLSX_MIME,
                                type="primary", icon=":material/download:", key=f"download_{path.name}")
-    except OSError:
+    except OSError:  # vẽ lại mỗi giây trong khung trạng thái quét: không ghi nhật ký ở đây
         st.error("Không đọc được file Excel. Kiểm tra quyền truy cập thư mục output.")
+
+
+SCAN_STAGES = (("keys", "Kiểm tra key"), ("scan", "Quét kênh"), ("filter", "Lọc video"),
+               ("analyze", "Phân tích"), ("export", "Xuất Excel"))
+TIMELINE_ROWS = 8
+LOG_MAX_RECORDS = 500
+
+
+def _stage_line(stage: str) -> str:
+    names = [name for name, _ in SCAN_STAGES]
+    position = len(names) if stage == "done" else names.index(stage) if stage in names else -1
+    parts = []
+    for index, (_, label) in enumerate(SCAN_STAGES):
+        if index < position:
+            parts.append(f":green[✓ {label}]")
+        elif index == position:
+            parts.append(f"**● {label}**")
+        else:
+            parts.append(f":gray[○ {label}]")
+    return "  →  ".join(parts)
+
+
+def _progress_bar(progress: pipeline.Progress) -> None:
+    """Thanh tiến độ của bước hiện tại: số video khi đếm được, nếu không thì số kênh."""
+    if progress.steps:
+        fraction = progress.step / progress.steps
+        label = (f"Đã phân tích {progress.step}/{progress.steps} video" if progress.stage == "analyze"
+                 else f"{progress.step}/{progress.steps} video")
+    elif progress.page_total and progress.stage == "scan":
+        fraction = (progress.page_index - 1) / progress.page_total
+        label = f"Kênh {progress.page_index}/{progress.page_total}"
+    else:
+        fraction, label = (1.0, "Xong") if progress.done else (0.0, "")
+    st.progress(min(1.0, max(0.0, fraction)), text=label)
 
 
 def _render_running_scan() -> None:
@@ -808,14 +871,17 @@ def _render_running_scan() -> None:
         elapsed = _format_duration(time.monotonic() - st.session_state.scan_started)
         st.markdown(f"**Đang quét** · đã chạy {elapsed}")
         if progress is not None:
-            total = max(0, progress.page_total)
-            index = max(0, progress.page_index)
-            fraction = min(1.0, index / total) if total else 0.0
-            st.progress(fraction, text=f"Kênh {index}/{total} · {_redact(progress.message)}")
+            st.markdown(_stage_line(progress.stage))
+            _progress_bar(progress)
+            st.markdown(_redact(progress.message))
             if progress.page_url:
                 st.caption(_redact(progress.page_url))
         else:
             st.progress(0.0, text="Đang chuẩn bị quét...")
+        recent = st.session_state.scan_log[-TIMELINE_ROWS:]
+        if recent:
+            st.caption("Diễn biến gần nhất")
+            st.text("\n".join(recent))
         stopping = st.session_state.stop_event.is_set()
         if st.button("Dừng quét", icon=":material/stop_circle:", key="stop_scan", disabled=stopping):
             st.session_state.stop_event.set()
@@ -852,8 +918,10 @@ def _render_scan_status() -> None:
         st.info("Đã kết thúc quét; không có file Excel mới.")
     for message in dict.fromkeys(st.session_state.scan_errors):
         st.error(message)
+    if st.session_state.scan_errors:
+        st.caption("Chi tiết kỹ thuật của từng lỗi nằm trong Nhật ký (nút ở góc trên bên phải).")
     if st.session_state.scan_log:
-        with st.expander("Nhật ký quét"):
+        with st.expander(f"Toàn bộ diễn biến lần quét ({len(st.session_state.scan_log)} bước)"):
             st.text("\n".join(st.session_state.scan_log))
 
 
@@ -879,11 +947,14 @@ def _drain_scan_queue() -> bool:
                     st.session_state.question = None
                     finished = True
             else:
-                st.session_state.progress = event
+                stamp = datetime.now().strftime("%H:%M:%S")
                 if event.message:
-                    st.session_state.scan_log.append(_redact(event.message))
+                    marker = "⚠ " if event.error else ""
+                    st.session_state.scan_log.append(f"{stamp}  {marker}{_redact(event.message)}")
                 if event.error:
                     st.session_state.scan_errors.append(_redact(event.error))
+                else:  # lỗi không đổi bước đang chạy và thanh tiến độ
+                    st.session_state.progress = event
     return finished
 
 
@@ -902,6 +973,7 @@ def _drain_login_queue() -> bool:
                     st.session_state.notice = "Đã đăng nhập Facebook và lưu phiên."
                 else:
                     st.session_state.login_message = "Chưa đăng nhập Facebook thành công. Vui lòng thử lại."
+                    logger.warning("%s", st.session_state.login_message)
             elif kind == "failure":
                 st.session_state.login_message = value
             elif kind == "finished":
@@ -925,8 +997,8 @@ def _results_page() -> None:
     if folder.button("Mở thư mục", icon=":material/folder_open:", width="stretch"):
         try:
             os.startfile(config.OUTPUT_DIR)
-        except (OSError, AttributeError):
-            st.error("Không thể mở thư mục kết quả trên máy này.")
+        except (OSError, AttributeError) as exc:
+            _show_error("Không thể mở thư mục kết quả trên máy này.", exc)
     if not files:
         st.info("Chưa có file Excel nào. Kết quả sẽ hiện ở đây sau mỗi lần quét.")
         return
@@ -938,6 +1010,33 @@ def _results_page() -> None:
             info.caption(f"{datetime.fromtimestamp(stat.st_mtime):%d/%m/%Y %H:%M} · {_format_size(stat.st_size)}")
             with action:
                 _download_button(path)
+
+
+@st.dialog("Nhật ký ứng dụng", width="large")
+def _log_dialog() -> None:
+    """Thông báo và lỗi đã ghi vào data/app.log, mới nhất ở trên; API key luôn được che."""
+    files = {"Lần mở này": applog.LOG_FILE}
+    if applog.PREVIOUS_LOG_FILE.exists():
+        files["Lần mở trước"] = applog.PREVIOUS_LOG_FILE
+    session, scope = st.columns([3, 2], vertical_alignment="center")
+    choice = (session.radio("Phiên", list(files), horizontal=True, label_visibility="collapsed")
+              if len(files) > 1 else next(iter(files)))
+    problems_only = scope.toggle("Chỉ lỗi và cảnh báo", value=True)
+    path = files[choice]
+    records = applog.read_records(problems_only, path)
+    st.caption(f"{path} · mới nhất ở trên")
+    if records:
+        shown = records[-LOG_MAX_RECORDS:][::-1]
+        st.code(applog.redact("\n".join(shown)), language=None, wrap_lines=True, height=420)
+    elif problems_only:
+        st.success("Không có lỗi hay cảnh báo nào.")
+    else:
+        st.info("Nhật ký đang trống.")
+    if st.button("Mở file nhật ký", icon=":material/description:"):
+        try:
+            os.startfile(path)
+        except (OSError, AttributeError) as exc:
+            _show_error("Không mở được file nhật ký trên máy này.", exc)
 
 
 # Fragments refresh only their own part every second; workers communicate solely through queues.
@@ -953,11 +1052,16 @@ else:
 
 def main() -> None:
     st.set_page_config(page_title="Video Công Thức", page_icon="🎬", layout="wide")
+    applog.setup()  # chạy bằng launcher thì đã bật sẵn; `streamlit run app.py` thì bật ở đây
     config.ensure_dirs()
     _init_state()
     # Cửa sổ ứng dụng riêng không có thanh công cụ Streamlit: bỏ khoảng trống mặc định ở đầu trang.
     st.markdown("<style>.block-container{padding-top:1.5rem}</style>", unsafe_allow_html=True)
-    st.markdown("### 🎬 Video Công Thức")
+    title, log_button = st.columns([5, 1], vertical_alignment="center")
+    title.markdown("### 🎬 Video Công Thức")
+    if log_button.button("Nhật ký", icon=":material/receipt_long:", width="stretch",
+                         help="Mọi thông báo và lỗi của ứng dụng (data/app.log)."):
+        _log_dialog()
     st.caption("Tìm video nổi bật trên các kênh Facebook để học công thức nội dung, rồi xuất kết quả ra Excel.")
     try:
         if st.session_state.pop("reset_requested", False):

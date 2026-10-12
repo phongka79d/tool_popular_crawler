@@ -11,7 +11,7 @@ import random
 import re
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlsplit
 
@@ -25,7 +25,7 @@ from playwright.sync_api import sync_playwright
 import config
 from collectors import graphql
 from collectors.cookies import has_login_cookies, load_cookie_file, write_netscape
-from errors import LoginRequired
+from errors import BrowserUnavailable, LoginRequired
 from models import Page
 from normalize import is_older_than, parse_count
 
@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 SEL: dict = config.load_json("selectors.json")
 _TABS: tuple[tuple[str, str], ...] = tuple(SEL["tabs"].items())
+_TAB_LABELS = {"reel": "Reels", "video": "Video"}
 
 FB_HOME = "https://www.facebook.com/"
 FB_COOKIE_URLS = ("https://www.facebook.com/", "https://m.facebook.com/", "https://web.facebook.com/")
@@ -40,6 +41,7 @@ LOCALE = "vi-VN"
 GRAPHQL_MARK = "/api/graphql/"
 NAV_TIMEOUT_MS = 60_000
 RESPONSE_WAIT_MS = 12_000
+HEADER_WAIT_MS = 8_000            # chờ phần đầu trang (tên, follower) hiện sau khi mở page
 WHEEL_STEP_PX = (250, 650)        # mỗi nấc lăn chuột
 WHEEL_GAP_MS = (120, 480)         # nghỉ giữa các nấc
 WHEEL_MAX_STEPS = 14              # tối đa mỗi vòng cuộn
@@ -56,6 +58,10 @@ HIDDEN_WINDOW_ARGS = (
 )
 LOGIN_POLL_S = 2.0
 LOGIN_REQUIRED_MSG = "Phiên Facebook đã hết hạn hoặc bị checkpoint. Vào Cài đặt → Đăng nhập Facebook."
+# Edge chuyển lệnh mở sang phiên đang chạy cùng profile rồi thoát; Playwright chỉ báo trình duyệt đã đóng.
+_PROFILE_BUSY_MARK = "Target page, context or browser has been closed"
+PROFILE_BUSY_MSG = ("Trình duyệt của tool đang mở ở nơi khác (một cửa sổ Video Công Thức khác, hoặc cửa sổ "
+                    "đăng nhập Facebook). Đóng các cửa sổ đó rồi thử lại; nếu vẫn lỗi, khởi động lại máy.")
 
 
 def _is_blocked_url(url: str) -> bool:
@@ -83,6 +89,42 @@ def _as_count(value: object) -> int | None:
     if isinstance(value, str):
         return parse_count(value)
     return value if isinstance(value, int) else None
+
+
+_FB_HOSTS = frozenset({"facebook.com", "www.facebook.com", "m.facebook.com", "web.facebook.com", "mbasic.facebook.com"})
+# Đoạn đầu đường dẫn không phải page: nhóm, bài viết, video lẻ, tính năng của Facebook.
+_NOT_PAGE_SEGMENTS = frozenset({
+    "watch", "events", "marketplace", "gaming", "reel", "reels", "share", "story.php", "permalink.php",
+    "photo", "photo.php", "photos", "video.php", "hashtag", "search", "messages", "friends", "stories",
+    "live", "ads", "business", "help", "login", "login.php", "home.php", "notifications", "bookmarks",
+})
+
+
+def page_url_problem(url: str) -> str | None:
+    """Lý do link không phải trang chính của một page/profile Facebook; None nếu dùng được.
+
+    Chỉ hỗ trợ page (fanpage): nhóm không có tab Reels/Video và không có số follower.
+    """
+    parsed = urlsplit(url.strip())
+    if parsed.scheme not in ("http", "https") or parsed.netloc.lower() not in _FB_HOSTS:
+        return "Không phải link Facebook (cần dạng https://www.facebook.com/ten-page)."
+    parts = [part for part in parsed.path.split("/") if part]
+    if not parts:
+        return "Thiếu tên page sau facebook.com/."
+    head = parts[0].lower()
+    if head == "groups":
+        return "Link nhóm (group) không được hỗ trợ. Chỉ dùng link page (fanpage)."
+    if head in _NOT_PAGE_SEGMENTS:
+        return "Đây là link bài viết/video/tính năng, không phải page. Mở page rồi chép link trang chính."
+    if head == "profile.php":
+        return None if parse_qs(parsed.query).get("id") else "Link profile.php thiếu id=."
+    if head == "people":
+        return None if len(parts) == 3 else "Link /people/ phải có dạng /people/ten/ID."
+    if head == "pg":
+        return None if len(parts) == 2 else "Link /pg/ phải có dạng /pg/ten-page."
+    if len(parts) != 1:
+        return "Dùng link trang chính của page (https://www.facebook.com/ten-page), không kèm /videos, /posts..."
+    return None
 
 
 def tab_url(page_url: str, tab: str) -> str:
@@ -161,7 +203,13 @@ def _persistent_context(hidden: bool) -> Iterator[BrowserContext]:
     """
     config.ensure_dirs()
     with sync_playwright() as pw:
-        ctx = pw.chromium.launch_persistent_context(str(config.PROFILE_DIR), **_launch_options(hidden))
+        try:
+            ctx = pw.chromium.launch_persistent_context(str(config.PROFILE_DIR), **_launch_options(hidden))
+        except PlaywrightError as exc:
+            if _PROFILE_BUSY_MARK not in str(exc):
+                raise
+            logger.warning("Profile trình duyệt đang được dùng: %s", exc)
+            raise BrowserUnavailable("facebook", PROFILE_BUSY_MSG) from exc
         try:
             yield ctx
         finally:
@@ -230,13 +278,16 @@ class _Collector:
     def __init__(self, formats: set[str], days: int, max_videos: int) -> None:
         self._formats = formats
         self._days = days
-        self._max = max_videos
+        self.limit = max_videos
+        self.items_seen = 0  # mọi video đọc được, kể cả khác định dạng hoặc quá cũ
         self._by_id: dict[str, dict] = {}
         self._old_formats: set[str] = set()
 
     def add(self, items: list[dict], tab_format: str) -> None:
         for item in items:
             video_id = item.get("video_id")
+            if video_id:
+                self.items_seen += 1
             fmt = item.get("format")
             if not video_id or fmt not in self._formats:
                 continue
@@ -258,13 +309,13 @@ class _Collector:
         return len(self._by_id)
 
     def full(self) -> bool:
-        return len(self._by_id) >= self._max
+        return len(self._by_id) >= self.limit
 
     def done(self, tab_format: str) -> bool:
         return tab_format in self._old_formats
 
     def videos(self) -> list[dict]:
-        return list(self._by_id.values())[: self._max]
+        return list(self._by_id.values())[: self.limit]
 
 
 def _drain(pending: list[Response], collector: _Collector, tab_format: str) -> None:
@@ -352,11 +403,21 @@ class FacebookScanner:
     def get_page_info(self, page_url: str) -> Page:
         """Tên và số follower của page. Ưu tiên JSON trong HTML, sau đó dùng selector dự phòng."""
         self._open(page_url)
-        header = graphql.parse_page_header(self._require_page().content())
+        page = self._require_page()
+        header = graphql.parse_page_header(page.content())
+        if not header["name"] or header["followers"] is None:
+            # Phần đầu trang (tên, follower) đến sau domcontentloaded: chờ dòng follower hiện rồi đọc lại.
+            with contextlib.suppress(PlaywrightError):
+                page.locator(SEL["page"]["followers_text"]).first.wait_for(timeout=HEADER_WAIT_MS)
+            later = graphql.parse_page_header(page.content())
+            header = {"name": header["name"] or later["name"],
+                      "followers": header["followers"] if header["followers"] is not None else later["followers"]}
         name = str(header.get("name") or "").strip() or self._first_text(SEL["page"]["name"])
         followers = _as_count(header.get("followers"))
         if followers is None:
             followers = self._followers_from_text()
+        if not name:
+            logger.warning("Không đọc được tên page %s", page_url)
         return Page(url=page_url, name=name, followers=followers)
 
     def _scroll_once(self) -> None:
@@ -380,26 +441,39 @@ class FacebookScanner:
         collector: _Collector,
         pending: list[Response],
         stop_event: threading.Event | None,
-    ) -> None:
+        report: Callable[[str], None],
+    ) -> str:
+        """Cuộn một tab tới khi có lý do dừng; trả lý do đó để báo tiến độ."""
         scan = self.settings["scan"]
+        label = _TAB_LABELS.get(tab_format, tab_format)
+        found_before = collector.count()
+        seen_before = collector.items_seen
         self._open(tab_url)
         _human_pause(scan, stop_event)
         _drain(pending, collector, tab_format)
         collector.add(graphql.parse_initial_html(self._require_page().content()), tab_format)
         stall = 0
-        for _ in range(int(scan["max_scroll_rounds"])):
-            if _stopped(stop_event) or collector.full():
-                return
+        max_rounds = int(scan["max_scroll_rounds"])
+        for round_no in range(1, max_rounds + 1):
+            if _stopped(stop_event):
+                return "đã dừng theo yêu cầu"
+            if collector.full():
+                return f"đã đủ {collector.limit} video"
             before = collector.count()
             self._scroll_once()
             self._raise_if_blocked()
             _drain(pending, collector, tab_format)
+            report(f"Tab {label} · cuộn lần {round_no}: đã thấy {collector.count() - found_before} video")
             if collector.done(tab_format):
-                return
+                return "đã tới video cũ hơn số ngày quét"
+            if collector.items_seen == seen_before:
+                # Tab trống hoặc page không xem được: không chờ thêm các vòng cuộn (mỗi vòng tới 20 giây).
+                return "tab không có video nào"
             stall = 0 if collector.count() > before else stall + 1
             if stall >= int(scan["stall_rounds"]):
-                return
+                return f"không có video mới sau {stall} lần cuộn"
             _human_pause(scan, stop_event)
+        return f"đã cuộn tối đa {max_rounds} lần"
 
     def scan_page(
         self,
@@ -408,15 +482,18 @@ class FacebookScanner:
         formats: set[str],
         max_videos: int,
         stop_event: threading.Event | None = None,
+        on_progress: Callable[[str], None] | None = None,
     ) -> list[dict]:
         """Quét tab Reels và/hoặc Video của page, trả về các dict từ graphql.flatten (đã bỏ trùng).
 
         Chỉ giữ video đúng định dạng và không cũ hơn `days` ngày. Dừng khi hết cuộn mới (stall),
-        đạt số vòng tối đa, đủ max_videos, gặp video cũ, hoặc stop_event được bật.
+        tab không có video nào, đạt số vòng tối đa, đủ max_videos, gặp video cũ, hoặc stop_event được bật.
+        `on_progress` nhận từng bước (mở tab, mỗi vòng cuộn, lý do dừng) để hiện cho người dùng.
         """
         tabs = [(fmt, tab) for fmt, tab in _TABS if fmt in formats]
         if not tabs or max_videos <= 0:
             return []
+        report = on_progress or (lambda message: None)
         page = self._require_page()
         collector = _Collector(set(formats), days, max_videos)
         pending: list[Response] = []
@@ -430,9 +507,15 @@ class FacebookScanner:
             for fmt, tab in tabs:
                 if collector.full() or _stopped(stop_event):
                     break
+                label = _TAB_LABELS.get(fmt, fmt)
                 url = tab_url(page_url, tab)
                 logger.info("Quét tab %s của %s", tab, page_url)
-                self._scan_tab(url, fmt, collector, pending, stop_event)
+                report(f"Tab {label}: đang mở…")
+                found_before = collector.count()
+                reason = self._scan_tab(url, fmt, collector, pending, stop_event, report)
+                found = collector.count() - found_before
+                logger.info("Tab %s của %s: %d video, dừng vì %s", tab, page_url, found, reason)
+                report(f"Tab {label} xong: {found} video, dừng vì {reason}")
         finally:
             page.remove_listener("response", on_response)
             self._export_cookies()

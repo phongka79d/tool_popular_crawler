@@ -1,19 +1,26 @@
 {
-  "_doc": "JSON paths read by collectors/graphql.py. A path is a list of dict keys (strings) and list indices (integers); \"*\" means every item of a list. Each field is a list of alternative paths tried in order: the first value that converts wins (integers, numeric strings, or display strings such as \"1,2 Tr\" for counts). Paths for story fields start at the Story node; both comet_sections-wrapped and direct content/feedback projections are supported. Duplicate Story nodes fill missing fields while retaining first-seen non-empty values. Paths for views, comments, shares, reactions and video_markers start at the feedback block that the `feedback` path returns. When Facebook changes its JSON, edit this file; no rebuild is needed. Synthetic fixtures: tests/fixtures/graphql_sample.txt and tests/fixtures/initial_page.html.",
+  "_doc": "JSON paths read by collectors/graphql.py. A path is a list of dict keys (strings) and list indices (integers); \"*\" means every item of a list. Each field is a list of alternative paths tried in order: the first value that converts wins (integers, numeric strings, or display strings such as \"1,2 Tr\" for counts). Paths for story fields start at the Story node; both comet_sections-wrapped and direct content/feedback projections are supported. Duplicate Story nodes fill missing fields while retaining first-seen non-empty values. Paths for views, comments, shares, reactions and video_markers start at the counter block: the merge of every dict that the `feedback` paths reach (first-seen values win), so Reels counters split across feedback, fb_reel_react_button and media are all read. Deferred fragments that share the Story's node id are merged into the Story first. Page header paths (page_name, page_followers) start at a node whose __typename is in page_typenames: an old-style Page node, or the profile header renderer of new-style pages, whose `user` is the page itself (its `viewer` is the logged-in account and is never read). When Facebook changes its JSON, edit this file; no rebuild is needed. Synthetic fixtures: tests/fixtures/graphql_sample.txt and tests/fixtures/initial_page.html.",
   "story_typename": "Story",
   "video_typename": "Video",
   "post_id": [["post_id"]],
   "creation_time": [["creation_time"]],
-  "permalink_url": [["permalink_url"]],
+  "permalink_url": [
+    ["permalink_url"],
+    ["attachments", "*", "media", "permalink_url"]
+  ],
   "fallback_url": "https://www.facebook.com/watch/?v={video_id}",
   "reel_url_marker": "/reel/",
   "message": [
     ["comet_sections", "content", "story", "message", "text"],
-    ["content", "story", "message", "text"]
+    ["content", "story", "message", "text"],
+    ["message", "text"]
   ],
   "feedback": [
     ["comet_sections", "feedback", "story", "story_ufi_container", "story", "feedback_context", "feedback_target_with_context", "comet_ufi_summary_and_actions_renderer", "feedback"],
-    ["feedback", "story", "story_ufi_container", "story", "feedback_context", "feedback_target_with_context", "comet_ufi_summary_and_actions_renderer", "feedback"]
+    ["feedback", "story", "story_ufi_container", "story", "feedback_context", "feedback_target_with_context", "comet_ufi_summary_and_actions_renderer", "feedback"],
+    ["feedback"],
+    ["fb_reel_react_button", "story", "feedback"],
+    ["attachments", "*", "media"]
   ],
   "media_typename": [
     ["attachments", "*", "media", "__typename"],
@@ -35,20 +42,26 @@
   "views": [
     ["video_view_count"],
     ["video_view_count_renderer", "feedback", "video_view_count"],
-    ["video_view_count_renderer", "feedback", "play_count"]
+    ["video_view_count_renderer", "feedback", "play_count"],
+    ["play_count_reduced"]
   ],
   "comments": [
     ["adaptive_ufi_action_renderers", "*", "feedback", "comment_rendering_instance", "comments", "total_count"],
     ["comments_count_summary_renderer", "feedback", "comment_rendering_instance", "comments", "total_count"],
-    ["comment_rendering_instance", "comments", "total_count"]
+    ["comment_rendering_instance", "comments", "total_count"],
+    ["total_comment_count"]
   ],
   "shares": [
     ["adaptive_ufi_action_renderers", "*", "feedback", "share_count", "count"],
     ["share_count", "count"],
-    ["i18n_share_count"]
+    ["i18n_share_count"],
+    ["share_count_reduced"]
   ],
   "reactions": {
-    "total": [["reaction_count", "count"]],
+    "total": [
+      ["reaction_count", "count"],
+      ["unified_reactors", "count"]
+    ],
     "edges": [["top_reactions", "edges"]],
     "edge_count": [["reaction_count"]],
     "edge_id": [["node", "id"]],
@@ -74,7 +87,19 @@
       "Phẫn nộ": "ANGRY"
     }
   },
-  "page_typenames": ["Page"],
-  "page_name": [["name"]],
-  "page_followers": [["followers_count"]]
+  "page_typenames": ["Page", "XFBProfileEntityConvergenceHeaderRenderer"],
+  "page_name": [["name"], ["user", "name"]],
+  "page_followers": [["followers_count"]],
+  "channel_video": {
+    "renderer_typenames": ["ChannelTabVideoThumbnailWithReactionsRenderer"],
+    "video": [["video"]],
+    "video_id": [["id"]],
+    "creation_time": [["publish_time"]],
+    "permalink_url": [["canonical_uri_with_fallback"], ["url"]],
+    "message": [["savable_title", "text"], ["title", "text"]],
+    "views": [["play_count"]],
+    "feedback": [["feedback"]],
+    "duration_ms": [["video_thumbnail_overlays_renderer", "video", "playable_duration_in_ms"]],
+    "duration_s": [["video_thumbnail_overlays_renderer", "video", "playable_duration"]]
+  }
 }

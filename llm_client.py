@@ -12,6 +12,7 @@ from typing import Any
 
 from openai import OpenAI
 
+from errors import AuthError, NetworkError, QuotaError, ServiceError
 from models import Video
 from retry import with_retry
 
@@ -58,7 +59,18 @@ def make_client(base_url: str, api_key: str) -> OpenAI:
 
 
 def check_key(base_url: str, api_key: str, model: str) -> None:
-    """Gọi thử 1 token. Trả None nếu endpoint, key và model dùng được; ném ServiceError nếu không."""
+    """Trả None nếu endpoint, key và model dùng được; ném ServiceError nếu không.
+
+    Ưu tiên GET /models (dưới 1 giây, không tốn token; key sai vẫn ra AuthError). Chỉ gọi thử
+    1 token khi endpoint không liệt kê được model: gọi thật trên model chậm có thể mất 20–40 giây.
+    """
+    try:
+        if any(info["id"] == model for info in list_models(base_url, api_key)):
+            return
+    except (AuthError, QuotaError, NetworkError):
+        raise
+    except ServiceError:
+        pass  # endpoint không hỗ trợ /models: thử gọi model
     client = make_client(base_url, api_key)
     with_retry(
         lambda: client.chat.completions.create(

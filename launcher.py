@@ -15,6 +15,8 @@ import time
 import webbrowser
 from pathlib import Path
 
+import applog
+
 # Không còn cửa sổ nào kết nối trong khoảng này thì tắt. Đủ dài để tải lại trang (F5) không làm tắt app.
 IDLE_EXIT_SECONDS = 15
 POLL_SECONDS = 1.0
@@ -100,13 +102,28 @@ def _open_window(port: int, stopped: threading.Event) -> None:
         webbrowser.open(url)
 
 
-def main() -> None:
-    from streamlit.web import bootstrap
+def _show_fatal_error(exc: BaseException) -> None:
+    """Không có console thì lỗi khởi động phải hiện bằng hộp thoại, không im lặng."""
+    import ctypes
 
-    # Thông báo tiếng Việt (vd. tiến độ tải Chromium) không được làm hỏng chương trình trên console mã cũ.
-    for stream in (sys.stdout, sys.stderr):
-        if stream is not None and hasattr(stream, "reconfigure"):
-            stream.reconfigure(encoding="utf-8", errors="replace")
+    message = ("Video Công Thức không khởi động được.\n\n"
+               f"{type(exc).__name__}: {exc}\n\nChi tiết trong data\\app.log.")
+    ctypes.windll.user32.MessageBoxW(None, message, "Video Công Thức", 0x10)
+
+
+def main() -> None:
+    # Trước khi import Streamlit: handler của Streamlit ghi vào sys.stderr, tức là vào data/app.log.
+    applog.setup()
+    try:
+        _serve()
+    except Exception as exc:
+        applog.log.exception("Không khởi động được ứng dụng")
+        _show_fatal_error(exc)
+        raise
+
+
+def _serve() -> None:
+    from streamlit.web import bootstrap
 
     app_path = resolve_app_path()
     port = find_free_port()
@@ -120,7 +137,7 @@ def main() -> None:
     flags = {"server.headless": True, "server.port": port,
              "server.address": "127.0.0.1", "global.developmentMode": False,
              "browser.gatherUsageStats": False, "server.fileWatcherType": "none",
-             "client.toolbarMode": "minimal"}
+             "client.toolbarMode": "minimal", "logger.messageFormat": applog.LOG_FORMAT}
     bootstrap.load_config_options(flags)
     stopped = threading.Event()
     helpers = [threading.Thread(target=_open_window, args=(port, stopped), daemon=True, name="open-app-window"),

@@ -7,7 +7,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules, copy_metada
 root = Path(SPECPATH)
 project_modules = [
     "app", "pipeline", "filters", "normalize", "db", "export_excel",
-    "errors", "retry", "keys", "jev_client", "llm_client", "config", "models",
+    "errors", "retry", "keys", "jev_client", "llm_client", "config", "models", "applog",
 ]
 collector_sources = sorted((root / "collectors").rglob("*.py"))
 collector_modules = []
@@ -60,7 +60,7 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    console=True,
+    console=False,  # chỉ hiện cửa sổ ứng dụng; nhật ký ghi vào data/app.log (launcher.py)
     # Keep assets beside the exe, consistent with config.ROOT.
     contents_directory=".",
 )

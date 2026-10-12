@@ -4,11 +4,13 @@ from __future__ import annotations
 import argparse
 import logging
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+import applog
 import config
 import db
 import export_excel
@@ -17,11 +19,16 @@ import jev_client
 import keys
 import llm_client
 from collectors import transcript, ytdlp
-from collectors.facebook import FacebookScanner
-from errors import AuthError, LoginRequired, NetworkError, QuotaError, ServiceError
+from collectors.facebook import FacebookScanner, page_url_problem
+from errors import AuthError, BrowserUnavailable, LoginRequired, NetworkError, QuotaError, ServiceError
 from models import Video
 
 logger = logging.getLogger(__name__)
+
+# Số video phân tích cùng lúc. Mỗi video chủ yếu chờ mạng (Deepgram, Jev, LLM ~1 phút/lần gọi),
+# nên chạy song song rút ngắn thời gian gần bằng số luồng mà không tốn thêm CPU.
+ANALYZE_WORKERS = 3
+_METRICS = ("views", "reactions", "comments", "shares", "posted_at", "duration_s")
 
 
 @dataclass
@@ -42,6 +49,8 @@ class Progress:
     message: str
     done: bool = False
     error: str | None = None
+    step: int = 0  # số việc đã xong trong bước hiện tại (ví dụ số video đã phân tích)
+    steps: int = 0  # tổng số việc của bước hiện tại; 0 khi không đếm trước được
 
 
 def _safe_message(exc: object, credentials: dict) -> str:
@@ -52,15 +61,22 @@ def _safe_message(exc: object, credentials: dict) -> str:
     return message
 
 
+def _count_text(value: int | None) -> str:
+    return f"{value:,}".replace(",", ".") if value is not None else "?"
+
+
 def check_all_keys(settings: dict) -> dict[str, str | None]:
-    """Kiểm tra lại cả ba dịch vụ trước khi mở Facebook; không lưu key."""
+    """Kiểm tra lại cả ba dịch vụ trước khi mở Facebook; không lưu key.
+
+    Ba dịch vụ độc lập nên kiểm tra song song: chờ bằng dịch vụ chậm nhất, không phải tổng cả ba.
+    """
     credentials = {name: keys.get_key(name) for name in ("jev", "deepgram", "llm")}
     labels = {"jev": "Jev", "deepgram": "Deepgram", "llm": "LLM"}
-    results: dict[str, str | None] = {}
-    for name, key in credentials.items():
+
+    def check(name: str) -> str | None:
+        key = credentials[name]
         if not key:
-            results[name] = f"Chưa có API key {labels[name]}. Vào Cài đặt để nhập key."
-            continue
+            return f"Chưa có API key {labels[name]}. Vào Cài đặt để nhập key."
         try:
             if name == "jev":
                 jev_client.check_key(key, settings["jev"]["model"])
@@ -69,14 +85,15 @@ def check_all_keys(settings: dict) -> dict[str, str | None]:
             else:
                 llm = settings["llm"]
                 if not llm.get("base_url") or not llm.get("model"):
-                    results[name] = "Chưa có endpoint hoặc model LLM. Vào Cài đặt để nhập lại."
-                    continue
+                    return "Chưa có endpoint hoặc model LLM. Vào Cài đặt để nhập lại."
                 llm_client.check_key(llm["base_url"], key, llm["model"])
-            results[name] = None
         except Exception as exc:
             reason = _safe_message(exc, credentials)
-            results[name] = reason if isinstance(exc, ServiceError) else f"Không kiểm tra được key {labels[name]}: {reason}"
-    return results
+            return reason if isinstance(exc, ServiceError) else f"Không kiểm tra được key {labels[name]}: {reason}"
+        return None
+
+    with ThreadPoolExecutor(max_workers=len(credentials)) as pool:
+        return dict(zip(credentials, pool.map(check, credentials)))
 
 
 def _tokens(usage: dict | int | None) -> int:
@@ -109,6 +126,8 @@ def run(
     """Chạy một lượt; lỗi dịch vụ hoặc Dừng vẫn xuất dữ liệu đã có.
 
     `ask_user` chờ lựa chọn khi LLM hết hạn mức; CLI mặc định tiếp tục không có gợi ý.
+    Bước phân tích chạy ANALYZE_WORKERS video cùng lúc; `on_progress` và `ask_user` có thể được gọi
+    từ các luồng đó.
     """
     config.ensure_dirs()
     db.init_db()
@@ -132,55 +151,193 @@ def run(
     page_url = ""
     partial = False
     llm_unavailable = False
+    quota_choice: str | None = None
     jev = None
     llm = None
+    analyzed_count = 0
+    # Các luồng phân tích chỉ ghi run_log, page_logs và bộ đếm khi giữ `lock`.
+    lock = threading.Lock()
+    clients_lock = threading.Lock()
+    quota_lock = threading.Lock()
+    # Một video gặp lỗi phải dừng cả lượt (key sai, mất mạng, tạm dừng...): các video còn lại không bắt đầu.
+    abort = threading.Event()
 
-    def emit(stage: str, message: str, *, error: str | None = None, done: bool = False) -> None:
-        on_progress(Progress(stage, page_index, len(channels), page_url, message, done, error))
+    def emit(stage: str, message: str, *, error: str | None = None, done: bool = False,
+             video: Video | None = None, step: int = 0, steps: int = 0) -> None:
+        url, index = page_url, page_index
+        if video is not None:
+            url, index = video.page_url, channels.index(video.page_url) + 1
+        if error is None:
+            logger.info("%s", message)
+        on_progress(Progress(stage, index, len(channels), url, message, done, error, step, steps))
 
     def checkpoint() -> None:
-        if stop_event.is_set():
+        if stop_event.is_set() or abort.is_set():
             raise _Stopped()
 
-    def add_error(exc: object) -> str:
+    def add_error(exc: object, video: Video | None = None) -> str:
         message = _safe_message(exc, credentials)
-        run_log["messages"].append(message)
-        if page_url in page_logs:
-            page_logs[page_url]["errors"].append(message)
+        url = video.page_url if video is not None else page_url
+        with lock:
+            run_log["messages"].append(message)
+            if url in page_logs:
+                page_logs[url]["errors"].append(message)
         logger.warning("%s", message)
-        emit("error", message, error=message)
+        emit("error", message, error=message, video=video)
         return message
+
+    def add_usage(name: str, amount: float) -> None:
+        with lock:
+            run_log["usage"][name] += amount
 
     def jev_instance():
         nonlocal jev
-        if jev is None:
-            checkpoint()
-            jev = jev_client.make_client(credentials["jev"], settings["jev"]["model"])
-        return jev
+        with clients_lock:
+            if jev is None:
+                checkpoint()
+                jev = jev_client.make_client(credentials["jev"], settings["jev"]["model"])
+            return jev
 
     def llm_instance():
         nonlocal llm
-        if llm is None:
+        with clients_lock:
+            if llm is None:
+                checkpoint()
+                llm = llm_client.make_client(settings["llm"]["base_url"], credentials["llm"])
+            return llm
+
+    def handle_llm_quota(video: Video | None = None) -> bool:
+        """Hỏi một lần khi LLM hết hạn mức; các video đang phân tích song song dùng lại lựa chọn đó."""
+        nonlocal llm_unavailable, quota_choice
+        with quota_lock:
+            if quota_choice is None:
+                message = "Tài khoản LLM đã hết credit/hạn mức."
+                options = [("continue", "Chạy tiếp không có gợi ý"), ("pause", "Tạm dừng")]
+                quota_choice = ask_user("llm_quota", message, options) if ask_user else "continue"
+                llm_unavailable = True
+                decision = "tạm dừng" if quota_choice == "pause" else "tiếp tục không có gợi ý"
+                default = " (mặc định CLI)" if ask_user is None else ""
+                add_error(f"{message} Lựa chọn: {decision}{default}.", video)
+            return quota_choice == "pause"
+
+    def analyze(number: int, video: Video, taxonomy: dict, ban_words: list[str], keyterms: list[str]) -> str:
+        """Phân tích một video trên luồng phân tích; trả kết quả ngắn để báo tiến độ."""
+        total = len(passed)
+
+        def say(text: str) -> None:
+            with lock:  # giữ thứ tự sự kiện đúng với bộ đếm video đã xong
+                emit("analyze", f"Video {number}/{total}: {text}", video=video, step=analyzed_count, steps=total)
+
+        checkpoint()
+        views = f"{_count_text(video.views)} lượt xem" if video.views is not None else "chưa rõ lượt xem"
+        say(f"tải audio và chép lời ({views})…")
+        try:
+            warnings: list[str] = []
+            minutes = transcript.get_transcript(
+                video, credentials["deepgram"], settings["stt"], keyterms, config.DATA_DIR / "tmp",
+                warnings,
+            )
+            add_usage("deepgram_minutes", float(minutes or 0))
+            for warning in warnings:
+                with lock:
+                    run_log["messages"].append(warning)
+                say(warning)
             checkpoint()
-            llm = llm_client.make_client(settings["llm"]["base_url"], credentials["llm"])
-        return llm
+            say("Jev gắn nhãn chủ đề, kiểu hook, cấu trúc…")
+            raw, usage = jev_client.ask_labels(jev_instance(), video, taxonomy, settings)
+            add_usage("jev_tokens", _tokens(usage))
+            video.jev = jev_client.interpret_labels(raw, settings, taxonomy)
+            video.score = filters.formula_score(
+                video.ratio_median, video.jev.get("replicable_p"), video.jev.get("hook_strength"),
+                video.jev.get("relevant_p"), settings["score_weights"],
+            )
+            with lock:
+                page_logs[video.page_url]["analyzed"] += 1
+            checkpoint()
+            if video.jev.get("relevant_p", 0) < 0.5:
+                return "không liên quan ngành, không cần LLM"
+            cached = db.get_llm(video.video_id)
+            if cached is not None:
+                video.llm = cached
+                return "dùng phân tích LLM đã lưu"
+            if llm_unavailable:
+                return "không có gợi ý (LLM hết hạn mức)"
+            kept: list = []
+            for attempt in range(2):
+                checkpoint()
+                say("LLM viết phân tích và gợi ý (thường 1–2 phút)…" if attempt == 0
+                    else "Jev loại hết gợi ý; LLM viết lại lần 2…")
+                analysis = llm_client.write_analysis(llm_instance(), settings["llm"]["model"], video, video.jev, settings)
+                add_usage("llm_tokens", _tokens(analysis.get("_usage")))
+                video.llm = dict(analysis)
+                # Unchecked suggestions must never appear in a partial export.
+                video.llm["goi_y_nhan_ban"] = []
+                if analysis.get("_raw"):
+                    video.notes.append(str(analysis["_raw"]))
+                checkpoint()
+                suggestions = llm_client.filter_banned(analysis.get("goi_y_nhan_ban", []), ban_words)
+                kept = []
+                if suggestions:
+                    say(f"Jev kiểm tra {len(suggestions)} gợi ý…")
+                    kept, check_raw, usage = jev_client.check_suggestions(jev_instance(), video, suggestions, settings)
+                    add_usage("jev_tokens", _tokens(usage))
+                    db.save_jev(video.video_id, settings["jev"]["model"], "suggestion_check", check_raw, usage)
+                video.llm["goi_y_nhan_ban"] = kept
+                checkpoint()
+                if kept or attempt == 1:
+                    break
+            db.save_llm(video.video_id, settings["llm"]["model"], video.llm)
+            return f"giữ {len(kept)} gợi ý"
+        except QuotaError as exc:
+            if exc.service != "llm":
+                raise
+            video.llm["goi_y_nhan_ban"] = []
+            if handle_llm_quota(video):
+                raise _Paused() from exc
+            return "không có gợi ý (LLM hết hạn mức)"
+        except (AuthError, NetworkError, LoginRequired, _Stopped, _Paused):
+            raise
+        except Exception as exc:
+            video.notes.append(add_error(exc, video))
+            return "lỗi, xem Nhật ký"
 
-    def handle_llm_quota() -> bool:
-        nonlocal llm_unavailable
-        message = "Tài khoản LLM đã hết credit/hạn mức."
-        options = [("continue", "Chạy tiếp không có gợi ý"), ("pause", "Tạm dừng")]
-        choice = ask_user("llm_quota", message, options) if ask_user else "continue"
-        llm_unavailable = True
-        decision = "tạm dừng" if choice == "pause" else "tiếp tục không có gợi ý"
-        default = " (mặc định CLI)" if ask_user is None else ""
-        add_error(f"{message} Lựa chọn: {decision}{default}.")
-        return choice == "pause"
+    def analyze_all() -> None:
+        """Phân tích các video đạt ngưỡng, ANALYZE_WORKERS video cùng lúc; lỗi dừng lượt được ném lại."""
+        total = len(passed)
+        if not total:
+            return
+        taxonomy = config.load_json("taxonomy.json")
+        ban_words = config.load_lines("config/ban_words.txt")
+        keyterms = config.load_lines(settings["stt"].get("keyterms_file", "config/keyterms.txt"))
+        workers = max(1, min(ANALYZE_WORKERS, total))
+        fatal: list[BaseException] = []
 
+        def task(number: int, video: Video) -> None:
+            nonlocal analyzed_count
+            try:
+                result = analyze(number, video, taxonomy, ban_words, keyterms)
+            except BaseException as exc:  # noqa: BLE001 - chuyển lỗi về luồng chính
+                with lock:
+                    if not abort.is_set():
+                        fatal.append(exc)  # chỉ lỗi đầu tiên; các luồng khác dừng vì abort
+                    abort.set()
+                return
+            with lock:
+                analyzed_count += 1
+                emit("analyze", f"Video {number}/{total}: xong, {result}.", video=video,
+                     step=analyzed_count, steps=total)
+
+        emit("analyze", f"Phân tích {total} video, {workers} video cùng lúc…", steps=total)
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="phan-tich") as pool:
+            for number, video in enumerate(passed, 1):
+                pool.submit(task, number, video)
+        if fatal:
+            raise fatal[0]
 
     try:
         try:
             checkpoint()
-            emit("keys", "Đang kiểm tra API key…")
+            emit("keys", "Đang kiểm tra 3 API key (Jev, Deepgram, LLM)…")
             failures = check_all_keys(settings)
             checkpoint()
             if any(failures.values()):
@@ -190,6 +347,7 @@ def run(
                 return None
             channels = config.load_lines("config/channels.txt")
             checkpoint()
+            emit("scan", f"API key dùng được. Mở trình duyệt quét (chạy ẩn) cho {len(channels)} kênh…")
             with FacebookScanner(hidden=True, settings=settings) as scanner:
                 checkpoint()
                 scanner.check_login()
@@ -197,6 +355,7 @@ def run(
                 seen: set[str] = set()
                 for page_index, page_url in enumerate(channels, 1):
                     checkpoint()
+                    where = f"Kênh {page_index}/{len(channels)}"
                     entry = {
                         "url": page_url, "name": "", "followers": None,
                         "scanned": 0, "passed": 0, "analyzed": 0,
@@ -204,21 +363,32 @@ def run(
                     }
                     run_log["pages"].append(entry)
                     page_logs[page_url] = entry
-                    emit("scan", "Đang quét kênh…")
+                    problem = page_url_problem(page_url)
+                    if problem:
+                        # Không mở trình duyệt, không nghỉ giữa kênh: báo ngay và sang kênh tiếp.
+                        entry["skipped_reason"] = problem
+                        emit("scan", f"{where}: bỏ qua. {problem}")
+                        continue
+                    emit("scan", f"{where}: mở trang, đọc tên và số người theo dõi…")
                     try:
                         page = scanner.get_page_info(page_url)
                         checkpoint()
                         entry.update(name=page.name, followers=page.followers)
                         db.upsert_page(page)
+                        followers = (f"{_count_text(page.followers)} người theo dõi" if page.followers is not None
+                                     else "chưa đọc được số người theo dõi")
+                        emit("scan", f"{where}: {page.name or page_url} · {followers}")
                         if not filters.page_allowed(page.followers, params.min_page_followers):
                             entry["skipped_reason"] = "Dưới ngưỡng follower"
-                            emit("scan", "Dưới ngưỡng follower")
+                            emit("scan", f"{where}: bỏ qua vì dưới ngưỡng "
+                                         f"{_count_text(params.min_page_followers)} người theo dõi.")
                         else:
                             if page.followers is None:
                                 entry["errors"].append("Chưa xác định được follower của kênh")
                             rows = scanner.scan_page(
                                 page_url, days=params.days, formats=params.formats,
                                 max_videos=settings["scan"]["max_videos_per_page"], stop_event=stop_event,
+                                on_progress=lambda text: emit("scan", f"{where} · {text}"),
                             )
                             for row in rows:
                                 # Preserve already collected rows even if Dừng was pressed during scrolling.
@@ -231,6 +401,9 @@ def run(
                                 db.upsert_video(video)
                                 collected.append(video)
                                 entry["scanned"] += 1
+                            emit("scan", f"{where}: thu được {entry['scanned']} video trong {params.days} ngày.")
+                            if not entry["scanned"] and not page.name and page.followers is None:
+                                add_error("Không đọc được page: kiểm tra link đúng và page công khai")
                             checkpoint()
                     except (_Stopped, NetworkError, LoginRequired):
                         raise
@@ -238,100 +411,36 @@ def run(
                         add_error(exc)
                     checkpoint()
                     if page_index < len(channels):
+                        emit("scan", "Nghỉ giữa hai kênh như người dùng thật, tránh bị Facebook chặn…")
                         scanner.polite_page_pause(stop_event=stop_event)
                         checkpoint()
             checkpoint()
-            for video in collected:
+            missing = [video for video in collected
+                       if not video.caption or any(getattr(video, metric) is None for metric in _METRICS)]
+            for number, video in enumerate(missing, 1):
                 checkpoint()
                 page_url = video.page_url
                 page_index = channels.index(page_url) + 1
-                if not video.caption or any(
-                    getattr(video, metric) is None
-                    for metric in ("views", "reactions", "comments", "shares", "posted_at", "duration_s")
-                ):
-                    try:
-                        ytdlp.fill_missing(video)
-                    except Exception as exc:
-                        video.notes.append(add_error(exc))
-                    db.upsert_video(video)
-                    checkpoint()
-            emit("filter", "Đang tính chỉ số và lọc video…")
+                emit("filter", f"Bổ sung số liệu còn thiếu (yt-dlp): video {number}/{len(missing)}…",
+                     step=number - 1, steps=len(missing))
+                try:
+                    ytdlp.fill_missing(video)
+                except Exception as exc:
+                    video.notes.append(add_error(exc))
+                db.upsert_video(video)
+                checkpoint()
+            emit("filter", f"Tính chỉ số và lọc {len(collected)} video theo ngưỡng…")
             filters.compute_metrics(collected)
             passed = filters.apply_filter(collected, params.rules)
+            emit("filter", f"Đạt ngưỡng: {len(passed)}/{len(collected)} video.")
             for video in collected:
                 for note in video.notes:
                     if note not in page_logs[video.page_url]["errors"]:
                         page_logs[video.page_url]["errors"].append(note)
             for video in passed:
                 page_logs[video.page_url]["passed"] += 1
-            taxonomy = config.load_json("taxonomy.json")
-            ban_words = config.load_lines("config/ban_words.txt")
-            keyterms = config.load_lines(settings["stt"].get("keyterms_file", "config/keyterms.txt"))
-            for video in passed:
-                checkpoint()
-                page_url = video.page_url
-                page_index = channels.index(page_url) + 1
-                emit("analyze", "Đang phân tích video…")
-                try:
-                    warnings: list[str] = []
-                    minutes = transcript.get_transcript(
-                        video, credentials["deepgram"], settings["stt"], keyterms, config.DATA_DIR / "tmp",
-                        warnings,
-                    )
-                    run_log["usage"]["deepgram_minutes"] += float(minutes or 0)
-                    for warning in warnings:
-                        run_log["messages"].append(warning)
-                        emit("analyze", warning)
-                    checkpoint()
-                    raw, usage = jev_client.ask_labels(jev_instance(), video, taxonomy, settings)
-                    run_log["usage"]["jev_tokens"] += _tokens(usage)
-                    video.jev = jev_client.interpret_labels(raw, settings, taxonomy)
-                    video.score = filters.formula_score(
-                        video.ratio_median, video.jev.get("replicable_p"), video.jev.get("hook_strength"),
-                        video.jev.get("relevant_p"), settings["score_weights"],
-                    )
-                    page_logs[page_url]["analyzed"] += 1
-                    checkpoint()
-                    if video.jev.get("relevant_p", 0) < 0.5:
-                        continue
-                    cached = db.get_llm(video.video_id)
-                    if cached is not None:
-                        video.llm = cached
-                        continue
-                    if llm_unavailable:
-                        continue
-                    for attempt in range(2):
-                        checkpoint()
-                        analysis = llm_client.write_analysis(llm_instance(), settings["llm"]["model"], video, video.jev, settings)
-                        run_log["usage"]["llm_tokens"] += _tokens(analysis.get("_usage"))
-                        video.llm = dict(analysis)
-                        # Unchecked suggestions must never appear in a partial export.
-                        video.llm["goi_y_nhan_ban"] = []
-                        if analysis.get("_raw"):
-                            video.notes.append(str(analysis["_raw"]))
-                        checkpoint()
-                        suggestions = llm_client.filter_banned(analysis.get("goi_y_nhan_ban", []), ban_words)
-                        kept = []
-                        if suggestions:
-                            kept, check_raw, usage = jev_client.check_suggestions(jev_instance(), video, suggestions, settings)
-                            run_log["usage"]["jev_tokens"] += _tokens(usage)
-                            db.save_jev(video.video_id, settings["jev"]["model"], "suggestion_check", check_raw, usage)
-                        video.llm["goi_y_nhan_ban"] = kept
-                        checkpoint()
-                        if kept or attempt == 1:
-                            break
-                    db.save_llm(video.video_id, settings["llm"]["model"], video.llm)
-                except QuotaError as exc:
-                    if exc.service != "llm":
-                        raise
-                    video.llm["goi_y_nhan_ban"] = []
-                    if handle_llm_quota():
-                        raise _Paused()
-                except (AuthError, NetworkError, LoginRequired, _Stopped, _Paused):
-                    raise
-                except Exception as exc:
-                    video.notes.append(add_error(exc))
-        except LoginRequired as exc:
+            analyze_all()
+        except (LoginRequired, BrowserUnavailable) as exc:
             add_error(exc)
             if not collected:
                 return None
@@ -363,6 +472,7 @@ def run(
         if not partial and not llm_unavailable and not stop_event.is_set():
             try:
                 checkpoint()
+                emit("export", "LLM viết nhận xét tổng hợp cho file Excel…")
                 summary["commentary"], usage = llm_client.write_commentary(llm_instance(), settings["llm"]["model"], summary)
                 run_log["usage"]["llm_tokens"] += _tokens(usage)
             except QuotaError as exc:
@@ -379,7 +489,7 @@ def run(
             except Exception as exc:
                 add_error(exc)
         run_log["finished_at"] = datetime.now(timezone.utc).isoformat()
-        emit("export", "Đang xuất Excel…")
+        emit("export", f"Đang ghi file Excel ({len(passed)} video)…")
         result = export_excel.export(passed, summary, run_log)
         emit("done", "Đã xuất kết quả một phần." if partial or stop_event.is_set() else "Đã xuất kết quả.", done=True)
         return result
@@ -394,6 +504,7 @@ def run(
 
 
 def main(argv: list[str] | None = None) -> int:
+    applog.use_utf8_console()  # tiếng Việt không làm hỏng CLI trên console mã cũ (cp1252)
     parser = argparse.ArgumentParser(description="Quét video Facebook và xuất công thức nội dung ra Excel.")
     parser.add_argument("--days", type=int, default=14)
     parser.add_argument("--preset", choices=list(filters.PRESETS), default="no_bat_thuong")

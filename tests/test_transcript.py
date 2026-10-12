@@ -308,6 +308,27 @@ def test_extract_audio_uses_contract_ffmpeg_flags(tmp_path, monkeypatch):
     vn = cmd.index("-vn")
     assert cmd[vn:vn + 9] == ["-vn", "-acodec", "libmp3lame", "-ar", "16000",
                               "-ac", "1", "-b:a", "64k"]
+    # Livestream nhiều giờ: chỉ gửi 10 phút đầu cho Deepgram.
+    assert cmd[cmd.index("-t") + 1] == "600"
+    assert cmd.index("-t") > cmd.index("-i")  # tùy chọn đầu ra, không phải đầu vào
+
+
+def test_extract_audio_seeks_to_start_before_reading_input(tmp_path, monkeypatch):
+    seen: dict[str, Any] = {}
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
+        seen["cmd"] = cmd
+        Path(cmd[-1]).write_bytes(b"ID3")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(transcript, "_ffmpeg_exe", lambda: "ffmpeg")
+    monkeypatch.setattr(transcript.subprocess, "run", fake_run)
+
+    transcript.extract_audio(tmp_path / "raw.m4a", tmp_path / "a.mp3", start_s=600)
+    cmd = seen["cmd"]
+    assert cmd[cmd.index("-ss") + 1] == "600"
+    assert cmd.index("-ss") < cmd.index("-i")  # tua đầu vào: không giải mã 10 phút đầu
+    assert cmd[cmd.index("-t") + 1] == "600"
 
 
 def test_extract_audio_returns_none_when_output_is_empty(tmp_path, monkeypatch):
@@ -397,8 +418,10 @@ class Env:
         self.download_ok = True
         self.extract_ok = True
         self.downloads = 0
+        self.download_requests: list[int | None] = []  # first_seconds của từng lần tải
         self.raw_path: Path | None = None
         self.audio_path: Path | None = None
+        self.extract_starts: list[int] = []  # start_s của từng lần tách audio
         self.dg_calls: list[tuple[Path, str, dict, list[str]]] = []
         self.deepgram: Any = None
         self.local_calls: list[tuple[Path, str]] = []
@@ -409,15 +432,18 @@ class Env:
 def env(monkeypatch) -> Env:
     e = Env()
 
-    def fake_download(url: str, out_dir: Path) -> Path | None:
+    def fake_download(url: str, out_dir: Path, first_seconds: int | None = None,
+                      ffmpeg: str | None = None) -> Path | None:
         e.downloads += 1
+        e.download_requests.append(first_seconds)
         if not e.download_ok:
             return None
         e.raw_path = Path(out_dir) / "raw.m4a"
         e.raw_path.write_bytes(b"raw")
         return e.raw_path
 
-    def fake_extract(src: Path, dst: Path) -> Path | None:
+    def fake_extract(src: Path, dst: Path, start_s: int = 0) -> Path | None:
+        e.extract_starts.append(start_s)
         if not e.extract_ok:
             return None
         e.audio_path = Path(dst)
@@ -542,6 +568,46 @@ def test_download_failure_marks_failed_and_skips_deepgram(env, tmp_path):
     assert env.dg_calls == []
     assert video.transcript_status == "failed"
     assert video.notes == ["Chưa lấy được thoại"]
+
+
+@pytest.mark.parametrize("duration, requested", [
+    (transcript.MAX_AUDIO_SECONDS + 1, transcript.SPEECH_SEARCH_SECONDS),  # livestream: chỉ tải đoạn đầu
+    (transcript.MAX_AUDIO_SECONDS, None),
+    (None, None),  # chưa biết thời lượng: tải cả audio
+])
+def test_only_long_videos_download_just_the_searched_part(env, tmp_path, monkeypatch, duration, requested):
+    monkeypatch.setattr(transcript, "_ffmpeg_exe", lambda: "ffmpeg")
+    env.deepgram = {"text": TIMED_HOOK, "duration": 60.0, "words": TIMED_WORDS}
+
+    transcript.get_transcript(_video(duration_s=duration), "dg-key", STT, [], tmp_path / "tmp")
+
+    assert env.download_requests == [requested]
+
+
+def test_long_video_with_music_intro_transcribes_the_first_window_with_speech(env, tmp_path, monkeypatch):
+    # Livestream thật: 15 phút nhạc chờ rồi mới chào khán giả.
+    windows = iter([{"text": "", "duration": 600.0, "words": []},
+                    {"text": TIMED_HOOK, "duration": 600.0, "words": TIMED_WORDS}])
+    monkeypatch.setattr(transcript, "transcribe_deepgram", lambda *args: next(windows))
+    video = _video(duration_s=3445)
+
+    minutes = transcript.get_transcript(video, "dg-key", STT, [], tmp_path / "tmp")
+
+    assert env.extract_starts == [0, 600]
+    assert minutes == pytest.approx(20.0)  # cả hai đoạn đều tính phí Deepgram
+    assert video.transcript_status == "ok" and video.transcript == TIMED_HOOK
+    assert video.notes == ["Video dài 57 phút: chỉ chép lời 10 phút từ phút 10."]
+
+
+def test_long_video_without_speech_stops_after_the_searched_minutes(env, tmp_path):
+    env.deepgram = {"text": "", "duration": 600.0, "words": []}
+    video = _video(duration_s=3 * 3600)
+
+    transcript.get_transcript(video, "dg-key", STT, [], tmp_path / "tmp")
+
+    assert env.extract_starts == [0, 600, 1200]
+    assert video.transcript_status == "no_speech"
+    assert video.notes == ["Video dài 180 phút: không thấy thoại trong 30 phút đầu.", "Không có thoại"]
 
 
 def test_cached_ok_transcript_skips_download_and_reuses_stored_hook(env, tmp_path):

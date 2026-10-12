@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,12 @@ DEEPGRAM_PROJECTS_URL = "https://api.deepgram.com/v1/projects"
 DEEPGRAM_LIST_TIMEOUT_S = 30
 DEEPGRAM_TIMEOUT_S = 300
 FFMPEG_TIMEOUT_S = 600
+# Chỉ chép lời 10 phút: hook và cấu trúc nằm ở đầu video, Jev chỉ đọc 3000 ký tự đầu,
+# còn livestream 3 giờ sẽ tốn ~3 phút Deepgram, tiền và một prompt LLM rất dài.
+MAX_AUDIO_SECONDS = 600
+# Livestream thường mở đầu bằng nhạc chờ nhiều phút: tải 30 phút đầu, chép từng đoạn 10 phút
+# tới khi gặp thoại.
+SPEECH_SEARCH_SECONDS = 1800
 SAMPLE_PATH = config.ROOT / "assets" / "sample_1s.mp3"
 
 HOOK_WINDOW_S = 3.0
@@ -49,6 +56,8 @@ _SENTENCE_END = re.compile(r"[.!?…][\"'”’)\]»]*$")
 _POPEN_KWARGS: dict[str, Any] = (
     {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
 )
+# faster-whisper dùng hết CPU: các video phân tích song song chạy lần lượt, mô hình chỉ nạp một lần.
+_WHISPER_LOCK = threading.Lock()
 
 
 # --- audio -----------------------------------------------------------------
@@ -60,8 +69,10 @@ def _ffmpeg_exe() -> str | None:
     return shutil.which("ffmpeg")
 
 
-def extract_audio(src: Path | str, dst: Path | str) -> Path | None:
-    """Tách audio mono 16 kHz 64 kbps mp3 từ `src`. Trả None nếu ffmpeg lỗi hoặc không ra audio."""
+def extract_audio(src: Path | str, dst: Path | str, start_s: int = 0) -> Path | None:
+    """Tách audio mono 16 kHz 64 kbps mp3 từ `src`, tối đa MAX_AUDIO_SECONDS kể từ giây `start_s`.
+
+    Trả None nếu ffmpeg lỗi hoặc không ra audio (kể cả khi `start_s` vượt quá độ dài)."""
     src_path, dst_path = Path(src), Path(dst)
     exe = _ffmpeg_exe()
     if exe is None:
@@ -71,8 +82,10 @@ def extract_audio(src: Path | str, dst: Path | str) -> Path | None:
     dst_path.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
         exe, "-hide_banner", "-loglevel", "error", "-y",
+        *(["-ss", str(start_s)] if start_s else []),
         "-i", str(src_path.resolve()),
         "-vn", "-acodec", "libmp3lame", "-ar", "16000", "-ac", "1", "-b:a", "64k",
+        "-t", str(MAX_AUDIO_SECONDS),
         str(dst_path.resolve()),
     ]
     try:
@@ -149,18 +162,19 @@ def _load_whisper(model_size: str) -> Any:
 
 def transcribe_local(path: Path | str, model_size: str) -> dict:
     """faster-whisper chạy CPU, tiếng Việt, có timestamp từng từ. Cùng định dạng với Deepgram."""
-    model = _load_whisper(model_size)
-    segments, info = model.transcribe(str(path), language="vi", word_timestamps=True)
-    texts: list[str] = []
-    words: list[dict] = []
-    for seg in segments:
-        seg_text = seg.text.strip()
-        if seg_text:
-            texts.append(seg_text)
-        for w in seg.words or []:
-            token = w.word.strip()
-            if token:
-                words.append({"punctuated_word": token, "start": float(w.start), "end": float(w.end)})
+    with _WHISPER_LOCK:
+        model = _load_whisper(model_size)
+        segments, info = model.transcribe(str(path), language="vi", word_timestamps=True)
+        texts: list[str] = []
+        words: list[dict] = []
+        for seg in segments:  # segments chạy dần khi đọc: phải đọc hết trong khóa
+            seg_text = seg.text.strip()
+            if seg_text:
+                texts.append(seg_text)
+            for w in seg.words or []:
+                token = w.word.strip()
+                if token:
+                    words.append({"punctuated_word": token, "start": float(w.start), "end": float(w.end)})
     return {"text": " ".join(texts), "duration": float(info.duration), "words": words}
 
 
@@ -326,19 +340,46 @@ def get_transcript(video: Video, api_key: str, stt_settings: dict,
     downloaded: Path | None = None
     audio: Path | None = None
     try:
-        downloaded = download_audio(video.url, tmp)
-        if downloaded is not None:
-            audio = extract_audio(downloaded, tmp / f"{video.video_id}_stt.mp3")
-        if audio is None:
+        long_video = bool(video.duration_s and video.duration_s > MAX_AUDIO_SECONDS)
+        if long_video:
+            # Không tải cả livestream nhiều giờ: chỉ phần đủ để tìm đoạn có thoại.
+            downloaded = download_audio(video.url, tmp, first_seconds=SPEECH_SEARCH_SECONDS, ffmpeg=_ffmpeg_exe())
+            starts = list(range(0, int(min(video.duration_s, SPEECH_SEARCH_SECONDS)), MAX_AUDIO_SECONDS))
+        else:
+            downloaded = download_audio(video.url, tmp)
+            starts = [0]
+        if downloaded is None:
             log.warning("Không có audio để chuyển thoại: %s", video.video_id)
             return _save(video, "", STATUS_FAILED, [], 0.0)
 
-        result, minutes = _transcribe(audio, api_key, stt_settings, keyterms,
-                                     warnings if warnings is not None else [])
-        if result is None:
-            return _save(video, "", STATUS_FAILED, [], minutes)
-
-        text = result["text"]
+        minutes = 0.0
+        result: dict | None = None
+        start = 0
+        for start in starts:
+            _remove(audio)
+            audio = extract_audio(downloaded, tmp / f"{video.video_id}_stt.mp3", start_s=start)
+            if audio is None:
+                if start == 0:
+                    log.warning("Không có audio để chuyển thoại: %s", video.video_id)
+                    return _save(video, "", STATUS_FAILED, [], 0.0)
+                break  # tệp ngắn hơn dự kiến: giữ kết quả đoạn trước
+            result, billed = _transcribe(audio, api_key, stt_settings, keyterms,
+                                         warnings if warnings is not None else [])
+            minutes += billed
+            if result is None:
+                return _save(video, "", STATUS_FAILED, [], minutes)
+            if result["text"]:
+                break
+            if start < starts[-1]:
+                log.info("Video %s: không có thoại từ phút %d, thử 10 phút tiếp theo",
+                         video.video_id, start // 60)
+        text = result["text"] if result is not None else ""
+        if long_video:
+            if not text:
+                searched = f"không thấy thoại trong {(start + MAX_AUDIO_SECONDS) // 60} phút đầu"
+            else:
+                searched = f"chỉ chép lời 10 phút {'đầu' if start == 0 else f'từ phút {start // 60}'}"
+            _add_note(video, f"Video dài {video.duration_s / 60:.0f} phút: {searched}.")
         if not text:
             return _save(video, "", STATUS_NO_SPEECH, [], minutes)
         return _save(video, text, STATUS_OK, result["words"], minutes)

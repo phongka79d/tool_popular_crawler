@@ -8,11 +8,12 @@ import hashlib
 import logging
 import os
 import re
+import threading
 from collections.abc import Callable
 from pathlib import Path
 
 import yt_dlp
-from yt_dlp.utils import YoutubeDLError
+from yt_dlp.utils import YoutubeDLError, download_range_func
 
 import config
 from collectors.cookies import is_netscape_file
@@ -22,6 +23,8 @@ logger = logging.getLogger(__name__)
 
 _REEL_ID_RE = re.compile(r"facebook\.com/reel/(\d+)", re.IGNORECASE)
 _PARTIAL_SUFFIXES = frozenset({".part", ".ytdl", ".temp"})
+# Tải lần lượt từng video như người xem, kể cả khi pipeline phân tích nhiều video cùng lúc.
+_DOWNLOAD_LOCK = threading.Lock()
 
 # Trường của Video <- (khóa trong info của yt-dlp, kiểu). like_count không dùng:
 # đó là số người thích, không phải tổng các loại cảm xúc (PLAN §11.3).
@@ -69,6 +72,29 @@ def _cookie_opts() -> dict:
     return opts
 
 
+class _YdlLog:
+    """Thông báo của yt-dlp đi vào logging (data/app.log), không in thẳng ra stdout/stderr.
+
+    Lỗi cuối cùng được chỗ gọi ghi WARNING kèm lý do; ở đây chỉ giữ chi tiết ở mức INFO.
+    """
+
+    def debug(self, msg: str) -> None:  # yt-dlp gửi cả thông báo info qua debug
+        pass
+
+    def info(self, msg: str) -> None:
+        pass
+
+    def warning(self, msg: str) -> None:
+        logger.info("yt-dlp: %s", msg)
+
+    def error(self, msg: str) -> None:
+        logger.info("yt-dlp: %s", msg)
+
+
+# Chung cho mọi lượt gọi: không thanh tiến trình, không in ra console.
+_QUIET_OPTS = {"quiet": True, "no_warnings": True, "noprogress": True, "logger": _YdlLog()}
+
+
 def _with_account_fallback(run: Callable[[dict], object]) -> object:
     """Chạy yt-dlp không cookie trước (video công khai không cần tài khoản, tài khoản không bị dính
     vào lượt tải); chỉ khi lỗi mới thử lại bằng cookie của tài khoản phụ."""
@@ -88,7 +114,7 @@ def fetch_metadata(url: str) -> dict:
     Khóa nào yt-dlp không có thì giá trị là None.
     """
     def run(extra: dict) -> dict:
-        opts = {"skip_download": True, "quiet": True, "no_warnings": True, "noplaylist": True,
+        opts = {**_QUIET_OPTS, "skip_download": True, "noplaylist": True,
                 "sleep_interval_requests": 1, **extra}
         with yt_dlp.YoutubeDL(opts) as ydl:
             return ydl.extract_info(_to_watch_url(url), download=False) or {}
@@ -122,11 +148,14 @@ def _find_download(out_dir: Path, stem: str) -> Path | None:
     return candidates[0] if candidates else None
 
 
-def download_audio(url: str, out_dir: Path) -> Path | None:
+def download_audio(url: str, out_dir: Path, first_seconds: int | None = None,
+                   ffmpeg: str | None = None) -> Path | None:
     """Tải audio (bestaudio) vào out_dir.
 
     Coi là thành công khi có file đã tải xong, kể cả khi yt-dlp báo lỗi
     (ví dụ phụ đề hỏng; PLAN §11.5). Không có file thì trả None.
+    `first_seconds` (cần `ffmpeg`): chỉ tải chừng ấy giây đầu, cho video dài như livestream
+    (3 giờ là ~95 MB audio, 10 phút ~5 MB). Tải đoạn đầu không được thì tải cả audio.
     """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -135,12 +164,11 @@ def download_audio(url: str, out_dir: Path) -> Path | None:
 
     def run(extra: dict) -> Path:
         opts = {
+            **_QUIET_OPTS,
             # bestaudio là ưu tiên; /best cho video chỉ có luồng ghép, transcript.extract_audio tách tiếng sau.
             "format": "bestaudio/best",
             "outtmpl": os.path.join(str(out), f"{stem}.%(ext)s"),
             "noplaylist": True,
-            "quiet": True,
-            "no_warnings": True,
             # Nghỉ ngẫu nhiên trước mỗi lượt tải như người xem lần lượt từng video.
             "sleep_interval": 2,
             "max_sleep_interval": 6,
@@ -159,8 +187,17 @@ def download_audio(url: str, out_dir: Path) -> Path | None:
             raise YoutubeDLError("không có file audio")
         return found
 
-    try:
-        return _with_account_fallback(run)
-    except Exception as exc:  # noqa: BLE001 - mọi lỗi tải đều quy về "không có audio"
-        logger.warning("Không tải được audio (%s): %s", url, exc)
-        return None
+    attempts: list[dict] = [{}]
+    if first_seconds and ffmpeg:
+        attempts.insert(0, {"download_ranges": download_range_func(None, [(0, first_seconds)]),
+                            "ffmpeg_location": ffmpeg})
+    with _DOWNLOAD_LOCK:
+        for number, section in enumerate(attempts, 1):
+            try:
+                return _with_account_fallback(lambda extra: run({**section, **extra}))
+            except Exception as exc:  # noqa: BLE001 - mọi lỗi tải đều quy về "không có audio"
+                if number < len(attempts):
+                    logger.warning("Không tải được %s giây đầu (%s): %s; tải cả audio", first_seconds, url, exc)
+                else:
+                    logger.warning("Không tải được audio (%s): %s", url, exc)
+    return None

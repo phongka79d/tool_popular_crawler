@@ -1,6 +1,6 @@
 {
   "page": {
-    "name": "h1",
+    "name": "[role='main'] h1",
     "followers_text": "span:has-text('người theo dõi'), a:has-text('người theo dõi')",
     "followers_pattern": "(\\d[\\d.,]*(?:\\s*(?:[KkMm]|N|Tr|nghìn|triệu)\\b)?)\\s*(?:người theo dõi|followers)"
   },

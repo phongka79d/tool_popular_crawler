@@ -1,13 +1,14 @@
 """Tests hors ligne du pipeline : aucun navigateur, réseau ni vraie clé."""
 from copy import deepcopy
 from pathlib import Path
-from threading import Event
+from threading import Barrier, Event
 from types import SimpleNamespace
 
 import pytest
 
 import pipeline
 from errors import AuthError, LoginRequired, NetworkError, QuotaError
+from collectors.facebook import page_url_problem
 from models import Page
 
 
@@ -37,6 +38,9 @@ def harness(monkeypatch, tmp_path):
     monkeypatch.setattr(pipeline.config, "load_json", lambda name: {})
     monkeypatch.setattr(pipeline.config, "load_settings", lambda: settings)
     monkeypatch.setattr(pipeline.config, "load_lines", lambda name: list(state.channels) if name == "config/channels.txt" else [])
+    monkeypatch.setattr(pipeline, "page_url_problem", lambda url: None)  # kênh giả "large"/"small"
+    # Một luồng phân tích: thứ tự gọi giữa các video xác định được. Chạy song song có test riêng.
+    monkeypatch.setattr(pipeline, "ANALYZE_WORKERS", 1)
     monkeypatch.setattr(pipeline.keys, "get_key", lambda name: "fake-key-" + name)
     monkeypatch.setattr(pipeline.keys, "mask", lambda key: "••••" + key[-4:])
     monkeypatch.setattr(pipeline.jev_client, "check_key", lambda *args: None)
@@ -156,6 +160,21 @@ def test_below_threshold_page_is_skipped_and_recorded(harness):
     assert h.pauses == [True]
 
 
+def test_group_link_is_skipped_without_opening_or_pausing(harness, monkeypatch):
+    h = harness
+    group = "https://www.facebook.com/groups/123"
+    h.channels.insert(0, group)
+    # Validator thật cho link http; kênh giả "large" của harness vẫn được nhận.
+    monkeypatch.setattr(pipeline, "page_url_problem",
+                        lambda url: page_url_problem(url) if url.startswith("http") else None)
+    assert h.run() is not None
+    assert h.scans == ["large"]
+    assert h.pauses == []  # không nghỉ 30–60 giây cho link bị bỏ qua
+    log = h.exports[0][2]["pages"][0]
+    assert "nhóm" in log["skipped_reason"]
+    assert log["scanned"] == 0
+
+
 def test_page_exception_does_not_stop_the_run(harness):
     h = harness
     h.channels.insert(0, "broken")
@@ -164,6 +183,20 @@ def test_page_exception_does_not_stop_the_run(harness):
     assert h.scans == ["large"]
     assert "Không đọc được trang" in h.exports[0][2]["pages"][0]["errors"]
     assert h.exports[0][2]["pages"][1]["analyzed"] == 1
+
+
+def test_unreadable_page_link_is_reported_but_a_named_empty_page_is_not(harness):
+    h = harness
+    h.channels[:0] = ["wrong-link", "quiet"]
+    h.pages["wrong-link"] = Page("wrong-link", "", None)  # link sai: không tên, không follower, không video
+    h.pages["quiet"] = Page("quiet", "Kênh im ắng", 200_000)  # page thật, chỉ là không có video mới
+    h.rows["wrong-link"] = h.rows["quiet"] = []
+
+    assert h.run() is not None
+
+    wrong, quiet = h.exports[0][2]["pages"][:2]
+    assert any("kiểm tra link" in error for error in wrong["errors"])
+    assert quiet["errors"] == []
 
 
 def test_irrelevant_video_never_requests_llm_analysis(harness):
@@ -416,3 +449,25 @@ def test_commentary_quota_uses_same_user_choice(harness, monkeypatch, choice):
     assert harness.progress[-1].message == (
         "Đã xuất kết quả một phần." if choice == "pause" else "Đã xuất kết quả."
     )
+
+
+def test_parallel_analysis_asks_llm_quota_once_and_keeps_export_order(harness, monkeypatch):
+    h = harness
+    monkeypatch.setattr(pipeline, "ANALYZE_WORKERS", 3)
+    for video_id in ("v2", "v3"):
+        h.rows["large"].append(dict(h.rows["large"][0], video_id=video_id))
+    h.llm_error = QuotaError("llm", "Tài khoản LLM đã hết credit/hạn mức.")
+    together = Barrier(3, timeout=5)  # cả ba video tới bước LLM cùng lúc, cùng gặp hết hạn mức
+    write_analysis = pipeline.llm_client.write_analysis
+
+    def analysis(*args):
+        together.wait()
+        return write_analysis(*args)
+
+    monkeypatch.setattr(pipeline.llm_client, "write_analysis", analysis)
+    questions = []
+    h.run(ask_user=lambda *args: questions.append(args) or "continue")
+    assert len(questions) == 1
+    assert sorted(h.analysis_calls) == ["v1", "v2", "v3"]
+    assert [video.video_id for video in h.exports[0][0]] == ["v1", "v2", "v3"]
+    assert h.exports[0][2]["pages"][0]["analyzed"] == 3

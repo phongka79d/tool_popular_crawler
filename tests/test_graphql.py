@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 from pathlib import Path
 
 import pytest
@@ -262,6 +263,42 @@ def test_missing_permalink_uses_fallback_url_and_video_format():
     assert result["format"] == "video"
 
 
+def test_reels_tab_story_takes_counters_from_deferred_fragments_by_node_id():
+    """Reels tab: the Story holds media and rounded views; @defer payloads with the same node id
+    hold comments, shares and reactions. post_id may differ from the reel's media id."""
+    story = {
+        "__typename": "Story", "id": "UzpfSTpSZWVsOjE=", "post_id": "700000000000300",
+        "creation_time": 1790700000, "message": {"text": "Mẹo bảo quản thuốc mùa nồm"},
+        "attachments": [{"media": {
+            "__typename": "Video", "id": "800000000000300", "length_in_second": 31.5,
+            "play_count_reduced": "3,8K",
+            "permalink_url": "https://www.facebook.com/reel/800000000000300/",
+        }}],
+    }
+    feed = {"data": {"node": {"aggregated_fb_shorts": {"edges": [{"profile_reel_node": {"node": story}}]}}}}
+    comments_fragment = {"label": "FBReelsFeedbackBar$defer", "data": {
+        "id": "UzpfSTpSZWVsOjE=", "feedback": {"total_comment_count": 92, "share_count_reduced": "16"},
+    }}
+    reactions_fragment = {"label": "FBUnifiedVideoFeedbackBar$defer", "data": {
+        "id": "UzpfSTpSZWVsOjE=",
+        "fb_reel_react_button": {"story": {"feedback": {"unified_reactors": {"count": 691}}}},
+    }}
+    other = {"data": {"id": "unrelated", "feedback": {"total_comment_count": 1}}}
+    text = "\n".join(json.dumps(v) for v in (feed, other, comments_fragment, reactions_fragment))
+    assert gql.parse_graphql_response(text) == [{
+        "video_id": "700000000000300",
+        "url": "https://www.facebook.com/reel/800000000000300/",
+        "posted_at": 1790700000,
+        "caption": "Mẹo bảo quản thuốc mùa nồm",
+        "views": 3800,
+        "reactions": 691,
+        "comments": 92,
+        "shares": 16,
+        "duration_s": 31.5,
+        "format": "reel",
+    }]
+
+
 def test_parse_initial_html_reads_only_data_sjs_blobs():
     assert gql.parse_initial_html(PAGE_HTML) == [HTML_REEL, HTML_VIDEO]
 
@@ -272,6 +309,64 @@ def test_parse_page_header_reads_page_node_from_initial_html():
 
 def test_parse_page_header_without_page_node_returns_empty_values():
     assert gql.parse_page_header("<html></html>") == {"name": "", "followers": None}
+
+
+def test_parse_page_header_reads_new_style_page_name_from_header_renderer_user():
+    # Page kiểu mới có __typename "User", giống mọi tài khoản khác trong HTML (tác giả bài, người xem).
+    # Chỉ user của profile_header_renderer là page; viewer là tài khoản phụ đang đăng nhập.
+    payload = json.dumps({"data": {
+        "feed": {"owning_profile": {"__typename": "User", "name": "Trang Khác"}},
+        "user": {"profile_header_renderer": {
+            "__typename": "XFBProfileEntityConvergenceHeaderRenderer",
+            "viewer": {"actor": {"__typename": "User", "name": "Tài khoản phụ"}},
+            "user": {"__isProfile": "User", "name": "Nhà Thuốc Mẫu"},
+        }},
+    }}, ensure_ascii=False)
+    assert gql.parse_page_header(payload) == {"name": "Nhà Thuốc Mẫu", "followers": None}
+
+
+def _channel_tile(video_id: str, url: str) -> dict:
+    """One Videos-tab tile as Facebook sends it (trimmed real capture): the video node is not a Story."""
+    return {"node": {"id": video_id, "channel_tab_thumbnail_renderer": {
+        "__typename": "ChannelTabVideoThumbnailWithReactionsRenderer",
+        "video": {
+            "id": video_id,
+            "canonical_uri_with_fallback": url,
+            "publish_time": 1791527855,
+            "play_count": 1512408,
+            "post_play_count": 540335,
+            "savable_title": {"text": "Mẹ ăn gì để con khỏe?"},
+            "video_thumbnail_overlays_renderer": {
+                "__typename": "VideoHomeVideoThumbnailOverlaysDefaultRenderer",
+                "video": {"playable_duration_in_ms": 101471, "playable_duration": 102, "id": video_id},
+            },
+            "feedback": {"id": "ZmVlZGJhY2s6MQ==", "reaction_count": {"count": 691}, "i18n_reaction_count": "691"},
+        },
+    }}}
+
+
+def test_videos_tab_tiles_become_records_with_play_count_as_views():
+    payload = json.dumps({"data": {"node": {"__typename": "VirtualVideosChannel", "all_videos": {"edges": [
+        _channel_tile("1098563256480613", "https://www.facebook.com/Trang/videos/1098563256480613/"),
+        _channel_tile("2947279425652566", "https://www.facebook.com/reel/2947279425652566/"),
+    ]}}}}, ensure_ascii=False)
+
+    videos = gql.parse_graphql_response(payload)
+
+    assert [(v["video_id"], v["format"]) for v in videos] == [
+        ("1098563256480613", "video"), ("2947279425652566", "reel")]
+    assert videos[0] == {
+        "video_id": "1098563256480613",
+        "url": "https://www.facebook.com/Trang/videos/1098563256480613/",
+        "posted_at": 1791527855,
+        "caption": "Mẹ ăn gì để con khỏe?",
+        "views": 1512408,  # play_count (tổng lượt xem), không phải post_play_count
+        "reactions": 691,
+        "comments": None,  # tile không có: để yt-dlp bổ sung
+        "shares": None,
+        "duration_s": pytest.approx(101.471),
+        "format": "video",
+    }
 
 
 def test_config_loads_and_every_alternative_is_a_non_empty_path():

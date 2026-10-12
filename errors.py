@@ -36,3 +36,7 @@ class NetworkError(ServiceError):
 
 class LoginRequired(ServiceError):
     """Facebook: checkpoint, login page, or missing c_user/xs cookies."""
+
+
+class BrowserUnavailable(ServiceError):
+    """Facebook: the tool's browser profile is already open in another window or process."""

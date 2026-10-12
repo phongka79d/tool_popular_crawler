@@ -7,7 +7,12 @@ Behaviour fixed in code, not config:
 - A Story node (``__typename`` == story typename with a post_id) is collected once per
   post_id; duplicates fill missing fields without overwriting non-empty values.
   A collected story is not searched further: its nested stories belong to another page.
+- Deferred fragments (``@defer`` payloads such as the Reels tab counters) carry no typename,
+  only the Story's GraphQL node ``id``; a dict with that id fills the Story the same way.
+- Counts are read from the merge of every block that the ``feedback`` paths reach.
 - A count that is absent stays None (unknown), never 0, so the caller can fill it from yt-dlp.
+- The Videos tab sends channel tiles (renderer typenames in ``channel_video``) whose video node
+  is not a Story; each tile becomes one record, merged by video_id with any Story record.
 """
 
 from __future__ import annotations
@@ -29,6 +34,7 @@ Alternatives = list[list[Key]]
 
 _CONFIG_NAME = "graphql_paths.json"
 _TYPENAME_KEY = "__typename"  # GraphQL protocol key, not a Facebook field
+_NODE_ID_KEY = "id"  # GraphQL protocol key: global node id shared by a Story and its deferred fragments
 _WILDCARD = "*"  # path element: every item of a list
 _JSON_SPACE = " \r\n\t"
 _SJS_RE = re.compile(
@@ -48,6 +54,19 @@ class ReactionPaths:
     by_id: dict[str, str]  # reaction id -> reaction type
     by_name: dict[str, str]  # localized name -> reaction type
 
+
+@dataclass(frozen=True)
+class ChannelVideoPaths:
+    renderer_typenames: list[str]  # Videos-tab tiles that each hold one video node
+    video: Alternatives  # relative to the tile: the video node
+    video_id: Alternatives  # the rest are relative to the video node
+    creation_time: Alternatives
+    permalink_url: Alternatives
+    message: Alternatives
+    views: Alternatives
+    feedback: Alternatives  # reactions/comments/shares then use the shared counter paths
+    duration_ms: Alternatives
+    duration_s: Alternatives
 
 @dataclass(frozen=True)
 class GraphqlPaths:
@@ -71,6 +90,7 @@ class GraphqlPaths:
     page_typenames: list[str]  # page header: node typenames to read
     page_name: Alternatives  # relative to a page node
     page_followers: Alternatives  # relative to a page node
+    channel_video: ChannelVideoPaths
 
 
 def load_paths() -> GraphqlPaths:
@@ -79,7 +99,8 @@ def load_paths() -> GraphqlPaths:
     raw.pop("_doc", None)
     try:
         reactions = ReactionPaths(**raw.pop("reactions"))
-        return GraphqlPaths(**raw, reactions=reactions)
+        channel_video = ChannelVideoPaths(**raw.pop("channel_video"))
+        return GraphqlPaths(**raw, reactions=reactions, channel_video=channel_video)
     except (KeyError, TypeError) as exc:
         raise ValueError(f"{_CONFIG_NAME} sai cấu trúc: {exc}") from exc
 
@@ -109,13 +130,15 @@ def split_json_values(text: str) -> list:
 
 
 def extract_stories(obj: Any, paths: GraphqlPaths | None = None) -> list[dict]:
-    """Story nodes in first-seen post_id order, with missing fields filled by duplicates.
+    """Story nodes in first-seen post_id order, with missing fields filled by duplicates
+    and by deferred fragments that share the Story's node id.
 
     ``obj`` is any decoded JSON value, typically the list from ``split_json_values``.
     """
     p = paths if paths is not None else load_paths()
     stories: list[dict] = []
     positions: dict[str, int] = {}
+    node_ids: dict[str, int] = {}
     for node in _walk_dicts(obj, stop=lambda d: _story_id(d, p) is not None):
         post_id = _story_id(node, p)
         if post_id is None:
@@ -125,7 +148,20 @@ def extract_stories(obj: Any, paths: GraphqlPaths | None = None) -> list[dict]:
             stories[index] = _merge_story_fields(stories[index], node)
             continue
         positions[post_id] = len(stories)
+        node_id = node.get(_NODE_ID_KEY)
+        if isinstance(node_id, str):
+            node_ids[node_id] = len(stories)
         stories.append(node)
+    if node_ids:
+        def fragment_of(d: dict) -> int | None:
+            node_id = d.get(_NODE_ID_KEY)
+            return node_ids.get(node_id) if isinstance(node_id, str) and _story_id(d, p) is None else None
+
+        # Stop at stories (already collected) and at fragments (merged whole).
+        for node in _walk_dicts(obj, stop=lambda d: _story_id(d, p) is not None or fragment_of(d) is not None):
+            index = fragment_of(node)
+            if index is not None:
+                stories[index] = _merge_story_fields(stories[index], node)
     return stories
 
 
@@ -170,22 +206,54 @@ def flatten(story: dict, paths: GraphqlPaths | None = None) -> dict | None:
     video_id = _first(story, p.post_id, _as_id)
     if video_id is None:
         return None
-    feedback = _first(story, p.feedback, _as_dict) or {}
+    feedback = _merged(story, p.feedback)
     if not _is_video(story, feedback, p):
         return None
-
     url = _first(story, p.permalink_url, _as_text) or p.fallback_url.format(video_id=video_id)
-    duration_ms = _first(story, p.duration_ms, _as_number)
-    if duration_ms is not None:
-        duration_s = duration_ms / 1000
-    else:
-        duration_s = _first(story, p.duration_s, _as_number)
+    return _record(video_id, url, _first(story, p.creation_time, _as_int), _first(story, p.message, _as_text),
+                   _first(feedback, p.views, _as_count), feedback,
+                   _duration(story, p.duration_ms, p.duration_s), p)
+
+
+def flatten_channel_video(video: dict, paths: GraphqlPaths | None = None) -> dict | None:
+    """Flatten one Videos-tab video node (not a Story) into a video record."""
+    if not isinstance(video, dict):
+        return None
+    p = paths if paths is not None else load_paths()
+    c = p.channel_video
+    video_id = _first(video, c.video_id, _as_id)
+    if video_id is None:
+        return None
+    feedback = _merged(video, c.feedback)
+    url = _first(video, c.permalink_url, _as_text) or p.fallback_url.format(video_id=video_id)
+    views = _first(video, c.views, _as_count)
+    if views is None:
+        views = _first(feedback, p.views, _as_count)
+    return _record(video_id, url, _first(video, c.creation_time, _as_int), _first(video, c.message, _as_text),
+                   views, feedback, _duration(video, c.duration_ms, c.duration_s), p)
+
+
+def _merged(node: dict, alternatives: Alternatives) -> dict:
+    merged: dict = {}
+    for block in _all_values(node, alternatives):
+        if isinstance(block, dict):
+            merged = _merge_story_fields(merged, block)
+    return merged
+
+
+def _duration(node: dict, ms_paths: Alternatives, s_paths: Alternatives) -> float | None:
+    duration_ms = _first(node, ms_paths, _as_number)
+    return duration_ms / 1000 if duration_ms is not None else _first(node, s_paths, _as_number)
+
+
+def _record(video_id: str, url: str, posted_at: int | None, caption: str | None, views: int | None,
+            feedback: dict, duration_s: float | None, p: GraphqlPaths) -> dict:
     return {
         "video_id": video_id,
         "url": url,
-        "posted_at": _first(story, p.creation_time, _as_int),
-        "caption": _first(story, p.message, _as_text) or "",
-        "views": _first(feedback, p.views, _as_count),
+        "posted_at": posted_at,
+        "caption": caption or "",
+        "views": views,
         "reactions": _reactions(feedback, p.reactions),
         "comments": _first(feedback, p.comments, _as_count),
         "shares": _first(feedback, p.shares, _as_count),
@@ -233,7 +301,25 @@ def parse_page_header(html_or_json: str, paths: GraphqlPaths | None = None) -> d
 def _videos_from(values: list, p: GraphqlPaths) -> list[dict]:
     stories = extract_stories(values, p)
     videos = [video for video in (flatten(story, p) for story in stories) if video is not None]
-    log.debug("GraphQL: %d story, %d video", len(stories), len(videos))
+    by_id = {video["video_id"]: video for video in videos}
+    tiles = 0
+    for tile in _walk_dicts(values):
+        if tile.get(_TYPENAME_KEY) not in p.channel_video.renderer_typenames:
+            continue
+        for node in _all_values(tile, p.channel_video.video):
+            record = flatten_channel_video(node, p)
+            if record is None:
+                continue
+            tiles += 1
+            existing = by_id.get(record["video_id"])
+            if existing is None:
+                by_id[record["video_id"]] = record
+                videos.append(record)
+                continue
+            for key, value in record.items():
+                if existing.get(key) in (None, "") and value not in (None, ""):
+                    existing[key] = value
+    log.debug("GraphQL: %d story, %d tile, %d video", len(stories), tiles, len(videos))
     return videos
 
 

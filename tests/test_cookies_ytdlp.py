@@ -242,7 +242,8 @@ def test_import_cookies_invalid_file_does_not_open_browser(tmp_path, monkeypatch
 @pytest.mark.parametrize("timeout", [True, False])
 @pytest.mark.parametrize(
     "batches, max_rounds, expected_rounds",
-    [([[], [], []], 10, 2), ([["1"], [], ["2"], [], []], 10, 5),
+    # Tab trống dừng ngay sau vòng cuộn đầu; tab có video dừng sau stall_rounds vòng không có video mới.
+    [([[], [], []], 10, 1), ([["1"], [], ["2"], [], []], 10, 5),
      ([["1"], ["2"], ["3"], ["4"]], 3, 3)],
 )
 def test_scan_page_expect_response_timeout_stall_and_round_cap(
@@ -564,3 +565,21 @@ def test_download_audio_ignores_partial_or_empty_files(monkeypatch, tmp_path, ex
     _install_fake_ydl(monkeypatch, on_download=lambda opts, urls: _write_audio(opts, ext=ext, data=data))
 
     assert ytdlp.download_audio("https://www.facebook.com/reel/9", tmp_path) is None
+
+
+def test_download_audio_first_seconds_falls_back_to_full_audio(monkeypatch, tmp_path):
+    monkeypatch.setattr(ytdlp, "_cookie_opts", lambda: {})
+    attempts = []
+
+    def ranged_fails(opts, urls):
+        attempts.append("ranged" if "download_ranges" in opts else "full")
+        if "download_ranges" in opts:
+            raise DownloadError("ffmpeg không cắt được đoạn đầu")
+        return _write_audio(opts)
+
+    _install_fake_ydl(monkeypatch, on_download=ranged_fails)
+
+    out = ytdlp.download_audio("https://www.facebook.com/p/videos/9", tmp_path, first_seconds=600, ffmpeg="ffmpeg")
+
+    assert out is not None and out.exists()
+    assert attempts == ["ranged", "full"]

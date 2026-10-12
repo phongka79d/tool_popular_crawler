@@ -244,8 +244,25 @@ class TestWriteCommentary:
 
 
 class TestCheckKey:
-    def test_pings_with_one_token(self, monkeypatch):
-        client, comp = fake_client(_reply("pong"))
+    @staticmethod
+    def _client(model_ids=None, models_error=None, *outcomes):
+        from openai.types import Model
+
+        client, comp = fake_client(*outcomes)
+
+        def list_models():
+            if models_error is not None:
+                raise models_error
+            return SimpleNamespace(data=[
+                Model.model_validate({"id": i, "object": "model", "created": 0, "owned_by": "x"})
+                for i in model_ids or []
+            ])
+
+        client.models = SimpleNamespace(list=list_models)
+        return client, comp
+
+    def test_listed_model_passes_without_spending_a_token(self, monkeypatch):
+        client, comp = self._client(["m-0", "m-1"])
         seen = {}
 
         def fake_make_client(base_url, api_key):
@@ -256,13 +273,29 @@ class TestCheckKey:
 
         assert llm_client.check_key("https://llm.test/v1", "sk-test", "m-1") is None
         assert seen["args"] == ("https://llm.test/v1", "sk-test")
+        assert comp.calls == []
+
+    @pytest.mark.parametrize("models_error", [None, FakeStatusError("no /models", status_code=404)])
+    def test_unlisted_model_or_no_models_endpoint_pings_with_one_token(self, monkeypatch, models_error):
+        client, comp = self._client(["other"], models_error, _reply("pong"))
+        monkeypatch.setattr(llm_client, "make_client", lambda base_url, api_key: client)
+
+        assert llm_client.check_key("https://llm.test/v1", "sk-test", "m-1") is None
         call = comp.calls[0]
         assert call["max_tokens"] == 1
         assert call["model"] == "m-1"
         assert call["messages"] == [{"role": "user", "content": "ping"}]
 
-    def test_invalid_key_raises_auth_error(self, monkeypatch):
-        client, _ = fake_client(FakeStatusError("invalid key", status_code=401))
+    def test_invalid_key_on_models_list_raises_auth_error_without_ping(self, monkeypatch):
+        client, comp = self._client(models_error=FakeStatusError("invalid key", status_code=401))
+        monkeypatch.setattr(llm_client, "make_client", lambda base_url, api_key: client)
+
+        with pytest.raises(AuthError):
+            llm_client.check_key("https://llm.test/v1", "sk-bad", "m-1")
+        assert comp.calls == []
+
+    def test_invalid_key_on_ping_raises_auth_error(self, monkeypatch):
+        client, _ = self._client(["other"], None, FakeStatusError("invalid key", status_code=401))
         monkeypatch.setattr(llm_client, "make_client", lambda base_url, api_key: client)
 
         with pytest.raises(AuthError):
