@@ -16,6 +16,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 
@@ -1001,7 +1002,7 @@ def _download_button(path: Path) -> None:
                                      key=f"download_{path.name}", width="stretch")
     except OSError:
         download.error("Không đọc được file Excel. Kiểm tra quyền truy cập thư mục output.")
-    if delete.button("Xóa file", icon=":material/delete:", help="Xóa file",
+    if delete.button("", icon=":material/delete:", help="Xóa file",
                      key=f"delete_{path.name}", width="stretch"):
         _delete_dialog(path)
 
@@ -1050,6 +1051,20 @@ def _turn_rows(turns: list[dict]) -> list[dict]:
             for turn in reversed(turns)]
 
 
+def _table_number(value: float) -> str:
+    """Số kiểu Việt Nam cho bảng: 1.612 · 3,64 · 140,66."""
+    text = f"{value:,.2f}".rstrip("0").rstrip(".")
+    return text.replace(",", "\0").replace(".", ",").replace("\0", ".")
+
+
+def _turn_frame(turns: list[dict]) -> pd.DataFrame:
+    """Bảng hiển thị: mọi cột số theo kiểu Việt Nam, tốc độ chưa đo hiện "—"."""
+    frame = pd.DataFrame(_turn_rows(turns))
+    for column in frame.columns.drop("Lượt", errors="ignore"):
+        frame[column] = frame[column].map(lambda value: "—" if pd.isna(value) else _table_number(value))
+    return frame
+
+
 def _channel_rows(channels: list[dict]) -> list[dict]:
     rows = []
     for channel in channels:
@@ -1059,10 +1074,32 @@ def _channel_rows(channels: list[dict]) -> list[dict]:
                     else 0.1 if channel["status"] != "Chờ quét" else 0.0)
         if channel["status"] == "Bỏ qua":
             fraction = 1.0
-        rows.append({"Kênh": channel["url"], "Trạng thái": channel["status"],
+        rows.append({"Kênh": channel.get("name") or channel["url"], "Link kênh": channel["url"],
+                     "Follower": channel.get("followers"), "Trạng thái": channel["status"],
                      "Tiến độ": fraction, "Tìm thấy": channel["found"],
                      "Đạt ngưỡng": passed, "Đã phân tích": analyzed})
     return rows
+
+
+def _channel_frame(channels: list[dict]) -> pd.DataFrame:
+    """Định dạng số để ô chưa có dữ liệu luôn hiện —, không hiện None."""
+    frame = pd.DataFrame(_channel_rows(channels))
+    if not frame.empty:
+        for column in ("Follower", "Tìm thấy", "Đạt ngưỡng", "Đã phân tích"):
+            frame[column] = frame[column].map(lambda value: "—" if pd.isna(value) else _int_text(value))
+    return frame
+
+
+def _page_header(message: str) -> tuple[str, int | None] | None:
+    """Chỉ đọc thông báo tên/follower, không nhầm với diễn biến quét kênh."""
+    match = re.fullmatch(
+        r"Kênh \d+/\d+: (.+) · (?:(\d[\d.,\s]*) người theo dõi|chưa đọc được số người theo dõi)",
+        message,
+    )
+    if not match:
+        return None
+    count = match.group(2)
+    return match.group(1).strip(), int(re.sub(r"\D", "", count)) if count is not None else None
 
 
 def _track_channels(state, event: pipeline.Progress) -> None:
@@ -1077,6 +1114,9 @@ def _track_channels(state, event: pipeline.Progress) -> None:
         if event.error:
             channel["status"] = "Có lỗi"
         elif event.stage == "scan":
+            header = _page_header(event.message)
+            if header:
+                channel["name"], channel["followers"] = header
             if "bỏ qua." in event.message:
                 channel["status"] = "Bỏ qua"
             elif channel["passed"] is None:
@@ -1137,13 +1177,60 @@ def _record_scan_progress(state, event: pipeline.Progress, now: datetime, redact
 
 
 def _render_channels() -> None:
-    rows = _channel_rows(st.session_state.get("scan_channels", []))
-    if rows:
+    frame = _channel_frame(st.session_state.get("scan_channels", []))
+    if not frame.empty:
         with st.expander("Tiến độ từng kênh", expanded=True):
-            st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch",
-                         column_config={"Tiến độ": st.column_config.ProgressColumn(
-                             "Tiến độ", min_value=0, max_value=1, format="percent")})
+            st.dataframe(frame, hide_index=True, width="stretch",
+                         column_config={"Link kênh": st.column_config.LinkColumn("Link kênh",
+                                                                               display_text="Mở kênh"),
+                                        "Tiến độ": st.column_config.ProgressColumn(
+                                            "Tiến độ", min_value=0, max_value=1, format="percent")})
             st.caption("Số liệu cập nhật khi quét, lọc hoặc phân tích xong từng mục; — là chưa có số liệu.")
+
+
+def _chart_value(value: float) -> str:
+    return (f"{value:,.0f}" if float(value).is_integer() else f"{value:,.2f}").translate(
+        str.maketrans({",": ".", ".": ","}))
+
+
+def _bar_chart(data: pd.DataFrame, category: str, value: str, *, horizontal: bool = False,
+               height: int = 240, count: bool = False, series: str | None = None) -> alt.Chart:
+    """Biểu đồ chỉ có tooltip; không bắt cuộn chuột để thay đổi thang đo."""
+    frame = data.copy()
+    frame["Giá trị hiển thị"] = frame[value].map(_chart_value)
+    axis = alt.Axis(tickMinStep=1, format="d") if count else alt.Axis(format="~s")
+    scale = alt.Scale(domainMin=0, zero=True)
+    order = list(dict.fromkeys(frame[category]))
+    category_axis = {"field": category, "type": "nominal", "sort": order, "title": category}
+    numeric_axis = {"field": value, "type": "quantitative", "axis": axis, "scale": scale, "title": value}
+    encoding = {"x": alt.X(**numeric_axis) if horizontal else alt.X(**category_axis),
+                "y": alt.Y(**category_axis) if horizontal else alt.Y(**numeric_axis),
+                "tooltip": [alt.Tooltip(field=category, type="nominal"),
+                            alt.Tooltip(field="Giá trị hiển thị", type="nominal", title=value)]}
+    if series:
+        encoding["color"] = alt.Color(field=series, type="nominal", title=None)
+        encoding["tooltip"].append(alt.Tooltip(field=series, type="nominal"))
+        encoding["yOffset" if horizontal else "xOffset"] = (
+            alt.YOffset(field=series, type="nominal") if horizontal
+            else alt.XOffset(field=series, type="nominal"))
+    return alt.Chart(frame).mark_bar().encode(**encoding).properties(height=height)
+
+
+def _usage_line_chart(history: list[dict]) -> alt.Chart:
+    frame = pd.DataFrame(history).melt(id_vars=["Thời gian"],
+                                      value_vars=["Token LLM", "Token Jev"],
+                                      var_name="Dịch vụ", value_name="Token")
+    frame["Token hiển thị"] = frame["Token"].map(_chart_value)
+    frame["Mốc thời gian"] = frame["Thời gian"].map(lambda stamp: stamp.strftime("%H:%M:%S"))
+    return alt.Chart(frame).mark_line(point=True).encode(
+        x=alt.X(field="Thời gian", type="temporal", axis=alt.Axis(format="%H:%M:%S")),
+        y=alt.Y(field="Token", type="quantitative", axis=alt.Axis(format="~s"),
+                scale=alt.Scale(domainMin=0, zero=True)),
+        color=alt.Color(field="Dịch vụ", type="nominal", title=None),
+        tooltip=[alt.Tooltip(field="Mốc thời gian", type="nominal", title="Thời gian"),
+                 alt.Tooltip(field="Dịch vụ", type="nominal"),
+                 alt.Tooltip(field="Token hiển thị", type="nominal", title="Token")],
+    ).properties(height=220)
 
 
 def _usage_charts() -> None:
@@ -1151,8 +1238,7 @@ def _usage_charts() -> None:
     with st.expander("Biểu đồ sử dụng & từng lượt", expanded=True):
         if history:
             st.markdown("**Token tích lũy theo thời gian**")
-            st.line_chart(pd.DataFrame(history), x="Thời gian", y=["Token LLM", "Token Jev"],
-                          x_label="Thời gian", y_label="Token", height=220)
+            st.altair_chart(_usage_line_chart(history), width="stretch")
         if turns:
             rows = _turn_rows(turns)
             latest = rows[0]
@@ -1164,15 +1250,17 @@ def _usage_charts() -> None:
             chart = pd.DataFrame(list(reversed(rows)))
             with tokens:
                 st.markdown("**Token từng lượt**")
-                st.bar_chart(chart, x="Lượt", y=["Token LLM", "Token Jev"], stack=False, height=240)
+                token_data = chart.melt(id_vars=["Lượt"], value_vars=["Token LLM", "Token Jev"],
+                                        var_name="Dịch vụ", value_name="Token")
+                st.altair_chart(_bar_chart(token_data, "Lượt", "Token", series="Dịch vụ"), width="stretch")
             with speeds:
                 st.markdown("**Tốc độ LLM từng lượt**")
                 measured = chart.dropna(subset=["Token/giây"])
                 if not measured.empty:
-                    st.bar_chart(measured, x="Lượt", y="Token/giây", height=240)
+                    st.altair_chart(_bar_chart(measured, "Lượt", "Token/giây"), width="stretch")
                 else:
                     st.caption("Chưa có lượt gọi LLM có token trả về.")
-            st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+            st.dataframe(_turn_frame(turns), hide_index=True, width="stretch")
         else:
             st.caption("Số liệu từng lượt sẽ hiện khi phân tích xong video, bài đăng hoặc nhận xét tổng hợp.")
 
@@ -1396,18 +1484,18 @@ def _render_summary(summary: dict) -> None:
         with left:
             st.markdown(f"**Top 10 theo {metric_label.lower()}**")
             if top:
-                st.bar_chart(pd.DataFrame(top), x="Nội dung", y=metric_label,
-                             horizontal=True, sort=False, height=320)
+                st.altair_chart(_bar_chart(pd.DataFrame(top), "Nội dung", metric_label,
+                                          horizontal=True, height=320), width="stretch")
             else:
                 st.caption(f"Chưa có số liệu {metric_label.lower()} để vẽ biểu đồ.")
         with right:
             st.markdown("**Nội dung theo chủ đề**")
-            st.bar_chart(pd.DataFrame(topics), x="Chủ đề", y="Số nội dung",
-                         horizontal=True, height=320)
+            st.altair_chart(_bar_chart(pd.DataFrame(topics), "Chủ đề", "Số nội dung",
+                                      horizontal=True, height=320, count=True), width="stretch")
         st.markdown("**Phân bố điểm công thức**")
         if scores:
-            st.bar_chart(pd.DataFrame(distribution), x="Điểm công thức", y="Số nội dung", sort=False,
-                         height=220)
+            st.altair_chart(_bar_chart(pd.DataFrame(distribution), "Điểm công thức", "Số nội dung",
+                                      height=220, count=True), width="stretch")
         else:
             st.caption("Chưa có điểm công thức để vẽ biểu đồ.")
 

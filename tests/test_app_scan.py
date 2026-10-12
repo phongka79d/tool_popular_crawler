@@ -429,3 +429,156 @@ def test_channel_progress_distinguishes_unknown_counts_from_no_results():
     assert rows[1]["Đạt ngưỡng"] == 0
     assert rows[1]["Tiến độ"] == 1
     assert rows[2]["Tiến độ"] == 1
+
+
+@pytest.mark.parametrize("value,expected", [(200000, "200.000"), (1234.5, "1.234,50"),
+                                          (0, "0"), (12.34, "12,34")])
+def test_chart_tooltip_values_use_vietnamese_separators(value, expected):
+    assert app._chart_value(value) == expected
+
+
+@pytest.mark.parametrize("horizontal", [False, True])
+def test_count_charts_have_zero_based_integer_axes_and_no_zoom_selection(horizontal):
+    chart = app._bar_chart(app.pd.DataFrame([
+        {"Chủ đề": "A", "Số nội dung": 2}, {"Chủ đề": "B", "Số nội dung": 1}
+    ]), "Chủ đề", "Số nội dung", count=True, horizontal=horizontal)
+    spec = chart.to_dict()
+    numeric = spec["encoding"]["x" if horizontal else "y"]
+    assert numeric["scale"]["domainMin"] == 0
+    assert numeric["scale"]["zero"] is True
+    assert numeric["axis"]["tickMinStep"] == 1
+    assert numeric["axis"]["format"] == "d"
+    assert "params" not in spec
+    assert "selection" not in spec
+    assert spec["encoding"]["tooltip"]
+
+
+def test_large_number_chart_uses_compact_axis_and_localized_tooltips():
+    spec = app._bar_chart(app.pd.DataFrame([
+        {"Nội dung": "A", "Lượt xem": 200000}
+    ]), "Nội dung", "Lượt xem", horizontal=True).to_dict()
+    assert spec["encoding"]["x"]["axis"]["format"] == "~s"
+    assert spec["encoding"]["x"]["scale"]["domainMin"] == 0
+    assert "params" not in spec
+    data = next(iter(spec["datasets"].values()))
+    assert data[0]["Giá trị hiển thị"] == "200.000"
+
+
+def test_token_series_chart_keeps_grouped_bars_without_scale_bindings():
+    spec = app._bar_chart(app.pd.DataFrame([
+        {"Lượt": "Video 1", "Dịch vụ": "Token LLM", "Token": 200000},
+        {"Lượt": "Video 1", "Dịch vụ": "Token Jev", "Token": 1000},
+    ]), "Lượt", "Token", series="Dịch vụ").to_dict()
+    assert spec["encoding"]["xOffset"]["field"] == "Dịch vụ"
+    assert spec["encoding"]["color"]["field"] == "Dịch vụ"
+    assert spec["encoding"]["y"]["axis"]["format"] == "~s"
+    assert "params" not in spec
+    assert "selection" not in spec
+
+
+def test_usage_line_chart_keeps_tooltips_without_wheel_zoom():
+    spec = app._usage_line_chart([
+        {"Thời gian": datetime(2026, 10, 12, 10, 0), "Token LLM": 200000, "Token Jev": 1000},
+    ]).to_dict()
+    assert spec["encoding"]["y"]["scale"]["domainMin"] == 0
+    assert spec["encoding"]["y"]["axis"]["format"] == "~s"
+    assert "params" not in spec
+    assert "selection" not in spec
+    assert spec["encoding"]["tooltip"]
+    data = next(iter(spec["datasets"].values()))
+    assert any(row["Token hiển thị"] == "200.000" for row in data)
+
+
+def test_delete_button_is_icon_only_with_vietnamese_help(monkeypatch, tmp_path):
+    path = tmp_path / "result.xlsx"
+    path.write_bytes(b"example")
+    options = []
+    download = SimpleNamespace(download_button=lambda *args, **kwargs: None)
+
+    def button(label, **kwargs):
+        options.append((label, kwargs))
+        return False
+
+    delete = SimpleNamespace(button=button)
+    monkeypatch.setattr(app, "st", SimpleNamespace(columns=lambda *args, **kwargs: [download, delete]))
+    app._download_button(path)
+    label, kwargs = options[0]
+    assert label == ""
+    assert kwargs["icon"] == ":material/delete:"
+    assert kwargs["help"] == "Xóa file"
+
+
+@pytest.mark.parametrize("message,expected", [
+    ("Kênh 1/3: Nhà thuốc A · 200.000 người theo dõi", ("Nhà thuốc A", 200000)),
+    ("Kênh 2/3: Page A · Page B · 1,234 người theo dõi", ("Page A · Page B", 1234)),
+    ("Kênh 3/3: Tên kênh · 0 người theo dõi", ("Tên kênh", 0)),
+    ("Kênh 1/3: Tên kênh · chưa đọc được số người theo dõi", ("Tên kênh", None)),
+    ("Kênh 1/3: mở trang, đọc tên và số người theo dõi…", None),
+    ("Kênh 1/3: thu được 5 video trong 14 ngày.", None),
+    ("Kênh 1/3 · Tab Video xong: thêm 5 video mới", None),
+])
+def test_page_header_only_parses_name_and_follower_events(message, expected):
+    assert app._page_header(message) == expected
+
+
+def test_channel_metadata_is_kept_after_later_progress_events():
+    state = {}
+    app._track_channels(state, _progress_event(
+        stage="scan", page_url="https://www.facebook.com/page",
+        message="Kênh 1/1: Nhà thuốc A · 123.456 người theo dõi"))
+    app._track_channels(state, _progress_event(
+        stage="scan", page_url="https://www.facebook.com/page",
+        message="Kênh 1/1: thu được 5 video trong 14 ngày."))
+    row = app._channel_rows(state["scan_channels"])[0]
+    assert row["Kênh"] == "Nhà thuốc A"
+    assert row["Link kênh"] == "https://www.facebook.com/page"
+    assert row["Follower"] == 123456
+    assert row["Tìm thấy"] == 5
+
+
+def test_channel_table_formats_unknown_counts_as_dashes_and_known_counts_locally():
+    channels = [
+        {"url": "https://www.facebook.com/first", "status": "Chờ quét",
+         "found": None, "passed": None, "analyzed": 0},
+        {"url": "https://www.facebook.com/second", "name": "Nhà thuốc A", "followers": 200000,
+         "status": "Đã phân tích", "found": 1234, "passed": 0, "analyzed": 0},
+    ]
+    records = app._channel_frame(channels).to_dict(orient="records")
+    assert records[0]["Follower"] == "—"
+    assert records[0]["Tìm thấy"] == "—"
+    assert records[0]["Đạt ngưỡng"] == "—"
+    assert records[0]["Đã phân tích"] == "0"
+    assert records[1]["Kênh"] == "Nhà thuốc A"
+    assert records[1]["Follower"] == "200.000"
+    assert records[1]["Tìm thấy"] == "1.234"
+    assert records[1]["Đạt ngưỡng"] == "0"
+    assert all(value is not None for row in records for value in row.values())
+    assert "None" not in str(records)
+
+
+def test_channel_table_retains_name_when_follower_count_is_unavailable():
+    state = {}
+    app._track_channels(state, _progress_event(
+        stage="scan", message="Kênh 1/1: Nhà thuốc A · chưa đọc được số người theo dõi"))
+    row = app._channel_frame(state["scan_channels"]).to_dict(orient="records")[0]
+    assert row["Kênh"] == "Nhà thuốc A"
+    assert row["Follower"] == "—"
+    assert row["Link kênh"] == "page"
+
+
+def test_channel_table_all_unknown_numeric_cells_are_dashes():
+    channels = [{"url": "page", "status": "Chờ quét", "found": None,
+                 "passed": None, "analyzed": 0}]
+    frame = app._channel_frame(channels)
+    assert frame.loc[0, ["Follower", "Tìm thấy", "Đạt ngưỡng"]].tolist() == ["—", "—", "—"]
+    assert app._channel_frame([]).empty
+
+
+def test_turn_table_never_displays_none_for_unmeasured_speed():
+    frame = app._turn_frame([{"label": "Video 1"}, {"label": "Video 2"}])
+    assert frame["Token/giây"].tolist() == ["—", "—"]
+    frame = app._turn_frame([
+        {"label": "Video 1", "llm_output_tokens": 10, "llm_seconds": 4},
+        {"label": "Video 2"},
+    ])
+    assert frame["Token/giây"].tolist() == ["—", "2,5"]
