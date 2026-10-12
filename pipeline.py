@@ -80,6 +80,7 @@ class Progress:
     steps: int = 0  # tổng số việc của bước hiện tại; 0 khi không đếm trước được
     usage: dict | None = None  # ảnh chụp run_log["usage"]: token, số lần gọi, thời gian và tốc độ LLM
     transient: bool = False  # cập nhật tạm (đếm ngược khi nghỉ): hiện ở khung tiến độ, không ghi vào diễn biến
+    turn: dict | None = None  # mức dùng riêng của mục vừa hoàn tất
 
 
 def _safe_message(exc: object, credentials: dict) -> str:
@@ -197,7 +198,8 @@ def run(
         "finished_at": None,
         "params": params_log,
         "pages": [],
-        "usage": {"jev_tokens": 0, "llm_tokens": 0, "deepgram_minutes": 0.0, "llm_model": settings["llm"]["model"],
+        "usage": {"jev_tokens": 0, "jev_calls": 0, "llm_tokens": 0, "deepgram_minutes": 0.0,
+                  "deepgram_calls": 0, "llm_model": settings["llm"]["model"],
                   "llm_calls": 0, "llm_output_tokens": 0, "llm_seconds": 0.0, "llm_cached": 0},
         "messages": [],
     }
@@ -220,7 +222,7 @@ def run(
     fatal: list[BaseException] = []
     filtered_pages: set[str] = set()
     # Các luồng phân tích chỉ ghi run_log, page_logs và bộ đếm khi giữ `lock`.
-    lock = threading.Lock()
+    lock = threading.RLock()
     clients_lock = threading.Lock()
     quota_lock = threading.Lock()
     # Một video gặp lỗi phải dừng cả lượt (key sai, mất mạng, tạm dừng...): các video còn lại không bắt đầu.
@@ -243,14 +245,17 @@ def run(
     scan_stop = ScanStop()
 
     def emit(stage: str, message: str, *, error: str | None = None, done: bool = False,
-             video: Video | None = None, step: int = 0, steps: int = 0, transient: bool = False) -> None:
+             video: Video | None = None, step: int = 0, steps: int = 0, transient: bool = False,
+             turn: dict | None = None) -> None:
         url, index = page_url, page_index
         if video is not None:
             url, index = video.page_url, channels.index(video.page_url) + 1
-        if error is None and not transient:
+        if message and error is None and not transient:
             logger.info("%s", message)
+        with lock:
+            usage = dict(run_log["usage"])
         on_progress(Progress(stage, index, len(channels), url, message, done, error, step, steps,
-                             dict(run_log["usage"]), transient))
+                             usage, transient, dict(turn) if turn is not None else None))
 
     def checkpoint() -> None:
         if abort.is_set():
@@ -271,15 +276,58 @@ def run(
         emit("error", message, error=message, video=video)
         return message
 
-    def add_usage(name: str, amount: float) -> None:
-        with lock:
-            run_log["usage"][name] += amount
+    def new_turn(label: str) -> dict:
+        return {"label": label, "llm_calls": 0, "llm_tokens": 0, "llm_output_tokens": 0,
+                "llm_seconds": 0.0, "jev_calls": 0, "jev_tokens": 0, "deepgram_minutes": 0.0}
 
-    def add_meter(meter: dict) -> None:
+    def add_usage(amounts: dict, turn: dict, *, stage: str = "analyze",
+                  video: Video | None = None) -> None:
         with lock:
-            run_log["usage"]["llm_calls"] += meter["calls"]
-            run_log["usage"]["llm_output_tokens"] += meter["output_tokens"]
-            run_log["usage"]["llm_seconds"] += meter["seconds"]
+            for name, amount in amounts.items():
+                run_log["usage"][name] += amount
+                if name in turn:
+                    turn[name] += amount
+            if any(amounts.values()):
+                emit(stage, "", video=video, transient=True)
+
+    def take_llm(turn: dict, tokens: int = 0, *, stage: str = "analyze",
+                 video: Video | None = None) -> dict:
+        meter = llm_client.meter_take()
+        add_usage({"llm_tokens": tokens, "llm_calls": meter["calls"],
+                   "llm_output_tokens": meter["output_tokens"], "llm_seconds": meter["seconds"]},
+                  turn, stage=stage, video=video)
+        return meter
+
+    def call_llm(turn: dict, function, *args, tokens, stage: str = "analyze",
+                 video: Video | None = None):
+        """Cập nhật ngay từng request, kể cả request sửa JSON bên trong client."""
+        before = dict(turn)
+        reported_tokens = 0
+
+        def completed(amount: int) -> None:
+            nonlocal reported_tokens
+            reported_tokens += amount
+            take_llm(turn, amount, stage=stage, video=video)
+
+        try:
+            with llm_client.observe_usage(completed):
+                result = function(*args)
+            take_llm(turn, max(0, tokens(result) - reported_tokens), stage=stage, video=video)
+        finally:
+            take_llm(turn, stage=stage, video=video)
+        meter = {"calls": turn["llm_calls"] - before["llm_calls"],
+                 "output_tokens": turn["llm_output_tokens"] - before["llm_output_tokens"],
+                 "seconds": turn["llm_seconds"] - before["llm_seconds"]}
+        return result, meter
+
+    def call_jev(turn: dict, function, *args, video: Video):
+        result = None
+        try:
+            result = function(*args)
+            return result
+        finally:
+            add_usage({"jev_tokens": _tokens(result[-1]) if result is not None else 0,
+                       "jev_calls": 1}, turn, video=video)
 
     def jev_instance():
         nonlocal jev
@@ -311,7 +359,8 @@ def run(
                 add_error(f"{message} Lựa chọn: {decision}{default}.", video)
             return quota_choice == "pause"
 
-    def analyze(number: int, video: Video, taxonomy: dict, ban_words: list[str], keyterms: list[str]) -> str:
+    def analyze(number: int, video: Video, taxonomy: dict, ban_words: list[str],
+                keyterms: list[str], turn: dict) -> str:
         """Phân tích một video trên luồng phân tích; trả kết quả ngắn để báo tiến độ."""
 
         def say(text: str) -> None:
@@ -336,13 +385,12 @@ def run(
                         images = download_images(video.image_urls)
                         say(f"AI đọc {len(images)} ảnh…")
                         if images:
-                            video.transcript, image_tokens = llm_client.describe_images(
+                            (video.transcript, image_tokens), meter = call_llm(
+                                turn, llm_client.describe_images,
                                 llm_instance(), settings["llm"]["model"], images, video.caption,
-                                llm_client.reasoning_effort(settings),
+                                llm_client.reasoning_effort(settings), tokens=lambda result: result[1],
+                                video=video,
                             )
-                            add_usage("llm_tokens", image_tokens)
-                            meter = llm_client.meter_take()
-                            add_meter(meter)
                             say(f"đọc ảnh xong{_speed_text(meter)}")
                             if video.transcript:
                                 video.transcript_status = "images"
@@ -351,19 +399,28 @@ def run(
                 views = f"{_count_text(video.views)} lượt xem" if video.views is not None else "chưa rõ lượt xem"
                 say(f"tải audio và chép lời ({views})…")
                 warnings: list[str] = []
-                minutes = transcript.get_transcript(
-                    video, credentials["deepgram"], settings["stt"], keyterms, config.DATA_DIR / "tmp",
-                    warnings,
-                )
-                add_usage("deepgram_minutes", float(minutes or 0))
+                deepgram_calls = 0
+
+                def deepgram_completed(minutes: float) -> None:
+                    nonlocal deepgram_calls
+                    deepgram_calls += 1
+                    add_usage({"deepgram_minutes": minutes, "deepgram_calls": 1}, turn, video=video)
+
+                with transcript.observe_usage(deepgram_completed):
+                    minutes = transcript.get_transcript(
+                        video, credentials["deepgram"], settings["stt"], keyterms, config.DATA_DIR / "tmp",
+                        warnings,
+                    )
+                if not deepgram_calls and minutes and minutes > 0:
+                    add_usage({"deepgram_minutes": float(minutes), "deepgram_calls": 1}, turn, video=video)
                 for warning in warnings:
                     with lock:
                         run_log["messages"].append(warning)
                     say(warning)
             checkpoint()
             say("Jev gắn nhãn chủ đề, kiểu hook, cấu trúc…")
-            raw, usage = jev_client.ask_labels(jev_instance(), video, taxonomy, settings)
-            add_usage("jev_tokens", _tokens(usage))
+            raw, usage = call_jev(turn, jev_client.ask_labels, jev_instance(), video, taxonomy,
+                                  settings, video=video)
             video.jev = jev_client.interpret_labels(raw, settings, taxonomy)
             video.score = filters.formula_score(
                 video.ratio_median, video.jev.get("replicable_p"), video.jev.get("hook_strength"),
@@ -379,6 +436,7 @@ def run(
                 video.llm = cached
                 with lock:
                     run_log["usage"]["llm_cached"] += 1
+                    emit("analyze", "", video=video, transient=True)
                 return "dùng phân tích LLM đã lưu"
             if llm_unavailable:
                 return "không có gợi ý (LLM hết hạn mức)"
@@ -387,8 +445,11 @@ def run(
                 checkpoint()
                 say("LLM viết phân tích và gợi ý (thường dưới 1 phút)…" if attempt == 0
                     else "Jev loại hết gợi ý; LLM viết lại lần 2…")
-                analysis = llm_client.write_analysis(llm_instance(), settings["llm"]["model"], video, video.jev, settings)
-                add_usage("llm_tokens", _tokens(analysis.get("_usage")))
+                analysis, _ = call_llm(
+                    turn, llm_client.write_analysis, llm_instance(), settings["llm"]["model"],
+                    video, video.jev, settings, tokens=lambda result: _tokens(result.get("_usage")),
+                    video=video,
+                )
                 video.llm = dict(analysis)
                 # Unchecked suggestions must never appear in a partial export.
                 video.llm["goi_y_nhan_ban"] = []
@@ -399,8 +460,10 @@ def run(
                 kept = []
                 if suggestions:
                     say(f"Jev kiểm tra {len(suggestions)} gợi ý…")
-                    kept, check_raw, usage = jev_client.check_suggestions(jev_instance(), video, suggestions, settings)
-                    add_usage("jev_tokens", _tokens(usage))
+                    kept, check_raw, usage = call_jev(
+                        turn, jev_client.check_suggestions, jev_instance(), video, suggestions,
+                        settings, video=video,
+                    )
                     db.save_jev(db.analysis_cache_key(video), settings["jev"]["model"], "suggestion_check", check_raw, usage)
                 video.llm["goi_y_nhan_ban"] = kept
                 checkpoint()
@@ -431,8 +494,9 @@ def run(
         keyterms = [] if post_run else config.load_lines(settings["stt"].get("keyterms_file", "config/keyterms.txt"))
         def task(number: int, video: Video) -> None:
             nonlocal analyzed_count
+            turn = new_turn(f"{item_label.capitalize()} {number}")
             try:
-                result = analyze(number, video, taxonomy, ban_words, keyterms)
+                result = analyze(number, video, taxonomy, ban_words, keyterms, turn)
             except BaseException as exc:  # noqa: BLE001 - chuyển lỗi về luồng chính
                 with lock:
                     if not abort.is_set():
@@ -440,12 +504,13 @@ def run(
                     abort.set()
                 return
             finally:
-                meter = llm_client.meter_take()  # cả lượt gọi trước khi lỗi vẫn tính vào tổng
-                add_meter(meter)
+                take_llm(turn, video=video)  # tính cả lượt thành công trước khi xử lý kết quả gặp lỗi
+            meter = {"calls": turn["llm_calls"], "output_tokens": turn["llm_output_tokens"],
+                     "seconds": turn["llm_seconds"]}
             with lock:
                 analyzed_count += 1
                 emit("analyze", f"{item_label.capitalize()} {number}: xong, {result}{_speed_text(meter)}.",
-                     video=video, step=analyzed_count, steps=submitted_count)
+                     video=video, step=analyzed_count, steps=submitted_count, turn=turn)
 
         for video in page_passed:
             checkpoint()
@@ -628,13 +693,14 @@ def run(
             try:
                 checkpoint()
                 llm_client.meter_take()  # bỏ lượt kiểm tra key/ảnh trước khi quét
+                turn = new_turn("Nhận xét tổng hợp")
                 emit("export", "LLM viết nhận xét tổng hợp cho file Excel…")
-                summary["commentary"], usage = llm_client.write_commentary(
-                    llm_instance(), settings["llm"]["model"], summary, llm_client.reasoning_effort(settings))
-                run_log["usage"]["llm_tokens"] += _tokens(usage)
-                meter = llm_client.meter_take()
-                add_meter(meter)
-                emit("export", f"Nhận xét tổng hợp xong{_speed_text(meter)}.")
+                (summary["commentary"], usage), meter = call_llm(
+                    turn, llm_client.write_commentary, llm_instance(), settings["llm"]["model"],
+                    summary, llm_client.reasoning_effort(settings), tokens=lambda result: _tokens(result[1]),
+                    stage="export",
+                )
+                emit("export", f"Nhận xét tổng hợp xong{_speed_text(meter)}.", turn=turn)
             except QuotaError as exc:
                 if exc.service != "llm":
                     add_error(exc)

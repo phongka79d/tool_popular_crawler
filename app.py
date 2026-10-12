@@ -6,6 +6,7 @@ import hashlib
 import logging
 import os
 import queue
+import re
 import subprocess
 import sys
 import tempfile
@@ -18,7 +19,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import streamlit as st
-from openpyxl import load_workbook
+import pandas as pd
 
 import applog
 import config
@@ -156,7 +157,9 @@ def _init_state() -> None:
     defaults = {"running": False, "logging_in": False, "scan_log": [],
                 "scan_errors": [], "progress": None, "scan_result": None, "scan_started": None,
                 "key_status": None, "login_message": None, "notice": None, "question": None,
-                "svc_models": {}, "page": PAGE_SETTINGS}
+                "svc_models": {}, "page": PAGE_SETTINGS, "scan_usage": None,
+                "scan_usage_history": [], "scan_turns": [], "scan_channels": [],
+                "scan_passed_total": 0, "scan_overall": 0.0}
     for name, value in defaults.items():
         if name not in st.session_state:
             st.session_state[name] = value
@@ -848,7 +851,8 @@ def _filter_summary(params: pipeline.RunParams) -> str:
 def _start_scan(settings: dict, params: pipeline.RunParams) -> None:
     if any(_refresh_keys(settings, require_deepgram=not pipeline.is_post_run(params)).values()):
         st.rerun()  # Panel Trạng thái API key sẽ hiện lỗi sau khi làm mới.
-    if not config.load_lines("config/channels.txt"):
+    channels = config.load_lines("config/channels.txt")
+    if not channels:
         _show_error("Danh sách kênh trống. Vào Cài đặt để nhập các kênh cần quét.")
         return
     if pipeline.is_post_run(params):
@@ -862,7 +866,11 @@ def _start_scan(settings: dict, params: pipeline.RunParams) -> None:
                               daemon=True, name="video-scan")
     st.session_state.update(running=True, scan_queue=events, stop_event=stop, scan_thread=worker,
                             scan_started=time.monotonic(), scan_log=[], scan_errors=[], progress=None,
-                            scan_result=None, scan_elapsed=None, question=None,
+                            scan_result=None, scan_elapsed=None, question=None, scan_usage=None,
+                            scan_usage_history=[], scan_turns=[], scan_passed_total=0, scan_overall=0.0,
+                            scan_channels=[{"url": url, "status": "Chờ quét", "found": None,
+                                            "passed": None, "analyzed": 0}
+                                           for url in channels],
                             scan_item_label="bài đăng" if pipeline.is_post_run(params) else "video")
     worker.start()
     st.rerun()
@@ -919,26 +927,72 @@ def _format_size(size: int) -> str:
     return f"{size / (1024 * 1024):.1f} MB".replace(".", ",")
 
 
-def _exported_video_count(path: Path) -> int | None:
-    """Số video trong sheet chi tiết (dòng đầu là tiêu đề). None nếu không đọc được file."""
+@st.cache_data(show_spinner=False, max_entries=64)
+def _cached_summary(path: str, mtime: int) -> dict:
+    """Mốc sửa file là một phần khóa cache, kể cả khi xuất đè cùng tên."""
+    return export_excel.read_summary(Path(path))
+
+
+def _file_summary(path: Path) -> dict:
     try:
-        workbook = load_workbook(path, read_only=True)
+        return _cached_summary(str(path), path.stat().st_mtime_ns)
+    except OSError:
+        return {}
+
+
+def _safe_excel_path(path: Path, output_dir: Path) -> Path:
+    """Chỉ cho phép xóa file Excel nằm bên trong thư mục kết quả."""
+    root, target = output_dir.resolve(), path.resolve()
+    if target == root or not target.is_relative_to(root) or target.suffix.lower() != ".xlsx":
+        raise ValueError("Chỉ được xóa file Excel trong thư mục kết quả.")
+    return target
+
+
+def _delete_excel(path: Path, output_dir: Path) -> Path:
+    target = _safe_excel_path(path, output_dir)
+    target.unlink()
+    return target
+
+
+@st.dialog("Xóa file Excel")
+def _delete_dialog(path: Path) -> None:
+    st.write("Bạn muốn xóa file này? Thao tác này không thể hoàn tác.")
+    st.code(path.name, language=None)
+    confirm, cancel = st.columns(2)
+    if confirm.button("Xóa", type="primary", icon=":material/delete:", width="stretch"):
         try:
-            title = export_excel.SHEET_POST_DETAIL if export_excel.SHEET_POST_DETAIL in workbook.sheetnames else export_excel.SHEET_DETAIL
-            return max(0, (workbook[title].max_row or 1) - 1)
-        finally:
-            workbook.close()
-    except Exception:  # chỉ là thông tin phụ: file lỗi không được làm hỏng giao diện
-        return None
+            deleted = _delete_excel(path, config.OUTPUT_DIR)
+        except PermissionError:
+            st.error("Không thể xóa vì file đang mở trong Excel hoặc bị khóa. Đóng file rồi thử lại.")
+            return
+        except FileNotFoundError:
+            deleted = _safe_excel_path(path, config.OUTPUT_DIR)
+        except (OSError, ValueError):
+            st.error("Không thể xóa file. Kiểm tra vị trí file và quyền truy cập thư mục kết quả.")
+            return
+        result = st.session_state.get("scan_result")
+        if result and Path(result).resolve() == deleted:
+            st.session_state.scan_result = None
+        st.session_state.pop("results_selected", None)
+        _cached_summary.clear()
+        st.session_state.notice = f"Đã xóa file {path.name}."
+        st.rerun()
+    if cancel.button("Hủy", width="stretch"):
+        st.rerun()
 
 
 def _download_button(path: Path) -> None:
+    download, delete = st.columns([3, 1], vertical_alignment="center")
     try:
         with path.open("rb") as data:
-            st.download_button("Tải file Excel", data=data, file_name=path.name, mime=XLSX_MIME,
-                               type="primary", icon=":material/download:", key=f"download_{path.name}")
-    except OSError:  # vẽ lại mỗi giây trong khung trạng thái quét: không ghi nhật ký ở đây
-        st.error("Không đọc được file Excel. Kiểm tra quyền truy cập thư mục output.")
+            download.download_button("Tải file Excel", data=data, file_name=path.name, mime=XLSX_MIME,
+                                     type="primary", icon=":material/download:",
+                                     key=f"download_{path.name}", width="stretch")
+    except OSError:
+        download.error("Không đọc được file Excel. Kiểm tra quyền truy cập thư mục output.")
+    if delete.button("Xóa file", icon=":material/delete:", help="Xóa file",
+                     key=f"delete_{path.name}", width="stretch"):
+        _delete_dialog(path)
 
 
 SCAN_STAGES = (("keys", "Kiểm tra key"), ("scan", "Quét kênh"), ("filter", "Lọc nội dung"),
@@ -980,41 +1034,194 @@ def _int_text(value: float | None) -> str:
     return "—" if value is None else f"{round(value):,}".replace(",", ".")
 
 
-def _usage_panel(usage: dict | None) -> None:
-    """Số liệu dịch vụ của lần quét: tốc độ, token, số lần gọi, thời gian chờ LLM; token Jev, phút Deepgram."""
-    if not usage:
+def _turn_speed(turn: dict) -> float | None:
+    seconds, tokens = turn.get("llm_seconds", 0.0), turn.get("llm_output_tokens", 0)
+    return round(tokens / seconds, 2) if seconds > 0 and tokens > 0 else None
+
+
+def _turn_rows(turns: list[dict]) -> list[dict]:
+    return [{"Lượt": turn["label"], "Token LLM": turn.get("llm_tokens", 0),
+             "Token trả về": turn.get("llm_output_tokens", 0),
+             "Chờ (giây)": round(turn.get("llm_seconds", 0.0), 2),
+             "Token/giây": _turn_speed(turn), "Token Jev": turn.get("jev_tokens", 0),
+             "Deepgram (phút)": round(turn.get("deepgram_minutes", 0.0), 2)}
+            for turn in reversed(turns)]
+
+
+def _channel_rows(channels: list[dict]) -> list[dict]:
+    rows = []
+    for channel in channels:
+        passed, analyzed = channel["passed"], channel["analyzed"]
+        fraction = (0.6 + 0.4 * min(1, analyzed / passed) if passed
+                    else 1.0 if passed == 0 else 0.35 if channel["found"] is not None
+                    else 0.1 if channel["status"] != "Chờ quét" else 0.0)
+        if channel["status"] == "Bỏ qua":
+            fraction = 1.0
+        rows.append({"Kênh": channel["url"], "Trạng thái": channel["status"],
+                     "Tiến độ": fraction, "Tìm thấy": channel["found"],
+                     "Đạt ngưỡng": passed, "Đã phân tích": analyzed})
+    return rows
+
+
+def _track_channels(state, event: pipeline.Progress) -> None:
+    """Bộ đếm lấy từ sự kiện cuối bước, không đếm các thông báo trung gian."""
+    channels = state.setdefault("scan_channels", [])
+    channel = next((row for row in channels if row["url"] == event.page_url), None)
+    if channel is None and event.page_url:
+        channel = {"url": event.page_url, "status": "Chờ quét", "found": None,
+                   "passed": None, "analyzed": 0}
+        channels.append(channel)
+    if channel is not None:
+        if event.error:
+            channel["status"] = "Có lỗi"
+        elif event.stage == "scan":
+            if "bỏ qua." in event.message:
+                channel["status"] = "Bỏ qua"
+            elif channel["passed"] is None:
+                channel["status"] = "Đang quét"
+            found = re.search(r"thu được (\d+)", event.message)
+            if found:
+                channel["found"] = int(found.group(1))
+                channel["status"] = "Đã quét"
+        elif event.stage == "filter":
+            channel["status"] = "Đang lọc"
+            passed = re.search(r"Đạt ngưỡng: (\d+)/(\d+)", event.message)
+            if passed:
+                total = int(passed.group(1))
+                channel["passed"] = max(0, total - state.get("scan_passed_total", 0))
+                state["scan_passed_total"] = total
+                channel["status"] = ("Đã phân tích" if channel["analyzed"] >= channel["passed"]
+                                     else "Chờ phân tích")
+        elif event.stage == "analyze":
+            channel["status"] = "Đang phân tích"
+            if event.turn:
+                channel["analyzed"] += 1
+                if channel["passed"] is not None and channel["analyzed"] >= channel["passed"]:
+                    channel["status"] = "Đã phân tích"
+    if event.done:
+        overall = 1.0
+    elif event.stage == "export":
+        overall = 0.95
+    elif channels:
+        # Quét và phân tích chạy song song: tiến độ tổng không lùi khi đổi kênh.
+        overall = 0.05 + 0.85 * sum(row["Tiến độ"] for row in _channel_rows(channels)) / len(channels)
+    else:
+        overall = 0.02
+    state["scan_overall"] = max(state.get("scan_overall", 0.0), overall)
+
+
+def _record_scan_progress(state, event: pipeline.Progress, now: datetime, redact) -> None:
+    """Cập nhật dữ liệu thuần; sự kiện chỉ có usage không thay khung tiến độ."""
+    if event.usage is not None:
+        state["scan_usage"] = dict(event.usage)
+        state.setdefault("scan_usage_history", []).append(
+            {"Thời gian": now, "Token LLM": event.usage.get("llm_tokens", 0),
+             "Token Jev": event.usage.get("jev_tokens", 0)})
+    if event.turn is not None:
+        turn = dict(event.turn)
+        turn["label"] = redact(turn["label"])
+        state.setdefault("scan_turns", []).append(turn)
+    if not event.message and event.transient:
         return
+    if event.message and not event.transient:
+        marker = "⚠ " if event.error else ""
+        state.setdefault("scan_log", []).append(f"{now:%H:%M:%S}  {marker}{redact(event.message)}")
+    if event.error:
+        state.setdefault("scan_errors", []).append(redact(event.error))
+    else:
+        state["progress"] = event
+    if not event.transient:
+        _track_channels(state, event)
+
+
+def _render_channels() -> None:
+    rows = _channel_rows(st.session_state.get("scan_channels", []))
+    if rows:
+        with st.expander("Tiến độ từng kênh", expanded=True):
+            st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch",
+                         column_config={"Tiến độ": st.column_config.ProgressColumn(
+                             "Tiến độ", min_value=0, max_value=1, format="percent")})
+            st.caption("Số liệu cập nhật khi quét, lọc hoặc phân tích xong từng mục; — là chưa có số liệu.")
+
+
+def _usage_charts() -> None:
+    history, turns = st.session_state.get("scan_usage_history", []), st.session_state.get("scan_turns", [])
+    with st.expander("Biểu đồ sử dụng & từng lượt", expanded=True):
+        if history:
+            st.markdown("**Token tích lũy theo thời gian**")
+            st.line_chart(pd.DataFrame(history), x="Thời gian", y=["Token LLM", "Token Jev"],
+                          x_label="Thời gian", y_label="Token", height=220)
+        if turns:
+            rows = _turn_rows(turns)
+            latest = rows[0]
+            speed = latest["Token/giây"]
+            st.caption(f"Lượt gần nhất: {latest['Lượt']} · {_int_text(latest['Token LLM'])} token LLM"
+                       f" · {_format_number(latest['Chờ (giây)'])} giây"
+                       f" · {_format_number(speed) if speed is not None else '—'} token/giây")
+            tokens, speeds = st.columns(2)
+            chart = pd.DataFrame(list(reversed(rows)))
+            with tokens:
+                st.markdown("**Token từng lượt**")
+                st.bar_chart(chart, x="Lượt", y=["Token LLM", "Token Jev"], stack=False, height=240)
+            with speeds:
+                st.markdown("**Tốc độ LLM từng lượt**")
+                measured = chart.dropna(subset=["Token/giây"])
+                if not measured.empty:
+                    st.bar_chart(measured, x="Lượt", y="Token/giây", height=240)
+                else:
+                    st.caption("Chưa có lượt gọi LLM có token trả về.")
+            st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+        else:
+            st.caption("Số liệu từng lượt sẽ hiện khi phân tích xong video, bài đăng hoặc nhận xét tổng hợp.")
+
+
+def _usage_panel(usage: dict | None) -> None:
+    """Thống kê tích lũy được giữ riêng với thông báo tiến độ."""
+    if not usage:
+        st.caption("Chưa phát sinh sử dụng dịch vụ AI trong lần quét này.")
+        return
+    st.markdown("#### :material/monitoring: Sử dụng dịch vụ")
+    st.caption(f"Model LLM: {_redact(usage.get('llm_model') or '—')}")
     speed = pipeline.llm_speed(usage.get("llm_output_tokens", 0), usage.get("llm_seconds", 0.0))
-    speed_col, tokens_col, calls_col, wait_col = st.columns(4)
-    speed_col.metric("Tốc độ LLM (token/giây)", _int_text(speed),
-                     help="Token LLM trả về chia cho thời gian chờ các lần gọi (đo trên máy này).")
-    tokens_col.metric("Token LLM", _int_text(usage.get("llm_tokens", 0)),
-                      help="Tổng token gửi đi và nhận về; đây là số nhà cung cấp tính phí. "
-                           f"Trong đó {_int_text(usage.get('llm_output_tokens', 0))} token trả về.")
-    calls_col.metric("Lần gọi LLM", _int_text(usage.get("llm_calls", 0)),
-                     help="Đọc ảnh, viết phân tích, viết lại khi Jev loại hết gợi ý, nhận xét tổng hợp.")
-    wait_col.metric("Thời gian chờ LLM (giây)", _format_number(round(usage.get("llm_seconds", 0.0), 1)),
-                    help="Cộng thời gian chờ của mọi lần gọi; các mục chạy song song nên có thể lớn hơn thời gian quét.")
-    cached = usage.get("llm_cached", 0)
-    st.caption(f"Model LLM: {usage.get('llm_model') or '—'} · Token Jev: {_int_text(usage.get('jev_tokens', 0))}"
-               f" · Deepgram: {_format_number(round(usage.get('deepgram_minutes', 0.0), 2))} phút"
-               + (f" · Dùng lại {cached} phân tích LLM đã lưu (không gọi LLM, không tốn token)" if cached else ""))
-    if speed is None:
-        st.caption("Tốc độ LLM hiện sau lần gọi LLM đầu tiên (khi có video/bài đạt ngưỡng cần phân tích mới).")
+    llm, jev, deepgram = st.columns([2, 1, 1])
+    with llm, st.container(border=True):
+        st.markdown("**LLM · Phân tích nội dung**")
+        token, calls = st.columns(2)
+        token.metric("Token LLM", _int_text(usage.get("llm_tokens", 0)))
+        calls.metric("Lần gọi LLM", _int_text(usage.get("llm_calls", 0)))
+        st.caption(f"Trả về: {_int_text(usage.get('llm_output_tokens', 0))} token"
+                   f" · Chờ: {_format_number(round(usage.get('llm_seconds', 0.0), 1))} giây")
+        st.caption(f"Tốc độ trung bình: {_int_text(speed)} token/giây"
+                   f" · Dùng lại: {_int_text(usage.get('llm_cached', 0))} phân tích")
+    with jev, st.container(border=True):
+        st.markdown("**Jev · Phân loại**")
+        st.metric("Token Jev", _int_text(usage.get("jev_tokens", 0)))
+        st.caption(f"Lần gọi Jev: {_int_text(usage.get('jev_calls', 0))}")
+    with deepgram, st.container(border=True):
+        st.markdown("**Deepgram · Chép lời**")
+        st.metric("Phút Deepgram", _format_number(round(usage.get("deepgram_minutes", 0.0), 2)))
+        st.caption(f"Lần gọi Deepgram: {_int_text(usage.get('deepgram_calls', 0))}")
+    st.caption("Tốc độ = token trả về / thời gian chờ API. Thời gian chờ cộng dồn có thể lớn hơn "
+               "thời gian quét vì các mục chạy song song. Phân tích dùng lại không tốn token LLM.")
+    _usage_charts()
 
 
 def _render_running_scan() -> None:
     progress = st.session_state.progress
     with st.container(border=True):
         elapsed = _format_duration(time.monotonic() - st.session_state.scan_started)
-        st.markdown(f"**Đang quét** · đã chạy {elapsed}")
+        st.markdown(f"#### :material/radar: Đang quét · {elapsed}")
+        overall = st.session_state.get("scan_overall", 0.0)
+        st.progress(overall, text=f"Tiến độ tổng (ước tính) · {overall:.0%}")
         if progress is not None:
             st.markdown(_stage_line(progress.stage))
+            st.caption("Quét kênh và phân tích có thể chạy song song; bước đang hoạt động có thể thay đổi.")
             _progress_bar(progress)
             st.markdown(_redact(progress.message))
             if progress.page_url:
                 st.caption(_redact(progress.page_url))
-            _usage_panel(progress.usage)
+            _render_channels()
+            _usage_panel(st.session_state.get("scan_usage"))
         else:
             st.progress(0.0, text="Đang chuẩn bị quét...")
         recent = st.session_state.scan_log[-TIMELINE_ROWS:]
@@ -1041,15 +1248,15 @@ def _render_running_scan() -> None:
 
 
 def _render_scan_result(path: Path) -> None:
-    count = _exported_video_count(path)
+    count = _file_summary(path).get("count")
     with st.container(border=True):
         item = st.session_state.get("scan_item_label", "video")
         st.markdown(f"**✅ Quét xong · {count} {item}**" if count is not None else "**✅ Quét xong**")
         elapsed = st.session_state.get("scan_elapsed")
         st.caption(f"File: {path.name}" + (f" · tổng thời gian {_format_duration(elapsed)}" if elapsed else ""))
-        progress = st.session_state.get("progress")
-        _usage_panel(progress.usage if progress is not None else None)
+        _usage_panel(st.session_state.get("scan_usage"))
         _download_button(path)
+        _render_summary(_file_summary(path))
 
 
 def _render_scan_status() -> None:
@@ -1059,6 +1266,9 @@ def _render_scan_status() -> None:
         _render_scan_result(Path(st.session_state.scan_result))
     elif st.session_state.scan_log and not st.session_state.scan_errors:
         st.info("Đã kết thúc quét; không có file Excel mới.")
+    if not st.session_state.running and not st.session_state.scan_result and st.session_state.get("scan_usage"):
+        with st.container(border=True):
+            _usage_panel(st.session_state.get("scan_usage"))
     for message in dict.fromkeys(st.session_state.scan_errors):
         st.error(message)
     if st.session_state.scan_errors:
@@ -1091,14 +1301,7 @@ def _drain_scan_queue() -> bool:
                     st.session_state.question = None
                     finished = True
             else:
-                stamp = datetime.now().strftime("%H:%M:%S")
-                if event.message and not event.transient:  # đếm ngược chỉ hiện ở khung tiến độ
-                    marker = "⚠ " if event.error else ""
-                    st.session_state.scan_log.append(f"{stamp}  {marker}{_redact(event.message)}")
-                if event.error:
-                    st.session_state.scan_errors.append(_redact(event.error))
-                else:  # lỗi không đổi bước đang chạy và thanh tiến độ
-                    st.session_state.progress = event
+                _record_scan_progress(st.session_state, event, datetime.now(), _redact)
     return finished
 
 
@@ -1134,23 +1337,112 @@ def _poll_workers() -> None:
         st.rerun()
 
 
+def _summary_charts(summary: dict) -> tuple[list[dict], list[dict], list[dict]]:
+    items = summary.get("items", [])
+    metric = "interactions" if summary.get("kind") == "post" else "views"
+    label = "Tương tác" if metric == "interactions" else "Lượt xem"
+    ranked = sorted((item for item in items if item.get(metric) is not None),
+                    key=lambda item: item[metric], reverse=True)[:10]
+    top = [{"Nội dung": f"{index}. {(item.get('title') or 'Không có tiêu đề')[:70]}",
+            label: item[metric], "Kênh": item.get("page", "")}
+           for index, item in enumerate(ranked, 1)]
+    topics: dict[str, int] = {}
+    buckets = {"Dưới 20": 0, "20–39": 0, "40–59": 0, "60–79": 0, "Từ 80": 0}
+    for item in items:
+        topic = item.get("topic") or "Chưa phân loại"
+        topics[topic] = topics.get(topic, 0) + 1
+        score = item.get("score")
+        if score is not None:
+            bucket = ("Dưới 20" if score < 20 else "20–39" if score < 40
+                      else "40–59" if score < 60 else "60–79" if score < 80 else "Từ 80")
+            buckets[bucket] += 1
+    return (top, [{"Chủ đề": topic, "Số nội dung": count} for topic, count in topics.items()],
+            [{"Điểm công thức": bucket, "Số nội dung": count} for bucket, count in buckets.items()])
+
+
+def _render_summary(summary: dict) -> None:
+    if not summary:
+        st.info("Không đọc được thống kê của file này. Bạn vẫn có thể tải file hoặc mở bằng Excel.")
+        return
+    items = summary.get("items", [])
+    metric = "interactions" if summary.get("kind") == "post" else "views"
+    metric_label = "Tương tác" if metric == "interactions" else "Lượt xem"
+    values = [item[metric] for item in items if item.get(metric) is not None]
+    scores = [item["score"] for item in items if item.get("score") is not None]
+    count, pages, reach, score = st.columns(4)
+    count.metric("Nội dung đã xuất", _int_text(summary.get("count", len(items))))
+    pages.metric("Kênh có kết quả", _int_text(len({item.get("page") for item in items if item.get("page")})))
+    reach.metric(f"Tổng {metric_label.lower()}", _int_text(sum(values)) if values else "—")
+    score.metric("Điểm công thức TB", _format_number(round(sum(scores) / len(scores), 1)) if scores else "—")
+    usage = summary.get("usage") or {}
+    if usage:
+        st.caption(f"Model: {_redact(usage.get('llm_model') or '—')}"
+                   f" · LLM: {_int_text(usage.get('llm_tokens', 0))} token"
+                   f" · Jev: {_int_text(usage.get('jev_tokens', 0))} token"
+                   f" · Deepgram: {_format_number(round(usage.get('deepgram_minutes', 0.0), 2))} phút")
+    created = summary.get("created")
+    if created:
+        st.caption(f"Xuất lúc {created:%d/%m/%Y %H:%M}")
+    if not items:
+        st.info("File không có nội dung đạt ngưỡng. Thử giảm ngưỡng lọc hoặc mở rộng số ngày quét.")
+        return
+    top, topics, distribution = _summary_charts(summary)
+    with st.expander("Biểu đồ kết quả", expanded=True):
+        left, right = st.columns(2)
+        with left:
+            st.markdown(f"**Top 10 theo {metric_label.lower()}**")
+            if top:
+                st.bar_chart(pd.DataFrame(top), x="Nội dung", y=metric_label,
+                             horizontal=True, sort=False, height=320)
+            else:
+                st.caption(f"Chưa có số liệu {metric_label.lower()} để vẽ biểu đồ.")
+        with right:
+            st.markdown("**Nội dung theo chủ đề**")
+            st.bar_chart(pd.DataFrame(topics), x="Chủ đề", y="Số nội dung",
+                         horizontal=True, height=320)
+        st.markdown("**Phân bố điểm công thức**")
+        if scores:
+            st.bar_chart(pd.DataFrame(distribution), x="Điểm công thức", y="Số nội dung", sort=False,
+                         height=220)
+        else:
+            st.caption("Chưa có điểm công thức để vẽ biểu đồ.")
+
+
 def _results_page() -> None:
-    files = sorted(config.OUTPUT_DIR.glob("*.xlsx"), key=lambda path: path.stat().st_mtime, reverse=True)
+    files = []
+    for path in config.OUTPUT_DIR.glob("*.xlsx"):
+        try:
+            if path.is_file():
+                files.append((path, path.stat()))
+        except OSError:
+            continue
+    files.sort(key=lambda entry: entry[1].st_mtime, reverse=True)
     title, folder = st.columns([3, 1], vertical_alignment="center")
-    title.markdown("**File Excel đã xuất** · mới nhất trước")
+    title.markdown("#### :material/table_chart: Thư viện kết quả")
     if folder.button("Mở thư mục", icon=":material/folder_open:", width="stretch"):
         try:
             os.startfile(config.OUTPUT_DIR)
         except (OSError, AttributeError) as exc:
             _show_error("Không thể mở thư mục kết quả trên máy này.", exc)
     if not files:
-        st.info("Chưa có file Excel nào. Kết quả sẽ hiện ở đây sau mỗi lần quét.")
-        return
-    for path in files:
-        stat = path.stat()
         with st.container(border=True):
-            info, action = st.columns([3, 1], vertical_alignment="center")
-            info.markdown(f"**{path.name}**")
+            st.markdown("**Chưa có kết quả**")
+            st.info("Chạy lần quét đầu tiên để xem nội dung nổi bật, biểu đồ và tải file Excel tại đây.")
+        return
+    names = [path.name for path, _ in files]
+    if st.session_state.get("results_selected") not in names:
+        st.session_state["results_selected"] = names[0]
+    selected = st.selectbox("Xem thống kê file", names, key="results_selected",
+                            help="Mặc định là file mới nhất; chọn file khác để so sánh kết quả.")
+    with st.container(border=True):
+        st.markdown("**Tổng quan kết quả**")
+        _render_summary(_file_summary(next(path for path, _ in files if path.name == selected)))
+    st.markdown(f"#### File Excel đã xuất · {len(files)} file")
+    st.caption("Mới nhất trước · Tải để xem chi tiết và công thức làm lại; xóa file cần xác nhận.")
+    for path, stat in files:
+        with st.container(border=True):
+            info, action = st.columns([3, 2], vertical_alignment="center")
+            info.write(path.name)
             info.caption(f"{datetime.fromtimestamp(stat.st_mtime):%d/%m/%Y %H:%M} · {_format_size(stat.st_size)}")
             with action:
                 _download_button(path)
@@ -1200,9 +1492,12 @@ def main() -> None:
     config.ensure_dirs()
     _init_state()
     # Cửa sổ ứng dụng riêng không có thanh công cụ Streamlit: bỏ khoảng trống mặc định ở đầu trang.
-    st.markdown("<style>.block-container{padding-top:1.5rem}</style>", unsafe_allow_html=True)
+    st.markdown("<style>.block-container{padding-top:1.5rem;padding-bottom:2rem}"
+                "[data-testid='stMetricValue']{font-size:1.65rem}"
+                "[data-testid='stVerticalBlockBorderWrapper']{border-radius:0.8rem}"
+                "</style>", unsafe_allow_html=True)
     title, log_button = st.columns([5, 1], vertical_alignment="center")
-    title.markdown("### 🎬 Video Công Thức")
+    title.markdown("## :material/movie: Video Công Thức")
     if log_button.button("Nhật ký", icon=":material/receipt_long:", width="stretch",
                          help="Mọi thông báo và lỗi của ứng dụng (data/app.log)."):
         _log_dialog()

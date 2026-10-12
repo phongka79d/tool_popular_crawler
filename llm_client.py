@@ -13,7 +13,8 @@ import re
 import threading
 import time
 import unicodedata
-from typing import Any
+from contextlib import contextmanager
+from typing import Any, Callable, Iterator
 from urllib.parse import urlparse
 
 from openai import OpenAI
@@ -291,6 +292,17 @@ THINKING_OFF = {"thinking": {"type": "disabled"}}
 _meter = threading.local()
 
 
+@contextmanager
+def observe_usage(callback: Callable[[int], None]) -> Iterator[None]:
+    """Báo từng request thành công trên luồng hiện tại, không đổi chữ ký hàm gọi LLM."""
+    previous = getattr(_meter, "callback", None)
+    _meter.callback = callback
+    try:
+        yield
+    finally:
+        _meter.callback = previous
+
+
 def meter_take() -> dict:
     """Trả {"calls", "output_tokens", "seconds"} của luồng này từ lần lấy trước, rồi đặt lại về 0."""
     taken = {"calls": getattr(_meter, "calls", 0), "output_tokens": getattr(_meter, "output_tokens", 0),
@@ -305,6 +317,9 @@ def _record(resp: Any, seconds: float) -> None:
     _meter.calls = getattr(_meter, "calls", 0) + 1
     _meter.output_tokens = getattr(_meter, "output_tokens", 0) + int(output or 0)
     _meter.seconds = getattr(_meter, "seconds", 0.0) + seconds
+    callback = getattr(_meter, "callback", None)
+    if callback is not None:
+        callback(_total_tokens(resp))
 
 
 def _timed_create(client: OpenAI, **kwargs: Any) -> Any:

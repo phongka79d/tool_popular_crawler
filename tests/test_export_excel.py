@@ -60,7 +60,7 @@ RUN_LOG = {
          "passed": 0, "analyzed": 0, "skipped_reason": None,
          "errors": ["Không kết nối được tới Facebook"]},
     ],
-    "usage": {"jev_tokens": 12_345, "llm_tokens": 6_789, "deepgram_minutes": 3.5},
+    "usage": {"jev_tokens": 12_345, "llm_tokens": 6_789, "deepgram_minutes": 3.5, "llm_model": "claude-sonnet"},
     "messages": ["Đã dùng cache cho 2 video"],
 }
 
@@ -189,12 +189,14 @@ def test_post_export_labels_and_detail_title(tmp_path):
     path = xl.export([post], {}, {"params": {"formats": ["post"], "min_interactions": 200}}, out_dir=tmp_path, now=NOW)
     workbook = load_workbook(path)
     try:
-        assert workbook.sheetnames[0] == "Chi tiết bài đăng"
+        assert workbook.sheetnames[:2] == ["Tổng quan", "Chi tiết bài đăng"]
         detail = workbook["Chi tiết bài đăng"]
         assert detail.cell(3, _col("Định dạng")).value == "Bài đăng"
         assert detail.cell(3, _col("Tổng tương tác")).value == 250
         assert detail.cell(3, _col("Điểm Jev (0–100)")).value == 75
         assert workbook["Tổng hợp công thức"].cell(5, 2).value == "Số bài"
+        for header in xl._VIDEO_ONLY_HEADERS:
+            assert detail.column_dimensions[xl.get_column_letter(_col(header))].hidden
     finally:
         workbook.close()
 
@@ -213,7 +215,8 @@ def test_run_log_shows_ratio_and_combination(tmp_path):
 
 
 def test_sheet_names_in_order(wb) -> None:
-    assert wb.sheetnames == ["Chi tiết video", "Tổng hợp công thức", "Nhật ký"]
+    assert wb.sheetnames == ["Tổng quan", "Chi tiết video", "Tổng hợp công thức", "Nhật ký"]
+    assert wb.active.title == "Tổng quan"
 
 
 def test_detail_header_order_matches_plan(detail) -> None:
@@ -336,10 +339,10 @@ def test_missing_jev_llm_fields_are_blank_and_raw_goes_to_notes(detail) -> None:
     assert "Không phải JSON: {oops" in notes
 
 
-def test_empty_export_still_writes_three_sheets(tmp_path: Path) -> None:
+def test_empty_export_still_writes_four_sheets(tmp_path: Path) -> None:
     path = xl.export([], {}, {}, out_dir=tmp_path, now=NOW)
     wb = load_workbook(path)
-    assert wb.sheetnames == ["Chi tiết video", "Tổng hợp công thức", "Nhật ký"]
+    assert wb.sheetnames == ["Tổng quan", "Chi tiết video", "Tổng hợp công thức", "Nhật ký"]
     assert wb["Chi tiết video"].max_row == 2
 
 
@@ -374,8 +377,9 @@ def test_summary_sheet_tables_and_commentary(wb) -> None:
 
 def test_run_log_sheet_contents(wb) -> None:
     ws = wb["Nhật ký"]
-    assert ws.cell(_find_row(ws, "Kết thúc"), 2).value == "12/10/2026 15:27:31"  # UTC+7
-    assert ws.cell(_find_row(ws, "Bắt đầu"), 2).value == "09/10/2025 15:53:20"
+    assert ws.cell(_find_row(ws, "Kết thúc"), 2).value == datetime(2026, 10, 12, 15, 27, 31, 345000)
+    assert ws.cell(_find_row(ws, "Bắt đầu"), 2).value == datetime(2025, 10, 9, 15, 53, 20)
+    assert ws.cell(_find_row(ws, "Bắt đầu"), 2).number_format == xl.FMT_DATETIME
 
     assert ws.cell(_find_row(ws, "Lượt xem tối thiểu"), 2).value == 10000
     assert ws.cell(_find_row(ws, "Tương tác tối thiểu"), 2).value == 0
@@ -386,10 +390,10 @@ def test_run_log_sheet_contents(wb) -> None:
     assert ws.cell(failed, 8).value == "Không kết nối được tới Facebook"
 
     usage_title = _find_row(ws, "Sử dụng")
-    assert [ws.cell(usage_title + 1, c).value for c in range(1, 4)] == [
-        "Token Jev", "Token LLM", "Phút Deepgram",
+    assert [ws.cell(usage_title + 1, c).value for c in range(1, 5)] == [
+        "Token Jev", "Token LLM", "Phút Deepgram", "Model LLM",
     ]
-    assert [ws.cell(usage_title + 2, c).value for c in range(1, 4)] == [12_345, 6_789, 3.5]
+    assert [ws.cell(usage_title + 2, c).value for c in range(1, 5)] == [12_345, 6_789, 3.5, "claude-sonnet"]
     assert ws.cell(usage_title + 2, 1).number_format == "#,##0"
     assert ws.cell(usage_title + 2, 3).number_format == "#,##0.00"
 
@@ -452,3 +456,99 @@ def test_live_labels_in_details_and_log_params(tmp_path):
         assert "Reel (Live), Video (Live)" in values
     finally:
         workbook.close()
+
+
+def test_overview_kpis_charts_and_print_layout(wb):
+    ws = wb[xl.SHEET_OVERVIEW]
+    expected = {
+        "Số kênh": 3, "Số video quét được": 42, "Đạt ngưỡng": 3,
+        "Đã phân tích": 3, "Số mục xuất": 4, "Gợi ý giữ lại": 3, "Video/bài có gợi ý": 1,
+        "Token Jev": 12_345, "Token LLM": 6_789, "Phút Deepgram": 3.5,
+        "Model LLM": "claude-sonnet", "Số ngày quét": 14, "Lượt xem tối thiểu": 10_000,
+    }
+    for label, value in expected.items():
+        assert ws.cell(_find_row(ws, label), 2).value == value
+    detail = wb[xl.SHEET_DETAIL]
+    exported_counts = [
+        sum(detail.cell(row, _col(f"Gợi ý {index}")).value is not None for index in range(1, 4))
+        for row in range(3, detail.max_row + 1)
+    ]
+    assert ws.cell(_find_row(ws, "Gợi ý giữ lại"), 2).value == sum(exported_counts)
+    assert ws.cell(_find_row(ws, "Video/bài có gợi ý"), 2).value == sum(count > 0 for count in exported_counts)
+    assert not any("điểm ≥ 70" in str(cell.value) for row in ws for cell in row)
+    assert ws.cell(_find_row(ws, "Phút Deepgram"), 2).number_format == xl.FMT_DEC2
+    assert len(ws._charts) >= 1
+    assert ws._charts[0].series[0].val.numRef.f.startswith("'Tổng quan'!")
+    assert ws.sheet_view.showGridLines is False
+    for sheet in wb:
+        assert sheet.freeze_panes
+        assert sheet.print_title_rows
+        assert sheet.page_setup.orientation == "landscape"
+        assert sheet.page_setup.fitToWidth == 1
+        assert sheet.sheet_properties.tabColor is not None
+
+
+def test_detail_links_and_conditional_formats_preserved(detail):
+    for row in range(3, 7):
+        cell = detail.cell(row, _col("Link bài"))
+        assert cell.hyperlink.target == cell.value
+        assert cell.hyperlink.display == "Mở bài ↗"
+    assert any(rule.type == "dataBar" for rules in detail.conditional_formatting._cf_rules.values() for rule in rules)
+    assert any(rule.type == "expression" for rules in detail.conditional_formatting._cf_rules.values() for rule in rules)
+
+
+def test_read_summary_round_trip(exported):
+    result = xl.read_summary(exported)
+    assert result["kind"] == "video"
+    assert result["count"] == 4
+    assert result["created"] == NOW
+    assert result["usage"] == RUN_LOG["usage"]
+    expected = sorted(_videos(), key=lambda v: (v.score is None, -(v.score or 0)))
+    assert result["items"] == [
+        {"title": v.llm.get("chu_de_bai") or v.caption or v.url,
+         "page": v.page_name or v.page_url, "url": v.url, "views": v.views,
+         "interactions": v.interactions, "score": v.score, "topic": v.jev.get("topic", "")}
+        for v in expected
+    ]
+
+
+def test_read_summary_post_and_empty_exports(tmp_path):
+    post = Video("p", "https://facebook.test/p", "page", format="post", caption="Bài mới",
+                 interactions=250, score=80, jev={"topic": "Mẹo"}, llm={"chu_de_bai": "Mẹo hay"})
+    path = xl.export([post], {}, {"params": {"formats": ["post"]}}, out_dir=tmp_path, now=NOW)
+    result = xl.read_summary(path)
+    assert result["kind"] == "post"
+    assert result["count"] == 1
+    assert result["items"][0] == {
+        "title": "Mẹo hay", "page": "page", "url": post.url, "views": None,
+        "interactions": 250, "score": 80.0, "topic": "Mẹo",
+    }
+    assert result["usage"] == {"jev_tokens": 0, "llm_tokens": 0, "deepgram_minutes": 0.0, "llm_model": ""}
+    empty = xl.export([], {}, {}, out_dir=tmp_path, now=NOW)
+    assert xl.read_summary(empty)["count"] == 0
+    assert xl.read_summary(empty)["items"] == []
+
+
+def test_read_summary_rejects_garbage_foreign_and_missing_files(tmp_path):
+    garbage = tmp_path / "hong.xlsx"
+    garbage.write_bytes(b"not an Excel workbook")
+    assert xl.read_summary(garbage) == {}
+    assert xl.read_summary(tmp_path / "missing.xlsx") == {}
+    foreign = tmp_path / "khac.xlsx"
+    from openpyxl import Workbook
+    workbook = Workbook()
+    workbook.save(foreign)
+    workbook.close()
+    assert xl.read_summary(foreign) == {}
+
+
+def test_read_summary_rejects_imitation_without_detail_headers(tmp_path):
+    from openpyxl import Workbook
+    workbook = Workbook()
+    workbook.active.title = xl.SHEET_DETAIL
+    workbook.create_sheet(xl.SHEET_SUMMARY)
+    workbook.create_sheet(xl.SHEET_LOG)
+    path = tmp_path / "khong-dung-mau.xlsx"
+    workbook.save(path)
+    workbook.close()
+    assert xl.read_summary(path) == {}

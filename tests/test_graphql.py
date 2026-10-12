@@ -385,6 +385,78 @@ def test_parse_page_header_reads_new_style_page_name_from_header_renderer_user()
     assert gql.parse_page_header(payload) == {"name": "Nhà Thuốc Mẫu", "followers": None}
 
 
+@pytest.mark.parametrize(("text", "count"), [
+    ("1,1\u00a0triệu người theo dõi", 1_100_000),
+    ("680K người theo dõi", 680_000),
+    ("202K người theo dõi", 202_000),
+    ("111K người theo dõi", 111_000),
+    ("111 N người theo dõi", 111_000),
+    ("1.1M followers", 1_100_000),
+    ("2,3 tr người theo dõi", 2_300_000),
+    ("12.345 followers", 12_345),
+])
+@pytest.mark.parametrize("typename", ["User", None])
+def test_page_header_social_context_live_shapes(text, count, typename):
+    profile = {
+        "name": "Trang Mẫu",
+        "profile_social_context": {"content": [
+            {"text": {"text": "93 đang theo dõi"}, "uri": "https://example.invalid/following/"},
+            {"text": {"text": text}, "uri": "https://example.invalid/followers/"},
+        ]},
+    }
+    if typename:
+        profile["__typename"] = typename
+    html = '<script data-sjs>' + json.dumps({"data": {"user": profile}}) + '</script>'
+    assert gql.parse_page_header(html) == {"name": "Trang Mẫu", "followers": count}
+
+
+def test_page_header_followers_link_without_localized_label():
+    payload = {"data": {"user": {"name": "Trang Mẫu", "profile_social_context": {"content": [
+        {"text": {"text": "45K lượt thích"}, "uri": "https://example.invalid/likes/"},
+        {"text": {"text": "202K"}, "uri": "https://example.invalid/followers/?locale=en"},
+    ]}}}}
+    assert gql.parse_page_header(json.dumps(payload))["followers"] == 202_000
+
+
+@pytest.mark.parametrize("exact", [
+    {"follower_count": 202_345}, {"followers_count": "202345"},
+    {"followers": {"count": 202_345}}, {"subscribers": {"count": 202_345}},
+])
+def test_page_header_exact_count_overrides_earlier_rounded_text(exact):
+    values = [
+        {"profile_social_context": {"content": [{"text": {"text": "202K followers"}}]}},
+        {"__typename": "Page", "name": "Trang Mẫu", **exact},
+    ]
+    assert gql.parse_page_header(json.dumps(values))["followers"] == 202_345
+
+
+def test_page_header_renderer_reads_user_count_not_viewer_or_story():
+    payload = {"data": {
+        "story": {"__typename": "Story", "author": {"__typename": "Page", "followers_count": 999}},
+        "header": {
+            "__typename": "XFBProfileEntityConvergenceHeaderRenderer",
+            "viewer": {"actor": {"__typename": "Page", "followers_count": 888}},
+            "user": {"name": "Trang Mẫu", "follower_count": 123},
+        },
+    }}
+    assert gql.parse_page_header(json.dumps(payload)) == {"name": "Trang Mẫu", "followers": 123}
+
+
+def test_page_header_does_not_use_following_likes_or_facepile_counts():
+    payload = {"profile_social_context": {
+        "facepile_profile_count": 42,
+        "content": [{"text": {"text": "45K lượt thích"}}, {"text": {"text": "93 đang theo dõi"}}],
+    }}
+    assert gql.parse_page_header(json.dumps(payload))["followers"] is None
+
+
+def test_page_header_reads_deferred_graphql_fragment():
+    body = 'for (;;);' + json.dumps({"data": {"name": "Trang Mẫu", "profile_social_context": {
+        "content": [{"text": {"text": "680K người theo dõi"}}],
+    }}})
+    assert gql.parse_page_header(body) == {"name": "Trang Mẫu", "followers": 680_000}
+
+
 def _channel_tile(video_id: str, url: str) -> dict:
     """One Videos-tab tile as Facebook sends it (trimmed real capture): the video node is not a Story."""
     return {"node": {"id": video_id, "channel_tab_thumbnail_renderer": {

@@ -362,27 +362,77 @@ def parse_initial_html(html: str, paths: GraphqlPaths | None = None) -> list[dic
     return _videos_from(_sjs_values(html), p)
 
 
-def parse_page_header(html_or_json: str, paths: GraphqlPaths | None = None) -> dict:
-    """Best-effort page name and follower count.
+def followers_from_text(text: str) -> int | None:
+    """Đọc dòng follower, không nhầm số đang theo dõi hoặc lượt thích."""
+    match = re.search(
+        r"(\d[\d.,]*(?:\s*(?:triệu|trieu|nghìn|nghin|ngàn|ngan|tr|[knm]))?)"
+        r"\s*(?:người theo dõi|followers)\b", text, re.IGNORECASE,
+    )
+    return parse_count(match.group(1)) if match else None
 
-    Accepts an HTML page (``data-sjs`` blobs are read) or a raw JSON response.
-    Missing fields come back as ``""`` for the name and ``None`` for the followers.
+
+def _header_followers(node: dict) -> tuple[int | None, bool]:
+    """Số chính xác trước, chữ trong social context chỉ là dự phòng."""
+    for key in ("followers_count", "follower_count"):
+        value = _as_count(node.get(key))
+        if value is not None and value >= 0:
+            return value, _as_int(node.get(key)) is not None
+    for key in ("followers", "subscribers"):
+        value = node.get(key)
+        if isinstance(value, dict):
+            count = _as_int(value.get("count"))
+            if count is not None and count >= 0:
+                return count, True
+    context = node.get("profile_social_context")
+    if isinstance(context, dict):
+        for entry in context.get("content") or []:
+            if not isinstance(entry, dict):
+                continue
+            text = entry.get("text")
+            if isinstance(text, dict):
+                text = text.get("text")
+            if not isinstance(text, str):
+                continue
+            count = followers_from_text(text)
+            if count is None and re.search(r"/followers/?(?:[?#]|$)", str(entry.get("uri", ""))):
+                count = parse_count(text)
+            if count is not None:
+                return count, False
+    return None, False
+
+
+def parse_page_header(html_or_json: str, paths: GraphqlPaths | None = None) -> dict:
+    """Tên và follower từ header/fragment; không đọc viewer hay tác giả bài.
+
+    Hỗ trợ profile_social_context của Page kiểu User và fragment không có typename.
+    Số chính xác luôn thắng chữ làm tròn, dù xuất hiện sau trong tài liệu.
     """
     p = paths if paths is not None else load_paths()
-    if _SJS_RE.search(html_or_json):
-        values = _sjs_values(html_or_json)
-    else:
-        values = split_json_values(html_or_json)
+    values = _sjs_values(html_or_json) if _SJS_RE.search(html_or_json) else split_json_values(html_or_json)
     name = ""
     followers: int | None = None
-    for node in _walk_dicts(values):
-        if node.get(_TYPENAME_KEY) not in p.page_typenames:
+    exact = False
+    stack = list(reversed(values))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, list):
+            stack.extend(reversed(node))
             continue
-        name = name or _first(node, p.page_name, _as_text) or ""
-        if followers is None:
-            followers = _first(node, p.page_followers, _as_count)
-        if name and followers is not None:
-            break
+        if not isinstance(node, dict) or node.get(_TYPENAME_KEY) == p.story_typename:
+            continue
+        if node.get(_TYPENAME_KEY) in p.page_typenames or "profile_social_context" in node:
+            name = name or _first(node, p.page_name, _as_text) or ""
+            candidates = [node]
+            if node.get(_TYPENAME_KEY) in p.page_typenames and isinstance(node.get("user"), dict):
+                candidates.append(node["user"])
+            for candidate in candidates:
+                count, is_exact = _header_followers(candidate)
+                if count is None:
+                    count = _first(candidate, p.page_followers, _as_count)
+                if count is not None and (followers is None or is_exact and not exact):
+                    followers, exact = count, is_exact
+        stack.extend(reversed([value for key, value in node.items()
+                               if key not in ("viewer", "actor", "owning_profile")]))
     return {"name": name, "followers": followers}
 
 

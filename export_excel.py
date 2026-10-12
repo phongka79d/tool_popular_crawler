@@ -1,4 +1,4 @@
-"""Excel export (PLAN §8): sheet "Chi tiết video", "Tổng hợp công thức" and "Nhật ký"."""
+"""Xuất báo cáo Excel và đọc lại số liệu tổng quan không cần tải toàn bộ tệp."""
 from __future__ import annotations
 
 import json
@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Collection
 
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.chart import BarChart, Reference
 from openpyxl.formatting.rule import ColorScaleRule, DataBarRule, FormulaRule
@@ -23,6 +23,7 @@ from normalize import to_vn_datetime
 
 log = logging.getLogger(__name__)
 
+SHEET_OVERVIEW = "Tổng quan"
 SHEET_DETAIL = "Chi tiết video"
 SHEET_POST_DETAIL = "Chi tiết bài đăng"
 SHEET_SUMMARY = "Tổng hợp công thức"
@@ -225,14 +226,17 @@ def export(
     folder.mkdir(parents=True, exist_ok=True)
     path = _unique_path(folder, moment)
 
+    run_log = run_log or {}
     wb = Workbook()
-    detail = wb.active
+    overview = wb.active
+    overview.title = SHEET_OVERVIEW
     post_run = set((run_log.get("params") or {}).get("formats") or []) == {"post"}
-    detail.title = SHEET_POST_DETAIL if post_run else SHEET_DETAIL
+    _write_overview(overview, videos, summary or {}, run_log, moment, post_run=post_run)
+    detail = wb.create_sheet(SHEET_POST_DETAIL if post_run else SHEET_DETAIL)
     _write_details(detail, videos, post_run=post_run)
     _write_summary(wb.create_sheet(SHEET_SUMMARY), summary or {}, post_run=post_run, moment=moment)
-    _write_run_log(wb.create_sheet(SHEET_LOG), run_log or {})
-    for ws, colour in zip(wb.worksheets, ("287D8E", "55A58B", "8295A3")):
+    _write_run_log(wb.create_sheet(SHEET_LOG), run_log, moment=moment)
+    for ws, colour in zip(wb.worksheets, ("234E63", "287D8E", "55A58B", "8295A3")):
         ws.sheet_properties.tabColor = colour
         ws.sheet_view.showGridLines = False
         ws.page_setup.orientation = "landscape"
@@ -352,9 +356,9 @@ def _write_details(ws: Worksheet, videos: list[Video], *, post_run: bool = False
     groups = (
         (1, 7, "Thông tin bài", "DCEAF3"),
         (8, 16, "Chỉ số", "DDF0E8"),
-        (17, 24, "Nội dung", "EEE7F5"),
-        (25, 34, "Công thức (Jev)", "FFF0D6"),
-        (35, 39, "Gợi ý làm lại", "F8E3DA"),
+        (17, 24, "Nội dung", "E6EFF3"),
+        (25, 34, "Công thức (Jev)", "CCE5E2"),
+        (35, 39, "Gợi ý làm lại", "E8F2EF"),
     )
     for first, last, title, colour in groups:
         ws.merge_cells(start_row=1, start_column=first, end_row=1, end_column=last)
@@ -478,39 +482,14 @@ def _write_summary(ws: Worksheet, summary: dict, *, post_run: bool = False, mome
     _put(ws, 2, 1, subtitle).font = Font(name="Calibri", size=11, color="607785")
     ws.row_dimensions[2].height = 24
     ws.freeze_panes = "B6"
+    ws.print_title_rows = "1:5"
+    ws.auto_filter.ref = f"A5:D{5 + len(summary.get('by_topic') or [])}"
     headers = ["Số bài" if post_run else "Số video", "View trung bình", "Điểm công thức trung bình"]
     fmts = [None, FMT_INT, FMT_INT, FMT_DEC1]
     row = _write_table(
         ws, 4, "Bảng 1 – Theo nhóm chủ đề (điểm giảm dần)", ["Nhóm chủ đề", *headers],
         _group_values(summary.get("by_topic")), fmts,
     )
-    topics = summary.get("by_topic") or []
-    if len(topics) >= 2:
-        chart = BarChart()
-        chart.type = "bar"
-        chart.style = 10
-        chart.title = "Số bài theo nhóm chủ đề" if post_run else "Số video theo nhóm chủ đề"
-        # openpyxl's x axis is the category axis, even for a horizontal bar chart.
-        chart.x_axis.title = "Nhóm chủ đề"
-        chart.y_axis.title = "Số bài" if post_run else "Số video"
-        chart.x_axis.delete = False
-        chart.y_axis.delete = False
-        chart.x_axis.tickLblPos = "nextTo"
-        chart.y_axis.tickLblPos = "nextTo"
-        chart.y_axis.numFmt = "0"
-        chart.y_axis.majorUnit = max(1, math.ceil(max(r.get("count") or 0 for r in topics) / 6))
-        chart.y_axis.scaling.min = 0
-        chart.add_data(Reference(ws, min_col=2, min_row=5, max_row=5 + len(topics)), titles_from_data=True)
-        chart.set_categories(Reference(ws, min_col=1, min_row=6, max_row=5 + len(topics)))
-        chart.series[0].graphicalProperties.solidFill = "55A58B"
-        chart.series[0].graphicalProperties.line.noFill = True
-        chart.legend = None
-        chart.width = 21
-        chart.height = max(8, min(16, len(topics) * 0.7 + 4))
-        ws.add_chart(chart, "F4")
-        ws.column_dimensions["E"].width = 3
-        for letter in "FGHIJKLMNO":
-            ws.column_dimensions[letter].width = 10
     row = _write_table(
         ws, row, "Bảng 2 – Theo kiểu hook (điểm giảm dần)", ["Kiểu hook", *headers],
         _group_values(summary.get("by_hook")), fmts,
@@ -529,8 +508,6 @@ def _write_summary(ws: Worksheet, summary: dict, *, post_run: bool = False, mome
     note.fill = PatternFill("solid", fgColor="E8F2EF")
     note.border = ROW_BORDER
     ws.row_dimensions[note_row].height = min(240, _text_height(text, chars_per_line=80))
-    if len(topics) >= 2:
-        ws.print_area = f"A1:O{max(35, note_row + 8)}"
 
 
 def _text_height(text: str, chars_per_line: int) -> float:
@@ -539,7 +516,7 @@ def _text_height(text: str, chars_per_line: int) -> float:
     return 15.0 * lines + 6
 
 
-def _fmt_time(value: Any) -> str | None:
+def _fmt_time(value: Any) -> datetime | str | None:
     if value is None or value == "":
         return None
     if isinstance(value, str):
@@ -548,11 +525,9 @@ def _fmt_time(value: Any) -> str | None:
         except ValueError:
             return value
     if isinstance(value, datetime):
-        if value.tzinfo is not None:  # thời điểm lưu theo UTC: đổi sang giờ Việt Nam
-            value = to_vn_datetime(int(value.timestamp()))
-        return value.strftime("%d/%m/%Y %H:%M:%S")
+        return _moment(value).replace(tzinfo=None)
     if isinstance(value, (int, float)):
-        return to_vn_datetime(int(value)).strftime("%d/%m/%Y %H:%M:%S")
+        return to_vn_datetime(int(value)).replace(tzinfo=None)
     return str(value)
 
 
@@ -569,7 +544,7 @@ def _page_row(page: dict) -> list[Any]:
     ]
 
 
-def _write_run_log(ws: Worksheet, run_log: dict) -> None:
+def _write_run_log(ws: Worksheet, run_log: dict, *, moment: datetime) -> None:
     for letter, width in zip("ABCDEFGH", (28, 60, 14, 12, 14, 14, 30, 60)):
         ws.column_dimensions[letter].width = width
 
@@ -583,7 +558,9 @@ def _write_run_log(ws: Worksheet, run_log: dict) -> None:
         [
             ["Bắt đầu", _fmt_time(run_log.get("started_at"))],
             ["Kết thúc", _fmt_time(run_log.get("finished_at"))],
+            ["Xuất lúc", moment.replace(tzinfo=None)],
         ],
+        [None, FMT_DATETIME],
         wrap={2},
     )
     row = _write_table(
@@ -595,6 +572,7 @@ def _write_run_log(ws: Worksheet, run_log: dict) -> None:
          for key, value in params.items()],
         wrap={2},
     )
+    page_header = row + 1
     row = _write_table(
         ws, row, "Kênh",
         ["Kênh", "Link", "Follower", "Đã quét", "Đạt ngưỡng", "Đã phân tích", "Bỏ qua vì", "Lỗi"],
@@ -602,15 +580,18 @@ def _write_run_log(ws: Worksheet, run_log: dict) -> None:
         [None, None, FMT_INT, FMT_INT, FMT_INT, FMT_INT, None, None],
         wrap={7, 8},
     )
+    ws.auto_filter.ref = f"A{page_header}:H{page_header + len(pages)}"
+    ws.print_title_rows = f"{page_header}:{page_header}"
     for r in range(row - len(pages) - 1, row - 1):
         error = ws.cell(r, 8)
         if error.value:
             error.fill = RISK_FILL
             error.font = Font(name="Calibri", color="9C3030", size=11)
     row = _write_table(
-        ws, row, "Sử dụng", ["Token Jev", "Token LLM", "Phút Deepgram"],
-        [[usage.get("jev_tokens"), usage.get("llm_tokens"), usage.get("deepgram_minutes")]],
-        [FMT_INT, FMT_INT, FMT_DEC2],
+        ws, row, "Sử dụng", ["Token Jev", "Token LLM", "Phút Deepgram", "Model LLM"],
+        [[usage.get("jev_tokens", 0), usage.get("llm_tokens", 0), usage.get("deepgram_minutes", 0.0),
+          usage.get("llm_model", "")]],
+        [FMT_INT, FMT_INT, FMT_DEC2, None],
     )
     _write_table(
         ws, row, "Thông báo", ["STT", "Nội dung"],
@@ -618,3 +599,156 @@ def _write_run_log(ws: Worksheet, run_log: dict) -> None:
         wrap={2},
     )
     ws.freeze_panes = "B3"
+
+
+def _write_overview(
+    ws: Worksheet, videos: list[Video], summary: dict, run_log: dict,
+    moment: datetime, *, post_run: bool,
+) -> None:
+    ws.column_dimensions["A"].width = 44
+    ws.column_dimensions["B"].width = 28
+    ws.column_dimensions["C"].width = 3
+    for letter in "DEFGHIJKLM":
+        ws.column_dimensions[letter].width = 10
+    ws.merge_cells("A1:M1")
+    title = _put(ws, 1, 1, "VIDEO CÔNG THỨC • BÁO CÁO PHÂN TÍCH")
+    title.font = Font(name="Calibri", size=22, bold=True, color="234E63")
+    ws.row_dimensions[1].height = 40
+    _put(ws, 2, 1, "Xuất lúc").font = BODY_FONT
+    _put(ws, 2, 2, moment.replace(tzinfo=None), FMT_DATETIME).font = BODY_FONT
+    pages = run_log.get("pages") or []
+    usage = run_log.get("usage") or {}
+    unit = "bài đăng" if post_run else "video"
+    suggestion_counts = [
+        sum(_cell_value(_suggestion(v, index)) is not None for index in range(3))
+        for v in videos
+    ]
+    kpis = [
+        ["Số kênh", len(pages) if pages else len({v.page_url for v in videos})],
+        [f"Số {unit} quét được", sum(p.get("scanned") or 0 for p in pages)],
+        ["Đạt ngưỡng", sum(p.get("passed") or 0 for p in pages) if pages else len(videos)],
+        ["Đã phân tích", sum(p.get("analyzed") or 0 for p in pages) if pages
+         else sum(bool(v.jev or v.llm) for v in videos)],
+        ["Số mục xuất", len(videos)],
+        ["Gợi ý giữ lại", sum(suggestion_counts)],
+        ["Video/bài có gợi ý", sum(count > 0 for count in suggestion_counts)],
+        ["Token Jev", usage.get("jev_tokens", 0)],
+        ["Token LLM", usage.get("llm_tokens", 0)],
+        ["Phút Deepgram", usage.get("deepgram_minutes", 0.0)],
+        ["Model LLM", usage.get("llm_model", "")],
+    ]
+    row = _write_table(ws, 4, "Kết quả lượt chạy", ["Chỉ số", "Giá trị"], kpis, [None, FMT_INT], wrap={1, 2})
+    for index, (label, _) in enumerate(kpis, start=6):
+        if label == "Phút Deepgram":
+            ws.cell(index, 2).number_format = FMT_DEC2
+    params = run_log.get("params") or {}
+    row = _write_table(
+        ws, row, "Phạm vi quét", ["Tham số", "Giá trị"],
+        [[_PARAM_LABELS.get(key, key),
+          ", ".join(KIND_LABELS.get(kind, kind) for kind in sorted(value)) if key == "formats"
+          else ("Đạt cả hai điều kiện" if value else "Đạt một trong hai") if key == "match_all"
+          else value] for key, value in params.items()], wrap={1, 2},
+    )
+    row = _write_table(
+        ws, row, "Thời gian chạy", ["Mục", "Giá trị"],
+        [["Bắt đầu", _fmt_time(run_log.get("started_at"))],
+         ["Kết thúc", _fmt_time(run_log.get("finished_at"))]], [None, FMT_DATETIME], wrap={2},
+    )
+    topics = summary.get("by_topic") or build_summary_tables(videos)["by_topic"]
+    table_row = max(42, row)
+    next_row = _write_table(
+        ws, table_row, "Phân bố chủ đề", ["Nhóm chủ đề", "Số bài" if post_run else "Số video"],
+        [[r.get("label"), r.get("count", 0)] for r in topics] or [["Chưa có dữ liệu", 0]],
+        [None, FMT_INT], wrap={1},
+    )
+    _add_overview_chart(ws, table_row + 1, max(1, len(topics)), "Phân bố chủ đề", "D23")
+    top = sorted(videos, key=_score_order)[:10]
+    _write_table(
+        ws, next_row, "Nội dung nổi bật", ["Nội dung", "Điểm công thức"],
+        [[_llm(v, "chu_de_bai") or v.caption[:80] or v.url, v.score] for v in top]
+        or [["Chưa có dữ liệu", 0]], [None, FMT_DEC1], wrap={1},
+    )
+    _add_overview_chart(ws, next_row + 1, max(1, len(top)), "Top nội dung theo điểm công thức", "D4")
+    ws.freeze_panes = "B6"
+    ws.print_title_rows = "1:2"
+    ws.print_area = f"A1:M{ws.max_row}"
+
+
+def _add_overview_chart(ws: Worksheet, header: int, count: int, title: str, anchor: str) -> None:
+    chart = BarChart()
+    chart.type = "bar"
+    chart.style = 10
+    chart.title = title
+    chart.add_data(Reference(ws, min_col=2, min_row=header, max_row=header + count), titles_from_data=True)
+    chart.set_categories(Reference(ws, min_col=1, min_row=header + 1, max_row=header + count))
+    chart.y_axis.scaling.min = 0
+    chart.y_axis.numFmt = FMT_INT
+    chart.series[0].graphicalProperties.solidFill = "55A58B"
+    chart.series[0].graphicalProperties.line.noFill = True
+    chart.legend = None
+    chart.width = 22
+    chart.height = 9
+    ws.add_chart(chart, anchor)
+
+
+def read_summary(path: Path) -> dict:
+    """Đọc nhanh báo cáo đã xuất; tệp hỏng hoặc không đúng cấu trúc trả về {}."""
+    wb = None
+    try:
+        wb = load_workbook(path, read_only=True, data_only=True)
+        if SHEET_SUMMARY not in wb.sheetnames or SHEET_LOG not in wb.sheetnames:
+            return {}
+        kind = "post" if SHEET_POST_DETAIL in wb.sheetnames else "video"
+        sheet = SHEET_POST_DETAIL if kind == "post" else SHEET_DETAIL
+        if sheet not in wb.sheetnames:
+            return {}
+        required = {"STT", "Kênh", "Link bài", "Chủ đề bài", "Caption", "View",
+                    "Tổng tương tác", "Điểm công thức (0–100)", "Nhóm chủ đề"}
+        headers = None
+        items = []
+        for row in wb[sheet].iter_rows(values_only=True):
+            if headers is None:
+                names = {value: i for i, value in enumerate(row) if isinstance(value, str)}
+                if required <= names.keys():
+                    headers = names
+                continue
+            def value(name: str):
+                index = headers[name]
+                return row[index] if index < len(row) else None
+            if value("STT") is None:
+                continue
+            items.append({
+                "title": _text(value("Chủ đề bài") or value("Caption") or value("Link bài")),
+                "page": _text(value("Kênh")),
+                "url": _text(value("Link bài")),
+                "views": int(value("View")) if value("View") is not None else None,
+                "interactions": int(value("Tổng tương tác")) if value("Tổng tương tác") is not None else None,
+                "score": float(value("Điểm công thức (0–100)")) if value("Điểm công thức (0–100)") is not None else None,
+                "topic": _text(value("Nhóm chủ đề")),
+            })
+        if headers is None:
+            return {}
+        created = None
+        usage = {}
+        usage_headers = None
+        for row in wb[SHEET_LOG].iter_rows(values_only=True):
+            if row and row[0] == "Xuất lúc" and len(row) > 1 and isinstance(row[1], datetime):
+                created = row[1]
+            if usage_headers is not None:
+                data = {name: row[i] if i < len(row) else None for name, i in usage_headers.items()}
+                usage = {"jev_tokens": int(data.get("Token Jev") or 0),
+                         "llm_tokens": int(data.get("Token LLM") or 0),
+                         "deepgram_minutes": float(data.get("Phút Deepgram") or 0),
+                         "llm_model": _text(data.get("Model LLM"))}
+                usage_headers = None
+            if {"Token Jev", "Token LLM", "Phút Deepgram"} <= set(row):
+                usage_headers = {name: i for i, name in enumerate(row) if isinstance(name, str)}
+        return {"kind": kind, "count": len(items), "created": created, "items": items, "usage": usage}
+    except Exception:
+        return {}
+    finally:
+        if wb is not None:
+            try:
+                wb.close()
+            except Exception:
+                pass

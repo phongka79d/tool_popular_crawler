@@ -11,8 +11,9 @@ import shutil
 import subprocess
 import sys
 import threading
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Iterator
 
 import requests
 
@@ -24,6 +25,20 @@ from models import Video
 from retry import with_retry
 
 log = logging.getLogger(__name__)
+
+_usage = threading.local()
+
+
+@contextmanager
+def observe_usage(callback: Callable[[float], None]) -> Iterator[None]:
+    """Báo từng lượt Deepgram trên luồng hiện tại, kể cả lượt không có thoại."""
+    previous = getattr(_usage, "callback", None)
+    _usage.callback = callback
+    try:
+        yield
+    finally:
+        _usage.callback = previous
+
 
 DEEPGRAM_URL = "https://api.deepgram.com/v1/listen"
 DEEPGRAM_MODELS_URL = "https://api.deepgram.com/v1/models"
@@ -289,7 +304,13 @@ def _transcribe(audio: Path, api_key: str, stt: dict, keyterms: list[str],
                 warnings: list[str]) -> tuple[dict | None, float]:
     """Trả (kết quả, phút Deepgram đã tính phí); ghi cảnh báo hạn mức và trạng thái dự phòng."""
     try:
-        result = transcribe_deepgram(audio, api_key, stt, keyterms)
+        result = None
+        try:
+            result = transcribe_deepgram(audio, api_key, stt, keyterms)
+        finally:
+            callback = getattr(_usage, "callback", None)
+            if callback is not None:
+                callback(result["duration"] / 60.0 if result is not None else 0.0)
         return result, result["duration"] / 60.0
     except QuotaError as exc:
         log.warning("Deepgram không dùng được: %s", exc)

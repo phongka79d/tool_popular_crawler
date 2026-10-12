@@ -456,9 +456,16 @@ class FacebookScanner:
             return ""
 
     def _followers_from_text(self) -> int | None:
-        text = self._first_text(SEL["page"]["followers_text"])
-        match = re.search(SEL["page"]["followers_pattern"], text, re.IGNORECASE)
-        return parse_count(match.group(1)) if match else None
+        # Đọc mọi dòng khớp: dòng đầu đôi khi chỉ là nhãn "Người theo dõi".
+        loc = self._require_page().locator(SEL["page"]["followers_text"])
+        try:
+            for text in loc.all_text_contents():
+                count = graphql.followers_from_text(text)
+                if count is not None:
+                    return count
+        except PlaywrightError:
+            pass
+        return None
 
     def _export_cookies(self) -> None:
         """Ghi lại cookie sau mỗi lần quét để giữ phiên mới nhất cho yt-dlp."""
@@ -480,24 +487,50 @@ class FacebookScanner:
         self._open(FB_HOME)
 
     def get_page_info(self, page_url: str) -> Page:
-        """Tên và số follower của page. Ưu tiên JSON trong HTML, sau đó dùng selector dự phòng."""
-        self._open(page_url)
+        """Đọc header HTML và fragment GraphQL; chờ có giới hạn khi header đến muộn."""
         page = self._require_page()
-        header = graphql.parse_page_header(page.content())
-        if not header["name"] or header["followers"] is None:
-            # Phần đầu trang (tên, follower) đến sau domcontentloaded: chờ dòng follower hiện rồi đọc lại.
-            with contextlib.suppress(PlaywrightError):
-                page.locator(SEL["page"]["followers_text"]).first.wait_for(timeout=HEADER_WAIT_MS)
-            later = graphql.parse_page_header(page.content())
-            header = {"name": header["name"] or later["name"],
-                      "followers": header["followers"] if header["followers"] is not None else later["followers"]}
-        name = str(header.get("name") or "").strip() or self._first_text(SEL["page"]["name"])
-        followers = _as_count(header.get("followers"))
-        if followers is None:
-            followers = self._followers_from_text()
-        if not name:
-            logger.warning("Không đọc được tên page %s", page_url)
-        return Page(url=page_url, name=name, followers=followers)
+        pending: list[Request] = []
+
+        def finished(request: Request) -> None:
+            if GRAPHQL_MARK in request.url:
+                pending.append(request)
+
+        page.on("requestfinished", finished)
+        bodies: list[str] = []
+        try:
+            self._open(page_url)
+
+            def read_header() -> dict:
+                requests = list(pending)
+                pending.clear()
+                for request in requests:
+                    with contextlib.suppress(PlaywrightError):
+                        response = request.response()
+                        if response is not None and response.status == 200:
+                            bodies.append(response.text())
+                # Bọc fragment như data-sjs để bộ đọc áp dụng cùng thứ tự ưu tiên exact.
+                html = page.content()
+                for body in bodies:
+                    html += '<script data-sjs>' + body + '</script>'
+                return graphql.parse_page_header(html)
+
+            deadline = time.monotonic() + HEADER_WAIT_MS / 1000
+            header = read_header()
+            while (not header["name"] or header["followers"] is None) and time.monotonic() < deadline:
+                page.wait_for_timeout(250)
+                header = read_header()
+            # Đọc thêm một lần để nhận fragment chính xác sau chữ làm tròn.
+            page.wait_for_timeout(750)
+            header = read_header()
+            name = str(header.get("name") or "").strip() or self._first_text(SEL["page"]["name"])
+            followers = _as_count(header.get("followers"))
+            if followers is None:
+                followers = self._followers_from_text()
+            if not name:
+                logger.warning("Không đọc được tên page %s", page_url)
+            return Page(url=page_url, name=name, followers=followers)
+        finally:
+            page.remove_listener("requestfinished", finished)
 
     def _scroll_once(self) -> None:
         """Một vòng cuộn như người dùng: đưa chuột vào feed rồi lăn từng nấc tới gần cuối trang."""

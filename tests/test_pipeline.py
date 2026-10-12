@@ -125,6 +125,8 @@ def harness(monkeypatch, tmp_path):
         state.analysis_calls.append(video.video_id)
         if state.llm_error:
             raise state.llm_error
+        pipeline.llm_client._record(
+            SimpleNamespace(usage=SimpleNamespace(total_tokens=12, completion_tokens=4)), 2.0)
         return {"chu_de_bai": "Nghề dược", "_usage": 12,
                 "goi_y_nhan_ban": [{"hook_moi": "Mẹo nhà thuốc", "y_tuong": "Một góc mới"}]}
 
@@ -134,6 +136,8 @@ def harness(monkeypatch, tmp_path):
 
     def commentary(client, model, summary, *args):
         state.commentary_calls.append(deepcopy(summary))
+        pipeline.llm_client._record(
+            SimpleNamespace(usage=SimpleNamespace(total_tokens=5, completion_tokens=2)), 1.0)
         return "Công thức đang thắng", 5
 
     monkeypatch.setattr(pipeline.llm_client, "write_analysis", analysis)
@@ -339,8 +343,11 @@ def test_usage_counts_analysis_check_commentary_and_transcript(harness):
     h = harness
     h.run()
     usage = h.exports[0][2]["usage"]
-    assert {k: usage[k] for k in ("jev_tokens", "llm_tokens", "deepgram_minutes", "llm_model")} == {
-        "jev_tokens": 14, "llm_tokens": 17, "deepgram_minutes": 0.5, "llm_model": "llm-test"}
+    assert usage == {
+        "jev_tokens": 14, "jev_calls": 2, "llm_tokens": 17, "deepgram_minutes": 0.5,
+        "deepgram_calls": 1, "llm_model": "llm-test", "llm_calls": 2,
+        "llm_output_tokens": 6, "llm_seconds": 3.0, "llm_cached": 0,
+    }
 
 
 def test_run_summary_reports_llm_speed_in_vietnamese_format():
@@ -502,8 +509,9 @@ def test_commentary_quota_uses_same_user_choice(harness, monkeypatch, choice):
     harness.run(ask_user=ask if choice is not None else None)
     assert len(harness.exports) == 1
     assert len(questions) == (0 if choice is None else 1)
+    done_text = "Đã xuất kết quả một phần." if choice == "pause" else "Đã xuất kết quả."
     assert harness.progress[-1].message == (
-        "Đã xuất kết quả một phần." if choice == "pause" else "Đã xuất kết quả."
+        f"{done_text} {pipeline.usage_summary(harness.exports[0][2]['usage'])}"
     )
 
 
@@ -704,3 +712,186 @@ def test_login_required_mid_tab_exports_rows_collected_before_failure(harness):
     assert [video.video_id for video in h.exports[0][0]] == ["v1"]
     assert h.exports[0][2]["pages"][0]["scanned"] == 1
     assert h.scans == ["large"]
+
+
+def test_item_and_commentary_turns_sum_to_usage(harness, monkeypatch):
+    h = harness
+    monkeypatch.setattr(pipeline, "ANALYZE_WORKERS", 3)
+    together = Barrier(3, timeout=5)
+    original = pipeline.llm_client.write_analysis
+
+    def analysis(*args):
+        together.wait()
+        return original(*args)
+
+    monkeypatch.setattr(pipeline.llm_client, "write_analysis", analysis)
+    for video_id in ("v2", "v3"):
+        h.rows["large"].append(dict(h.rows["large"][0], video_id=video_id))
+    assert h.run() is not None
+    completed = [p for p in h.progress if p.turn and p.stage == "analyze"]
+    assert len(completed) == 3
+    assert {p.turn["label"] for p in completed} == {"Video 1", "Video 2", "Video 3"}
+    expected = {"llm_calls": 1, "llm_tokens": 12, "llm_output_tokens": 4,
+                "llm_seconds": 2.0, "jev_calls": 2, "jev_tokens": 14, "deepgram_minutes": 0.5}
+    for event in completed:
+        assert event.turn == {"label": event.turn["label"], **expected}
+        assert "LLM 4 token trong 2,0 giây (2 token/giây)" in event.message
+    commentary = [p for p in h.progress if p.turn and p.stage == "export"]
+    assert len(commentary) == 1
+    assert commentary[0].turn == {
+        "label": "Nhận xét tổng hợp", "llm_calls": 1, "llm_tokens": 5,
+        "llm_output_tokens": 2, "llm_seconds": 1.0, "jev_calls": 0,
+        "jev_tokens": 0, "deepgram_minutes": 0.0,
+    }
+    usage = h.exports[0][2]["usage"]
+    for key in expected:
+        assert sum(p.turn[key] for p in completed + commentary) == usage[key]
+    assert usage["deepgram_calls"] == 3
+
+
+def test_usage_refreshes_follow_calls_without_log_entries(harness, caplog):
+    with caplog.at_level("INFO", logger="pipeline"):
+        assert harness.run() is not None
+    updates = [p for p in harness.progress if not p.message]
+    assert len(updates) == 5  # Deepgram, nhãn Jev, phân tích LLM, kiểm tra Jev, nhận xét LLM
+    assert all(p.transient and p.turn is None for p in updates)
+    assert [p.stage for p in updates] == ["analyze"] * 4 + ["export"]
+    assert [(p.usage["deepgram_calls"], p.usage["jev_calls"], p.usage["llm_calls"])
+            for p in updates] == [(1, 0, 0), (1, 1, 0), (1, 1, 1), (1, 2, 1), (1, 2, 2)]
+    assert [p.usage["llm_tokens"] for p in updates] == [0, 0, 12, 12, 17]
+    assert all(p.page_url == "large" and p.page_index == 1 for p in updates)
+    assert not any(record.getMessage() == "" for record in caplog.records)
+    assert "" not in harness.exports[0][2]["messages"]
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_completion_turn_exists_for_irrelevant_and_cached_analysis(harness, cached):
+    if cached:
+        harness.llm_cache["v1"] = {"chu_de_bai": "Đã lưu"}
+    else:
+        harness.relevant = 0.49
+    assert harness.run() is not None
+    turns = [p.turn for p in harness.progress if p.turn and p.stage == "analyze"]
+    assert turns == [{"label": "Video 1", "llm_calls": 0, "llm_tokens": 0,
+                      "llm_output_tokens": 0, "llm_seconds": 0.0, "jev_calls": 1,
+                      "jev_tokens": 10, "deepgram_minutes": 0.5}]
+
+
+def test_retry_turn_includes_both_analysis_and_suggestion_checks(harness):
+    harness.reject_suggestions = True
+    assert harness.run() is not None
+    turn = next(p.turn for p in harness.progress if p.turn and p.stage == "analyze")
+    assert turn["llm_calls"] == 2
+    assert turn["llm_tokens"] == 24
+    assert turn["llm_output_tokens"] == 8
+    assert turn["llm_seconds"] == 4.0
+    assert turn["jev_calls"] == 3
+    assert turn["jev_tokens"] == 18
+
+
+def test_deepgram_reports_each_segment_including_zero_minutes(harness, monkeypatch):
+    durations = iter((0.0, 30.0))
+    monkeypatch.setattr(pipeline.transcript, "transcribe_deepgram",
+                        lambda *args: {"text": "Thoại", "duration": next(durations)})
+
+    def get(video, key, stt, terms, tmp, warnings):
+        minutes = 0.0
+        for number in range(2):
+            _, billed = pipeline.transcript._transcribe(Path("audio.mp3"), key, stt, terms, warnings)
+            minutes += billed
+            updates = [p for p in harness.progress if not p.message]
+            assert updates[-1].usage["deepgram_calls"] == number + 1
+        return minutes
+
+    monkeypatch.setattr(pipeline.transcript, "get_transcript", get)
+    assert harness.run() is not None
+    usage = harness.exports[0][2]["usage"]
+    assert usage["deepgram_calls"] == 2
+    assert usage["deepgram_minutes"] == 0.5
+
+
+def test_cached_transcript_does_not_count_deepgram(harness, monkeypatch):
+    monkeypatch.setattr(pipeline.transcript, "get_transcript", lambda *args: 0.0)
+    assert harness.run() is not None
+    usage = harness.exports[0][2]["usage"]
+    assert usage["deepgram_calls"] == 0
+    assert usage["deepgram_minutes"] == 0.0
+    assert next(p.turn for p in harness.progress if p.turn)["deepgram_minutes"] == 0.0
+
+
+def test_llm_usage_refreshes_before_internal_retry_returns(harness, monkeypatch):
+    invocations = []
+
+    def analysis(*args):
+        invocations.append(True)
+        for number in (1, 2):
+            pipeline.llm_client._record(
+                SimpleNamespace(usage=SimpleNamespace(total_tokens=6, completion_tokens=2)), 1.0)
+            update = next(p for p in reversed(harness.progress) if not p.message)
+            assert update.usage["llm_calls"] == number
+            assert update.usage["llm_tokens"] == number * 6
+        return {"_usage": 12,
+                "goi_y_nhan_ban": [{"hook_moi": "Mẹo nhà thuốc", "y_tuong": "Một góc mới"}]}
+
+    monkeypatch.setattr(pipeline.llm_client, "write_analysis", analysis)
+    assert harness.run() is not None
+    assert invocations == [True]
+    assert harness.exports[0][2]["messages"] == []
+    turn = next(p.turn for p in harness.progress if p.turn and p.stage == "analyze")
+    assert turn["llm_calls"] == 2
+    assert turn["llm_tokens"] == 12
+    assert turn["llm_output_tokens"] == 4
+    assert turn["llm_seconds"] == 2.0
+
+
+def test_post_image_usage_is_included_in_item_turn(harness, monkeypatch):
+    h = harness
+    h.params = pipeline.RunParams(14, {"post"})
+    h.settings["scan"]["read_images"] = True
+    llm = h.settings["llm"]
+    llm["vision"] = {"base_url": llm["base_url"], "model": llm["model"], "ok": True}
+    h.rows["large"][0].update(format="post", caption="Caption", image_urls=["image"])
+    monkeypatch.setattr(pipeline.db, "get_transcript", lambda ident: None)
+    monkeypatch.setattr(pipeline.db, "save_transcript", lambda *args: None)
+    monkeypatch.setattr(pipeline, "download_images", lambda urls: [b"image"])
+
+    def describe(*args):
+        pipeline.llm_client._record(
+            SimpleNamespace(usage=SimpleNamespace(total_tokens=9, completion_tokens=3)), 1.5)
+        return "Chữ trên ảnh", 9
+
+    monkeypatch.setattr(pipeline.llm_client, "describe_images", describe)
+    assert h.run() is not None
+    turn = next(p.turn for p in h.progress if p.turn and p.stage == "analyze")
+    assert turn["label"] == "Bài đăng 1"
+    assert turn["llm_calls"] == 2
+    assert turn["llm_tokens"] == 21
+    assert turn["llm_output_tokens"] == 7
+    assert turn["llm_seconds"] == 3.5
+    assert turn["deepgram_minutes"] == 0.0
+    assert h.exports[0][2]["usage"]["deepgram_calls"] == 0
+
+
+def test_successful_llm_request_before_error_still_counts(harness, monkeypatch):
+    def analysis(*args):
+        pipeline.llm_client._record(
+            SimpleNamespace(usage=SimpleNamespace(total_tokens=6, completion_tokens=2)), 1.0)
+        raise ValueError("Không đọc được kết quả")
+
+    monkeypatch.setattr(pipeline.llm_client, "write_analysis", analysis)
+    assert harness.run() is not None
+    turn = next(p.turn for p in harness.progress if p.turn and p.stage == "analyze")
+    assert turn["llm_calls"] == 1
+    assert turn["llm_tokens"] == 6
+    assert turn["llm_output_tokens"] == 2
+    assert turn["llm_seconds"] == 1.0
+    assert harness.exports[0][2]["usage"]["llm_tokens"] == 11
+
+
+def test_failed_jev_call_counts_without_tokens(harness):
+    harness.jev_error = AuthError("jev", "Key Jev bị từ chối")
+    assert harness.run() is not None
+    usage = harness.exports[0][2]["usage"]
+    assert usage["jev_calls"] == 1
+    assert usage["jev_tokens"] == 0
+    assert any(not p.message and p.usage["jev_calls"] == 1 for p in harness.progress)

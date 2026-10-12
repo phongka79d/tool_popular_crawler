@@ -1,8 +1,8 @@
 {
   "page": {
     "name": "[role='main'] h1",
-    "followers_text": "span:has-text('người theo dõi'), a:has-text('người theo dõi')",
-    "followers_pattern": "(\\d[\\d.,]*(?:\\s*(?:[KkMm]|N|Tr|nghìn|triệu)\\b)?)\\s*(?:người theo dõi|followers)"
+    "followers_text": "[role='main'] a[href*='/followers'], [role='main'] span:has-text('người theo dõi'), [role='main'] a:has-text('followers'), [role='main'] span:has-text('followers')",
+    "followers_pattern": "(\\d[\\d.,]*(?:\\s*(?:[KkMmNn]|[Tt][Rr]|nghìn|ngàn|triệu)\\b)?)\\s*(?:người theo dõi|followers)"
   },
   "tabs": {
     "reel": "reels",
