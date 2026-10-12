@@ -1,20 +1,21 @@
-"""Điều phối quét Facebook, phân tích và xuất Excel (PLAN §2, §5–9)."""
+"""Điều phối quét Facebook, phân tích và xuất Excel."""
 from __future__ import annotations
 
 import argparse
+import io
 import logging
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
 
-import io
 import requests
 from PIL import Image
+
 import applog
 import config
 import db
@@ -33,6 +34,7 @@ logger = logging.getLogger(__name__)
 # Số video phân tích cùng lúc. Mỗi video chủ yếu chờ mạng (Deepgram, Jev, LLM ~1 phút/lần gọi),
 # nên chạy song song rút ngắn thời gian gần bằng số luồng mà không tốn thêm CPU.
 ANALYZE_WORKERS = 4
+MAX_POST_IMAGES = 4
 _METRICS = ("views", "reactions", "comments", "shares", "posted_at", "duration_s")
 
 
@@ -49,10 +51,11 @@ class RunParams:
 def is_post_run(params: RunParams) -> bool:
     return params.formats == {"post"}
 
+
 def download_images(urls: list[str]) -> list[bytes]:
-    """Fetch expiring post images on an analysis worker; skip unavailable/broken images."""
+    """Tải ảnh bài đăng còn hiệu lực; bỏ qua ảnh không tải hoặc đọc được."""
     images = []
-    for url in urls[:4]:
+    for url in urls[:MAX_POST_IMAGES]:
         try:
             response = requests.get(url, timeout=(10, 30))
             response.raise_for_status()
@@ -62,9 +65,8 @@ def download_images(urls: list[str]) -> list[bytes]:
             images.append(data)
         except (requests.RequestException, OSError, ValueError):
             logger.warning("Không tải/đọc được một ảnh bài đăng, bỏ qua ảnh này")
-    logger.info("Đã tải %d/%d ảnh bài đăng", len(images), min(len(urls), 4))
+    logger.info("Đã tải %d/%d ảnh bài đăng", len(images), min(len(urls), MAX_POST_IMAGES))
     return images
-
 
 
 @dataclass
@@ -79,7 +81,7 @@ class Progress:
     step: int = 0  # số việc đã xong trong bước hiện tại (ví dụ số video đã phân tích)
     steps: int = 0  # tổng số việc của bước hiện tại; 0 khi không đếm trước được
     usage: dict | None = None  # ảnh chụp run_log["usage"]: token, số lần gọi, thời gian và tốc độ LLM
-    transient: bool = False  # cập nhật tạm (đếm ngược khi nghỉ): hiện ở khung tiến độ, không ghi vào diễn biến
+    transient: bool = False  # cập nhật tạm (đếm ngược hoặc mức dùng): không ghi vào diễn biến
     turn: dict | None = None  # mức dùng riêng của mục vừa hoàn tất
 
 
@@ -169,9 +171,9 @@ def _tokens(usage: dict | int | None) -> int:
 class _Stopped(Exception):
     pass
 
+
 class _Paused(Exception):
     pass
-
 
 
 def run(
@@ -385,7 +387,7 @@ def run(
                         images = download_images(video.image_urls)
                         say(f"AI đọc {len(images)} ảnh…")
                         if images:
-                            (video.transcript, image_tokens), meter = call_llm(
+                            (video.transcript, _), meter = call_llm(
                                 turn, llm_client.describe_images,
                                 llm_instance(), settings["llm"]["model"], images, video.caption,
                                 llm_client.reasoning_effort(settings), tokens=lambda result: result[1],
@@ -419,7 +421,7 @@ def run(
                     say(warning)
             checkpoint()
             say("Jev gắn nhãn chủ đề, kiểu hook, cấu trúc…")
-            raw, usage = call_jev(turn, jev_client.ask_labels, jev_instance(), video, taxonomy,
+            raw, _ = call_jev(turn, jev_client.ask_labels, jev_instance(), video, taxonomy,
                                   settings, video=video)
             video.jev = jev_client.interpret_labels(raw, settings, taxonomy)
             video.score = filters.formula_score(
@@ -440,7 +442,6 @@ def run(
                 return "dùng phân tích LLM đã lưu"
             if llm_unavailable:
                 return "không có gợi ý (LLM hết hạn mức)"
-            kept: list = []
             for attempt in range(2):
                 checkpoint()
                 say("LLM viết phân tích và gợi ý (thường dưới 1 phút)…" if attempt == 0
@@ -451,13 +452,13 @@ def run(
                     video=video,
                 )
                 video.llm = dict(analysis)
-                # Unchecked suggestions must never appear in a partial export.
+                # Không xuất gợi ý chưa được kiểm tra, kể cả khi xuất kết quả một phần.
                 video.llm["goi_y_nhan_ban"] = []
                 if analysis.get("_raw"):
                     video.notes.append(str(analysis["_raw"]))
                 checkpoint()
                 suggestions = llm_client.filter_banned(analysis.get("goi_y_nhan_ban", []), ban_words)
-                kept = []
+                kept: list = []
                 if suggestions:
                     say(f"Jev kiểm tra {len(suggestions)} gợi ý…")
                     kept, check_raw, usage = call_jev(
@@ -526,7 +527,7 @@ def run(
             yield pool
         finally:
             pool.shutdown(wait=True)
-            # A worker may fail while scanning is already unwinding due to Dừng.
+            # Luồng phân tích có thể gặp lỗi trong khi đang xử lý Dừng ở luồng quét.
             if fatal:
                 raise fatal[0]
 
@@ -600,7 +601,7 @@ def run(
                             scan_failure = exc
                         entry["errors"].extend(getattr(scanner, "scan_errors", []))
                         for row in rows:
-                            # Preserve collected rows when stopped during scrolling.
+                            # Giữ các mục đã thu được khi Dừng trong lúc cuộn.
                             values = dict(row)
                             values.update(page_url=page_url, page_name=page.name, page_followers=page.followers)
                             video = Video(**values)
@@ -675,7 +676,7 @@ def run(
             add_error(exc)
             partial = True
 
-        # Rows from a page interrupted before filtering still belong in the partial export.
+        # Mục ở kênh bị ngắt trước bước lọc vẫn được xét cho kết quả một phần.
         if partial:
             remaining = [video for video in collected if video.page_url not in filtered_pages]
             filters.compute_metrics(remaining)
@@ -695,7 +696,7 @@ def run(
                 llm_client.meter_take()  # bỏ lượt kiểm tra key/ảnh trước khi quét
                 turn = new_turn("Nhận xét tổng hợp")
                 emit("export", "LLM viết nhận xét tổng hợp cho file Excel…")
-                (summary["commentary"], usage), meter = call_llm(
+                (summary["commentary"], _), meter = call_llm(
                     turn, llm_client.write_commentary, llm_instance(), settings["llm"]["model"],
                     summary, llm_client.reasoning_effort(settings), tokens=lambda result: _tokens(result[1]),
                     stage="export",

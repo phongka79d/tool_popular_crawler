@@ -3,7 +3,7 @@
 Pattern adapted from reference/vyralforge/database/db.py (MIT): a `conn()` contextmanager
 that commits and closes, and `INSERT ... ON CONFLICT DO UPDATE` upserts. JSON is stored as TEXT.
 
-Every public function takes an optional `path`; the default is `config.DB_PATH`.
+Database access functions take an optional `path`; the default is `config.DB_PATH`.
 """
 from __future__ import annotations
 
@@ -11,9 +11,10 @@ import hashlib
 import json
 import sqlite3
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 import config
 from models import Page, Video

@@ -7,8 +7,6 @@ import logging
 import os
 import queue
 import re
-import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -18,8 +16,8 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
-import streamlit as st
 import pandas as pd
+import streamlit as st
 
 import applog
 import config
@@ -73,6 +71,34 @@ PAGE_SCAN = "Chạy quét"
 PAGE_RESULTS = "Kết quả"
 PAGES = [PAGE_SETTINGS, PAGE_SCAN, PAGE_RESULTS]
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+_STEP_STATES = {"done": ":green[✓ Xong]", "current": ":blue[● Đang làm]", "pending": ":gray[○ Chưa làm]"}
+SCAN_STAGES = (("keys", "Kiểm tra key"), ("scan", "Quét kênh"), ("filter", "Lọc nội dung"),
+               ("analyze", "Phân tích"), ("export", "Xuất Excel"))
+TIMELINE_ROWS = 8
+LOG_MAX_RECORDS = 500
+
+
+# Định dạng số liệu và thông báo lỗi.
+
+
+def _format_number(value: float) -> str:
+    return f"{value:.4f}".rstrip("0").rstrip(".").replace(".", ",")
+
+
+def _int_text(value: float | None) -> str:
+    return "—" if value is None else f"{round(value):,}".replace(",", ".")
+
+
+def _format_duration(seconds: float) -> str:
+    minutes, secs = divmod(int(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes:02d}:{secs:02d}"
+
+
+def _format_size(size: int) -> str:
+    if size < 1024 * 1024:
+        return f"{size / 1024:.0f} KB"
+    return f"{size / (1024 * 1024):.1f} MB".replace(".", ",")
 
 
 def _redact(text: str, secrets: tuple[str, ...] = ()) -> str:
@@ -104,6 +130,7 @@ def _show_error(message: str, exc: BaseException | None = None) -> None:
     st.error(message)
 
 
+# Chuẩn bị trình duyệt và luồng nền.
 def _install_chromium() -> None:
     import browser_setup
 
@@ -153,6 +180,7 @@ def _login_worker(events: queue.Queue) -> None:
         events.put(("finished", None))
 
 
+# Trạng thái giao diện và kết nối dịch vụ AI.
 def _init_state() -> None:
     defaults = {"running": False, "logging_in": False, "scan_log": [],
                 "scan_errors": [], "progress": None, "scan_result": None, "scan_started": None,
@@ -251,10 +279,6 @@ def _deepgram_index(items: list[dict], saved: str) -> int:
         if saved and item["architecture"] == saved:
             return index
     return 0
-
-
-def _format_number(value: float) -> str:
-    return f"{value:.4f}".rstrip("0").rstrip(".").replace(".", ",")
 
 
 def _llm_option_label(item: dict) -> str:
@@ -419,7 +443,7 @@ def _save_service(name: str, candidate: str, settings: dict, selection: dict) ->
         st.error(_error_message(exc, (candidate,)))
         return
     st.session_state.key_status = None
-    # Widget state can only be cleared before it is instantiated on the next run.
+    # Chỉ xóa trạng thái ô nhập trước khi dựng widget ở lần chạy tiếp theo.
     st.session_state["clear_key_input"] = f"svc_key_{name}"
     st.session_state.notice = f"Đã kiểm tra và lưu cấu hình {SERVICE_LABELS[name]}."
     st.rerun()
@@ -434,7 +458,7 @@ def _reset_configuration() -> None:
     for key in [key for key in st.session_state.keys() if key.startswith("svc_")]:
         st.session_state.pop(key, None)
     st.session_state.svc_models = {}
-    for key in ("channels_editor", "min_followers", "confirm_reset"):
+    for key in ("channels_editor", "confirm_reset"):
         st.session_state.pop(key, None)
     st.session_state.key_status = None
     st.session_state.notice = "Đã đặt lại API key, cài đặt và danh sách kênh. Dữ liệu và phiên Facebook được giữ nguyên."
@@ -490,9 +514,7 @@ def _facebook_logged_in() -> bool:
         return False
 
 
-_STEP_STATES = {"done": ":green[✓ Xong]", "current": ":blue[● Đang làm]", "pending": ":gray[○ Chưa làm]"}
-
-
+# Hướng dẫn các bước và trang Cài đặt.
 @dataclass(frozen=True)
 class _Guide:
     """Trạng thái để vẽ thanh 3 bước và việc tiếp theo; được tính lại mỗi lần giao diện chạy."""
@@ -627,7 +649,6 @@ def _facebook_section(fb_ready: bool, locked: bool) -> None:
             events = queue.Queue()
             worker = threading.Thread(target=_login_worker, args=(events,), daemon=True, name="facebook-login")
             st.session_state.login_queue = events
-            st.session_state.login_thread = worker
             st.session_state.logging_in = True
             st.session_state.login_message = None
             worker.start()
@@ -703,7 +724,7 @@ def _settings_page(settings: dict, guide: _Guide) -> None:
         st.caption("Xóa 3 API key, khôi phục settings.json mặc định và xóa danh sách kênh. Không xóa Excel, cache hay phiên Facebook.")
         confirmed = st.checkbox("Tôi xác nhận đặt lại toàn bộ cấu hình trên", key="confirm_reset", disabled=locked)
         if st.button("Đặt lại toàn bộ cấu hình", disabled=locked or not confirmed, icon=":material/restart_alt:"):
-            # Defer widget-state deletion until before widgets are built again.
+            # Xóa trạng thái widget trước khi dựng lại giao diện ở lần chạy tiếp theo.
             st.session_state.reset_requested = True
             st.rerun()
 
@@ -715,6 +736,7 @@ def _render_login_status() -> None:
         st.error(st.session_state.login_message)
 
 
+# Tùy chọn và khởi động quét.
 def _refresh_keys(settings: dict, *, require_deepgram: bool = True) -> dict:
     try:
         with st.spinner("Đang kiểm tra API key..."):
@@ -864,7 +886,7 @@ def _start_scan(settings: dict, params: pipeline.RunParams) -> None:
     events, stop = queue.Queue(), threading.Event()
     worker = threading.Thread(target=_scan_worker, args=(params, copy.deepcopy(settings), events, stop),
                               daemon=True, name="video-scan")
-    st.session_state.update(running=True, scan_queue=events, stop_event=stop, scan_thread=worker,
+    st.session_state.update(running=True, scan_queue=events, stop_event=stop,
                             scan_started=time.monotonic(), scan_log=[], scan_errors=[], progress=None,
                             scan_result=None, scan_elapsed=None, question=None, scan_usage=None,
                             scan_usage_history=[], scan_turns=[], scan_passed_total=0, scan_overall=0.0,
@@ -915,18 +937,7 @@ def _terms_gate(settings: dict, locked: bool) -> bool:
     return bool(ticked)
 
 
-def _format_duration(seconds: float) -> str:
-    minutes, secs = divmod(int(seconds), 60)
-    hours, minutes = divmod(minutes, 60)
-    return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes:02d}:{secs:02d}"
-
-
-def _format_size(size: int) -> str:
-    if size < 1024 * 1024:
-        return f"{size / 1024:.0f} KB"
-    return f"{size / (1024 * 1024):.1f} MB".replace(".", ",")
-
-
+# Đọc, tải và xóa file Excel.
 @st.cache_data(show_spinner=False, max_entries=64)
 def _cached_summary(path: str, mtime: int) -> dict:
     """Mốc sửa file là một phần khóa cache, kể cả khi xuất đè cùng tên."""
@@ -995,12 +1006,7 @@ def _download_button(path: Path) -> None:
         _delete_dialog(path)
 
 
-SCAN_STAGES = (("keys", "Kiểm tra key"), ("scan", "Quét kênh"), ("filter", "Lọc nội dung"),
-               ("analyze", "Phân tích"), ("export", "Xuất Excel"))
-TIMELINE_ROWS = 8
-LOG_MAX_RECORDS = 500
-
-
+# Theo dõi tiến độ, từng kênh và mức sử dụng dịch vụ.
 def _stage_line(stage: str) -> str:
     names = [name for name, _ in SCAN_STAGES]
     position = len(names) if stage == "done" else names.index(stage) if stage in names else -1
@@ -1028,10 +1034,6 @@ def _progress_bar(progress: pipeline.Progress) -> None:
     else:
         fraction, label = (1.0, "Xong") if progress.done else (0.0, "")
     st.progress(min(1.0, max(0.0, fraction)), text=label)
-
-
-def _int_text(value: float | None) -> str:
-    return "—" if value is None else f"{round(value):,}".replace(",", ".")
 
 
 def _turn_speed(turn: dict) -> float | None:
@@ -1278,6 +1280,7 @@ def _render_scan_status() -> None:
             st.text("\n".join(st.session_state.scan_log))
 
 
+# Nhận sự kiện từ các luồng nền.
 def _drain_scan_queue() -> bool:
     """Nhận sự kiện từ luồng quét. Trả về True khi luồng đã kết thúc."""
     finished = False
@@ -1337,6 +1340,7 @@ def _poll_workers() -> None:
         st.rerun()
 
 
+# Tổng quan kết quả và thư viện Excel.
 def _summary_charts(summary: dict) -> tuple[list[dict], list[dict], list[dict]]:
     items = summary.get("items", [])
     metric = "interactions" if summary.get("kind") == "post" else "views"
@@ -1448,6 +1452,7 @@ def _results_page() -> None:
                 _download_button(path)
 
 
+# Nhật ký và điểm vào giao diện.
 @st.dialog("Nhật ký ứng dụng", width="large")
 def _log_dialog() -> None:
     """Thông báo và lỗi đã ghi vào data/app.log, mới nhất ở trên; API key luôn được che."""
@@ -1475,15 +1480,10 @@ def _log_dialog() -> None:
             _show_error("Không mở được file nhật ký trên máy này.", exc)
 
 
-# Fragments refresh only their own part every second; workers communicate solely through queues.
-if callable(getattr(st, "fragment", None)):
-    _poll = st.fragment(run_every=1)(_poll_workers)
-    _scan_status = st.fragment(run_every=1)(_render_scan_status)
-    _login_status = st.fragment(run_every=1)(_render_login_status)
-else:
-    _poll = _poll_workers
-    _scan_status = _render_scan_status
-    _login_status = _render_login_status
+# Fragment chỉ vẽ lại vùng riêng mỗi giây; luồng nền chỉ giao tiếp qua hàng đợi.
+_poll = st.fragment(run_every=1)(_poll_workers)
+_scan_status = st.fragment(run_every=1)(_render_scan_status)
+_login_status = st.fragment(run_every=1)(_render_login_status)
 
 
 def main() -> None:
@@ -1539,9 +1539,6 @@ def main() -> None:
         else:
             _results_page()
     _poll()
-    if not callable(getattr(st, "fragment", None)) and _busy():
-        time.sleep(1)
-        st.rerun()
 
 
 if __name__ == "__main__":

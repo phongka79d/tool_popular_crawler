@@ -781,7 +781,7 @@ def test_unknown_dates_are_held_for_merge_then_excluded(caplog):
     assert collector.videos()[0]["posted_at"] == 1_900_000_000
 
 
-def _fake_scan(monkeypatch, responses, formats=None):
+def _fake_scan(monkeypatch, responses):
     listener = {}
     page = SimpleNamespace(
         on=lambda event, handler: listener.update(handler=handler),
@@ -861,7 +861,7 @@ def test_throttle_retry_success_and_stop_during_backoff(monkeypatch):
 
 def test_login_failure_carries_collected_rows(monkeypatch):
     row = {"video_id": "1", "format": "reel", "posted_at": 1_900_000_000}
-    scanner, calls = _fake_scan(monkeypatch, [
+    scanner, _ = _fake_scan(monkeypatch, [
         (200, {"rows": [row]}), facebook.LoginRequired("facebook", facebook.LOGIN_REQUIRED_MSG),
     ])
     with pytest.raises(facebook.LoginRequired) as caught:

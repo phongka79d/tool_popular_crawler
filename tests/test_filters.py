@@ -44,7 +44,6 @@ def test_ratio_median_needs_five_videos_with_views() -> None:
     for video in videos:
         assert video.ratio_median is None
         assert NOTE_TOO_FEW_FOR_MEDIAN in video.notes
-    assert NOTE_TOO_FEW_FOR_MEDIAN == "Chưa đủ 5 video để tính trung vị"
 
 
 def test_ratio_median_computed_with_exactly_five_videos() -> None:

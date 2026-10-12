@@ -21,6 +21,8 @@ LOGIN_COOKIES = ("c_user", "xs")
 
 _NUMBER_RE = re.compile(r"\d+(?:\.\d+)?")
 _BOOL_FIELDS = ("TRUE", "FALSE")
+_NETSCAPE_FIELD_COUNT = 7
+_SAME_SITES = {"no_restriction": "None", "none": "None", "lax": "Lax", "strict": "Strict"}
 
 
 def _expiry(value: float | None) -> int:
@@ -85,7 +87,7 @@ def read_netscape(path: Path | str = config.COOKIE_FILE) -> list[dict]:
         elif not line.strip() or line.startswith("#"):
             continue
         fields = line.split("\t")
-        if len(fields) != 7:
+        if len(fields) != _NETSCAPE_FIELD_COUNT:
             logger.warning("Bỏ qua dòng cookie sai định dạng (%d trường)", len(fields))
             continue
         domain, _include_sub, cookie_path, secure, expires, name, value = fields
@@ -104,7 +106,6 @@ def read_netscape(path: Path | str = config.COOKIE_FILE) -> list[dict]:
 
 def convert_cookie_editor(data: list[dict]) -> list[dict]:
     """Đổi Cookie-Editor/EditThisCookie sang cookie Playwright, bỏ khóa riêng của tiện ích."""
-    same_sites = {"no_restriction": "None", "none": "None", "lax": "Lax", "strict": "Strict"}
     converted: list[dict] = []
     for cookie in data:
         if not isinstance(cookie, dict) or "name" not in cookie or "value" not in cookie:
@@ -117,7 +118,7 @@ def convert_cookie_editor(data: list[dict]) -> list[dict]:
             "expires": -1 if cookie.get("session") else cookie.get("expirationDate", -1),
             "secure": bool(cookie.get("secure", False)),
             "httpOnly": bool(cookie.get("httpOnly", False)),
-            "sameSite": same_sites.get(str(cookie.get("sameSite") or "").lower(), "Lax"),
+            "sameSite": _SAME_SITES.get(str(cookie.get("sameSite") or "").lower(), "Lax"),
         })
     return converted
 
@@ -145,7 +146,7 @@ def _is_data_line(line: str) -> bool:
         line = line[len(HTTPONLY_PREFIX):]
     fields = line.split("\t")
     return (
-        len(fields) == 7
+        len(fields) == _NETSCAPE_FIELD_COUNT
         and fields[1] in _BOOL_FIELDS
         and fields[3] in _BOOL_FIELDS
         and _NUMBER_RE.fullmatch(fields[4]) is not None

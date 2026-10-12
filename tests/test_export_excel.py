@@ -1,7 +1,6 @@
 """Offline tests for export_excel.py: sheets, header order, sort, risk fill, formats, filename."""
 from __future__ import annotations
 
-import re
 from datetime import datetime
 from pathlib import Path
 
@@ -172,7 +171,6 @@ def _width(ws, column: int) -> float | None:
 
 def test_filename_matches_pattern(exported: Path, tmp_path: Path) -> None:
     assert exported.name == "cong-thuc_2026-10-12_0905.xlsx"
-    assert re.fullmatch(r"cong-thuc_\d{4}-\d{2}-\d{2}_\d{4}\.xlsx", exported.name)
     assert exported.parent == tmp_path
 
 

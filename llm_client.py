@@ -13,8 +13,9 @@ import re
 import threading
 import time
 import unicodedata
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from typing import Any, Callable, Iterator
+from typing import Any
 from urllib.parse import urlparse
 
 from openai import OpenAI
@@ -31,6 +32,9 @@ JSON_RESPONSE_FORMAT = {"type": "json_object"}
 # Đo trên gpt-6-luna: phân tích 1 bài 64,5 s mặc định → 14,6 s với "low", chất lượng tương đương.
 # Đổi qua settings llm.reasoning_effort; "" để không gửi tham số này.
 DEFAULT_REASONING_EFFORT = "low"
+IMAGE_MAX_SIZE = (1024, 1024)
+IMAGE_JPEG_QUALITY = 85
+ANTHROPIC_MODELS_LIMIT = 1000
 
 
 def reasoning_effort(settings: dict) -> str:
@@ -126,7 +130,7 @@ def _image_part(data: bytes, mime: str) -> dict:
 
 
 def check_vision(base_url: str, api_key: str, model: str) -> bool:
-    """Probe actual image reading without exposing the random answer in the prompt."""
+    """Thử đọc ảnh thật, không để lộ số ngẫu nhiên cần đọc trong prompt."""
     number = str(secrets.randbelow(9000) + 1000)
     image = Image.new("RGB", (420, 140), "white")
     draw = ImageDraw.Draw(image)
@@ -154,7 +158,7 @@ def check_vision(base_url: str, api_key: str, model: str) -> bool:
 
 def describe_images(client: OpenAI, model: str, images: list[bytes], caption: str,
                     reasoning_effort: str | None) -> tuple[str, int]:
-    """Read all post images in one request; never invent illegible image text. Returns (text, total tokens)."""
+    """Đọc toàn bộ ảnh trong một request, không bịa chữ khó đọc. Trả (chữ, tổng token)."""
     content = [{"type": "text", "text": (
         "Đọc các ảnh theo thứ tự. Với từng ảnh, chép nguyên văn toàn bộ chữ nhìn thấy; "
         "chữ không đọc rõ thì ghi không đọc rõ, không đoán. Sau đó mô tả ngắn bố cục "
@@ -164,9 +168,9 @@ def describe_images(client: OpenAI, model: str, images: list[bytes], caption: st
     for data in images:
         with Image.open(io.BytesIO(data)) as source:
             image = ImageOps.exif_transpose(source).convert("RGB")
-            image.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+            image.thumbnail(IMAGE_MAX_SIZE, Image.Resampling.LANCZOS)
             buffer = io.BytesIO()
-            image.save(buffer, format="JPEG", quality=85)
+            image.save(buffer, format="JPEG", quality=IMAGE_JPEG_QUALITY)
         content.append(_image_part(buffer.getvalue(), "image/jpeg"))
     text, tokens, _ = _chat(client, model, [{"role": "user", "content": content}], None, False, reasoning_effort,
                             thinking=False)
@@ -212,7 +216,7 @@ def list_models(base_url: str, api_key: str) -> list[dict]:
     """
     client = make_client(base_url, api_key)
     # Anthropic chia trang 20 model/lần; xin tối đa 1000 để có đủ danh sách trong một trang.
-    query = {"limit": 1000} if is_anthropic(base_url) else None
+    query = {"limit": ANTHROPIC_MODELS_LIMIT} if is_anthropic(base_url) else None
     page = with_retry(lambda: client.models.list(extra_query=query) if query else client.models.list(),
                       service="llm")
     models = [_model_info(m) for m in page.data]

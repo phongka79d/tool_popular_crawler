@@ -11,34 +11,23 @@ import shutil
 import subprocess
 import sys
 import threading
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any
 
 import requests
 
 import config
 import db
 from collectors.ytdlp import download_audio
-from errors import AuthError, QuotaError, ServiceError
+from errors import QuotaError, ServiceError
 from models import Video
 from retry import with_retry
 
 log = logging.getLogger(__name__)
 
 _usage = threading.local()
-
-
-@contextmanager
-def observe_usage(callback: Callable[[float], None]) -> Iterator[None]:
-    """Báo từng lượt Deepgram trên luồng hiện tại, kể cả lượt không có thoại."""
-    previous = getattr(_usage, "callback", None)
-    _usage.callback = callback
-    try:
-        yield
-    finally:
-        _usage.callback = previous
-
 
 DEEPGRAM_URL = "https://api.deepgram.com/v1/listen"
 DEEPGRAM_MODELS_URL = "https://api.deepgram.com/v1/models"
@@ -73,6 +62,17 @@ _POPEN_KWARGS: dict[str, Any] = (
 )
 # faster-whisper dùng hết CPU: các video phân tích song song chạy lần lượt, mô hình chỉ nạp một lần.
 _WHISPER_LOCK = threading.Lock()
+
+
+@contextmanager
+def observe_usage(callback: Callable[[float], None]) -> Iterator[None]:
+    """Báo từng lượt Deepgram trên luồng hiện tại, kể cả lượt không có thoại."""
+    previous = getattr(_usage, "callback", None)
+    _usage.callback = callback
+    try:
+        yield
+    finally:
+        _usage.callback = previous
 
 
 # --- audio -----------------------------------------------------------------

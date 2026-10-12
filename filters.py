@@ -9,14 +9,16 @@ MIN_VIDEOS_FOR_MEDIAN = 5
 NOTE_TOO_FEW_FOR_MEDIAN = f"Chưa đủ {MIN_VIDEOS_FOR_MEDIAN} video để tính trung vị"
 NOTE_ZERO_MEDIAN = "Trung vị view của page bằng 0, không tính được hệ số trung vị"
 _MEDIAN_NOTES = (NOTE_TOO_FEW_FOR_MEDIAN, NOTE_ZERO_MEDIAN)
-
+_POST_MEDIAN_NOTES = (
+    f"Chưa đủ {MIN_VIDEOS_FOR_MEDIAN} bài đăng để tính trung vị",
+    "Trung vị tương tác của page bằng 0, không tính được hệ số trung vị",
+)
+_ALL_MEDIAN_NOTES = (*_MEDIAN_NOTES, *_POST_MEDIAN_NOTES)
 
 
 def compute_metrics(videos: list[Video]) -> None:
     """Tính chỉ số tại chỗ; trung vị riêng theo kênh và loại nội dung."""
     groups: dict[tuple[str, bool], list[Video]] = {}
-    post_notes = ("Chưa đủ 5 bài đăng để tính trung vị",
-                  "Trung vị tương tác của page bằng 0, không tính được hệ số trung vị")
     for video in videos:
         known = [part for part in (video.reactions, video.comments, video.shares) if part is not None]
         video.interactions = sum(known) if known else None
@@ -24,7 +26,7 @@ def compute_metrics(videos: list[Video]) -> None:
     for (_, is_post), group in groups.items():
         values = [v.interactions if is_post else v.views for v in group]
         known = [value for value in values if value is not None]
-        notes = post_notes if is_post else _MEDIAN_NOTES
+        notes = _POST_MEDIAN_NOTES if is_post else _MEDIAN_NOTES
         median = statistics.median(known) if len(known) >= MIN_VIDEOS_FOR_MEDIAN else None
         note = notes[0] if median is None else notes[1] if median == 0 else None
         for video, value in zip(group, values):
@@ -32,7 +34,7 @@ def compute_metrics(videos: list[Video]) -> None:
             video.ratio_median = _safe_div(value, median)
             video.engagement = _engagement(video)
             video.share_rate = _safe_div(video.shares, video.views)
-            video.notes = [n for n in video.notes if n not in (*_MEDIAN_NOTES, *post_notes)]
+            video.notes = [n for n in video.notes if n not in _ALL_MEDIAN_NOTES]
             if note is not None:
                 video.notes.append(note)
 
@@ -84,7 +86,7 @@ def formula_score(
     weights: dict,
     jev_viral: float | None = None,
 ) -> float:
-    """Điểm công thức 0–100 theo PLAN §6:
+    """Điểm công thức 0–100:
 
         diem = w_ratio·min(ratio_median/cap, 1) + w_replicable·replicable_p
                + w_hook·(hook_strength/2) + w_relevant·relevant_p + w_jev·jev_viral

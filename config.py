@@ -4,8 +4,8 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import sys
 import re
+import sys
 import unicodedata
 from pathlib import Path
 
@@ -16,20 +16,20 @@ CONFIG_DIR = ROOT / "config"
 DATA_DIR = ROOT / "data"
 OUTPUT_DIR = ROOT / "output"
 PROFILE_DIR = ROOT / "profile"
-MODELS_DIR = ROOT / "models"  # faster-whisper tự tải model vào đây khi cần lần đầu
+MODELS_DIR = ROOT / "models"  # faster-whisper downloads models here on first use
 DB_PATH = DATA_DIR / "cache.db"
 COOKIE_FILE = DATA_DIR / "fb_cookies.txt"
 SETTINGS_FILE = CONFIG_DIR / "settings.json"
-BROWSER_UA_FILE = DATA_DIR / "browser_ua.txt"  # UA thật của trình duyệt quét, dùng lại cho yt-dlp
+BROWSER_UA_FILE = DATA_DIR / "browser_ua.txt"  # Actual scanner UA, reused by yt-dlp
 
 
 def ensure_dirs() -> None:
-    for d in (DATA_DIR, OUTPUT_DIR, PROFILE_DIR):
-        d.mkdir(parents=True, exist_ok=True)
+    for directory in (DATA_DIR, OUTPUT_DIR, PROFILE_DIR):
+        directory.mkdir(parents=True, exist_ok=True)
 
 
 def edge_path() -> str | None:
-    """msedge.exe của Microsoft Edge (cài cho máy hoặc cho người dùng), None nếu máy không có."""
+    """Installed Microsoft Edge executable (machine or user), or None when unavailable."""
     for base in ("ProgramFiles(x86)", "ProgramFiles", "LOCALAPPDATA"):
         root = os.environ.get(base)
         if root:
@@ -139,7 +139,8 @@ def save_settings(settings: dict) -> None:
 
 def load_lines(rel_path: str) -> list[str]:
     """Non-empty, non-comment lines of a text file relative to ROOT (e.g. 'config/channels.txt')."""
-    p = ROOT / rel_path
-    if not p.exists():
+    path = ROOT / rel_path
+    if not path.exists():
         return []
-    return [s for s in (l.strip() for l in p.read_text(encoding="utf-8").splitlines()) if s and not s.startswith("#")]
+    lines = (line.strip() for line in path.read_text(encoding="utf-8").splitlines())
+    return [line for line in lines if line and not line.startswith("#")]

@@ -1,4 +1,4 @@
-"""Chuẩn hóa số đếm và thời gian (PLAN §11.4).
+"""Chuẩn hóa số đếm và thời gian.
 
 - parse_count: đổi chữ trên giao diện Facebook ("12K", "1,2 Tr", "12.345") thành số nguyên.
 - Thời gian: giờ Việt Nam là UTC+7 cố định, không cần cơ sở dữ liệu múi giờ.

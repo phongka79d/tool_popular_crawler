@@ -76,6 +76,7 @@ EXTRA_SCORES: dict[str, tuple[str, list[str]]] = {
         ],
     ),
 }
+VIRAL_SCORE_KEYS = ("hook_strength", *EXTRA_SCORES)
 
 FORMULA_LEVELS = [
     "Khác cả kiểu hook lẫn cấu trúc",
@@ -211,10 +212,10 @@ def interpret_labels(answers_raw: dict, settings: dict, taxonomy: dict) -> dict:
         out[key] = float(answers_raw[key]["score"])
     viral_scores = [
         min(1.0, max(0.0, float(answers_raw[key]["score"])))
-        for key in ("hook_strength", *EXTRA_SCORES)
+        for key in VIRAL_SCORE_KEYS
     ]
     out["jev_viral"] = sum(viral_scores) / len(viral_scores)
-    for key in ("hook_strength", *EXTRA_SCORES):
+    for key in VIRAL_SCORE_KEYS:
         conf = float(answers_raw[key]["confidence"])
         confidence[key] = conf
         if conf < min_confidence:

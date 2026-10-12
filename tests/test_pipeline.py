@@ -1,4 +1,4 @@
-"""Tests hors ligne du pipeline : aucun navigateur, réseau ni vraie clé."""
+"""Kiểm thử pipeline ngoại tuyến: không dùng trình duyệt, mạng hoặc API key thật."""
 from copy import deepcopy
 from pathlib import Path
 from threading import Barrier, Event

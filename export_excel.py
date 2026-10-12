@@ -4,10 +4,11 @@ from __future__ import annotations
 import json
 import logging
 import math
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Collection
+from typing import Any
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
@@ -527,7 +528,7 @@ def _fmt_time(value: Any) -> datetime | str | None:
     if isinstance(value, datetime):
         return _moment(value).replace(tzinfo=None)
     if isinstance(value, (int, float)):
-        return to_vn_datetime(int(value)).replace(tzinfo=None)
+        return _naive_vn(value)
     return str(value)
 
 
@@ -542,6 +543,18 @@ def _page_row(page: dict) -> list[Any]:
         page.get("skipped_reason"),
         "\n".join(t for t in (_text(e) for e in (page.get("errors") or [])) if t),
     ]
+
+
+def _param_rows(params: dict) -> list[list[Any]]:
+    """Render scan parameters identically in the overview and run log."""
+    rows = []
+    for key, value in params.items():
+        if key == "formats":
+            value = ", ".join(KIND_LABELS.get(kind, kind) for kind in sorted(value))
+        elif key == "match_all":
+            value = "Đạt cả hai điều kiện" if value else "Đạt một trong hai"
+        rows.append([_PARAM_LABELS.get(key, key), value])
+    return rows
 
 
 def _write_run_log(ws: Worksheet, run_log: dict, *, moment: datetime) -> None:
@@ -565,11 +578,7 @@ def _write_run_log(ws: Worksheet, run_log: dict, *, moment: datetime) -> None:
     )
     row = _write_table(
         ws, row, "Tham số đã chọn", ["Tham số", "Giá trị"],
-        [[_PARAM_LABELS.get(key, key),
-          ", ".join(KIND_LABELS.get(kind, kind) for kind in sorted(value)) if key == "formats"
-          else ("Đạt cả hai điều kiện" if value else "Đạt một trong hai") if key == "match_all"
-          else value]
-         for key, value in params.items()],
+        _param_rows(params),
         wrap={2},
     )
     page_header = row + 1
@@ -644,10 +653,7 @@ def _write_overview(
     params = run_log.get("params") or {}
     row = _write_table(
         ws, row, "Phạm vi quét", ["Tham số", "Giá trị"],
-        [[_PARAM_LABELS.get(key, key),
-          ", ".join(KIND_LABELS.get(kind, kind) for kind in sorted(value)) if key == "formats"
-          else ("Đạt cả hai điều kiện" if value else "Đạt một trong hai") if key == "match_all"
-          else value] for key, value in params.items()], wrap={1, 2},
+        _param_rows(params), wrap={1, 2},
     )
     row = _write_table(
         ws, row, "Thời gian chạy", ["Mục", "Giá trị"],

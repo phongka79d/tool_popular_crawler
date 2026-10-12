@@ -24,6 +24,7 @@ IDLE_EXIT_SECONDS = 15
 POLL_SECONDS = 1.0
 STARTUP_EXIT_SECONDS = 120
 PROCESS_HANDOFF_SECONDS = 5
+SERVER_STARTUP_SECONDS = 60
 
 
 @dataclass(frozen=True)
@@ -36,7 +37,7 @@ class WatchdogState:
 
 def watchdog_decision(state: WatchdogState, now: float, sessions: int | None,
                       process_alive: bool | None) -> tuple[WatchdogState, bool]:
-    """Pure timeline step; a short-lived browser starter may have handed off."""
+    """Bước theo dõi thuần; tiến trình mở trình duyệt ngắn hạn có thể đã chuyển giao cửa sổ."""
     owned = state.owned_process or (
         process_alive is True and now - state.opened_at >= PROCESS_HANDOFF_SECONDS)
     seen = state.seen_session or (sessions is not None and sessions > 0)
@@ -77,7 +78,7 @@ def resolve_app_path() -> Path:
 
 
 def _wait_for_port(port: int, stopped: threading.Event) -> bool:
-    deadline = time.monotonic() + 60
+    deadline = time.monotonic() + SERVER_STARTUP_SECONDS
     while not stopped.is_set() and time.monotonic() < deadline:
         try:
             with socket.create_connection(("127.0.0.1", port), timeout=0.5):
@@ -99,7 +100,7 @@ def _active_sessions() -> int | None:
 
 
 def _shutdown(stopped: threading.Event) -> None:
-    """Stop the runtime, then bound shutdown even without a Windows console."""
+    """Dừng runtime rồi giới hạn thời gian tắt, kể cả khi không có console Windows."""
     from streamlit.runtime import Runtime
 
     applog.log.info("Đã đóng cửa sổ ứng dụng, đang tắt Video Công Thức...")
@@ -108,8 +109,8 @@ def _shutdown(stopped: threading.Event) -> None:
             Runtime.instance().stop()
     except Exception:
         applog.log.exception("Không dừng được Streamlit")
-    # Runtime.stop alone does not stop uvicorn. A worker-thread SIGINT on Windows
-    # can remain pending while the main thread waits inside the asyncio loop.
+    # Runtime.stop không dừng uvicorn. SIGINT từ luồng nền trên Windows có thể
+    # chưa được xử lý khi luồng chính đang chờ trong vòng lặp asyncio.
     if not stopped.wait(1):
         logging.shutdown()
         for stream in (sys.stdout, sys.stderr):
@@ -126,7 +127,7 @@ def _exit_when_window_closed(stopped: threading.Event, window: BrowserWindow) ->
     failed_count = False
     while not stopped.wait(POLL_SECONDS):
         if not window.ready.is_set():
-            continue  # Chromium may still be downloading on first launch.
+            continue  # Chromium có thể vẫn đang tải trong lần mở đầu tiên.
         if state is None:
             state = WatchdogState(window.opened_at)
         try:
@@ -144,7 +145,7 @@ def _exit_when_window_closed(stopped: threading.Event, window: BrowserWindow) ->
 
 
 def open_browser(url: str) -> subprocess.Popen | None:
-    """Prefer Edge, then installed Chromium; default browser is the last resort."""
+    """Ưu tiên Edge, rồi Chromium đã cài; trình duyệt mặc định là lựa chọn cuối."""
     import config
     from browser_setup import ensure_chromium
 
@@ -166,7 +167,7 @@ def open_browser(url: str) -> subprocess.Popen | None:
 
 def _open_window(port: int, stopped: threading.Event, window: BrowserWindow) -> None:
     if not _wait_for_port(port, stopped):
-        applog.log.error("Máy chủ không khởi động trong 60 giây")
+        applog.log.error("Máy chủ không khởi động trong %s giây", SERVER_STARTUP_SECONDS)
         _shutdown(stopped)
         return
     try:
@@ -201,7 +202,7 @@ def _serve() -> None:
 
     app_path = resolve_app_path()
     port = find_free_port()
-    # Frozen builds keep app.py in _MEIPASS; writable config/data stay beside the exe.
+    # Bản exe giữ app.py trong _MEIPASS; config/data ghi được nằm cạnh exe.
     app_dir = str(app_path.parent)
     if app_dir not in sys.path:
         sys.path.insert(0, app_dir)
@@ -212,8 +213,8 @@ def _serve() -> None:
              "server.address": "127.0.0.1", "global.developmentMode": False,
              "browser.gatherUsageStats": False, "server.fileWatcherType": "none",
              "client.toolbarMode": "minimal", "logger.messageFormat": applog.LOG_FORMAT}
-    # A force-killed browser cannot send a websocket close frame. Detect a
-    # broken local connection promptly instead of waiting default ping timeouts.
+    # Trình duyệt bị buộc tắt không gửi khung đóng websocket; phát hiện mất
+    # kết nối cục bộ sớm thay vì chờ thời gian ping mặc định.
     flags["server.websocketPingInterval"] = 1
     bootstrap.load_config_options(flags)
     stopped = threading.Event()

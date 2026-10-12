@@ -43,6 +43,10 @@ GRAPHQL_MARK = "/api/graphql/"
 NAV_TIMEOUT_MS = 60_000
 RESPONSE_WAIT_MS = 12_000
 HEADER_WAIT_MS = 8_000            # chờ phần đầu trang (tên, follower) hiện sau khi mở page
+HEADER_POLL_MS = 250
+HEADER_FRAGMENT_WAIT_MS = 750     # nhận fragment chính xác sau chữ follower làm tròn
+TEXT_TIMEOUT_MS = 3_000
+OLD_POST_STOP_COUNT = 3          # không dừng chỉ vì bài cũ được ghim đầu feed
 WHEEL_STEP_PX = (250, 650)        # mỗi nấc lăn chuột
 WHEEL_GAP_MS = (120, 480)         # nghỉ giữa các nấc
 WHEEL_MAX_STEPS = 14              # tối đa mỗi vòng cuộn
@@ -183,7 +187,6 @@ def _save_user_agent(page: PwPage) -> None:
         config.BROWSER_UA_FILE.write_text(page.evaluate("navigator.userAgent"), encoding="utf-8")
     except (PlaywrightError, OSError) as exc:
         logger.warning("Không lưu được User-Agent của trình duyệt: %s", exc)
-
 
 
 def _launch_options(hidden: bool) -> dict:
@@ -329,7 +332,7 @@ class _Collector:
                 if fmt == tab_format:
                     if fmt == "post":
                         self._old_post_ids.add(video_id)
-                    if fmt != "post" or len(self._old_post_ids) >= 3:
+                    if fmt != "post" or len(self._old_post_ids) >= OLD_POST_STOP_COUNT:
                         self._old_formats.add(tab_format)
                 continue
             key = _dedupe_key(item)
@@ -365,7 +368,7 @@ class _Collector:
 
 
 def _drain(pending: list[Request], collector: _Collector, tab_format: str) -> bool:
-    """Read finished GraphQL requests and retain valid rows, including batches carrying errors."""
+    """Đọc request GraphQL đã tải xong; giữ bản ghi hợp lệ kể cả khi batch có lỗi."""
     throttled = False
     requests = list(pending)
     pending.clear()
@@ -450,7 +453,7 @@ class FacebookScanner:
         try:
             if loc.count() == 0:
                 return ""
-            return (loc.inner_text(timeout=3000) or "").strip()
+            return (loc.inner_text(timeout=TEXT_TIMEOUT_MS) or "").strip()
         except PlaywrightError as exc:
             logger.debug("Không đọc được chữ của selector %s: %s", selector, exc)
             return ""
@@ -517,10 +520,10 @@ class FacebookScanner:
             deadline = time.monotonic() + HEADER_WAIT_MS / 1000
             header = read_header()
             while (not header["name"] or header["followers"] is None) and time.monotonic() < deadline:
-                page.wait_for_timeout(250)
+                page.wait_for_timeout(HEADER_POLL_MS)
                 header = read_header()
             # Đọc thêm một lần để nhận fragment chính xác sau chữ làm tròn.
-            page.wait_for_timeout(750)
+            page.wait_for_timeout(HEADER_FRAGMENT_WAIT_MS)
             header = read_header()
             name = str(header.get("name") or "").strip() or self._first_text(SEL["page"]["name"])
             followers = _as_count(header.get("followers"))

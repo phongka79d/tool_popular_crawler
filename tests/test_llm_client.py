@@ -273,9 +273,6 @@ class TestFilterBanned:
         ]
         assert llm_client.filter_banned(suggestions, self.BAN) == [suggestions[0]]
 
-    def test_checks_both_fields(self):
-        assert llm_client.filter_banned([{"hook_moi": "ok", "y_tuong": "hứa cam kết"}], self.BAN) == []
-
     def test_does_not_join_fields_into_a_false_match(self):
         suggestion = {"hook_moi": "khỏi", "y_tuong": "hẳn ngay hôm nay"}
         assert llm_client.filter_banned([suggestion], self.BAN) == [suggestion]

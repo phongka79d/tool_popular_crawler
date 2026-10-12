@@ -1,7 +1,7 @@
 """Retry policy for external API calls. Failures are mapped to ServiceError (PLAN-JEV.md §9, §11.5).
 
 Adapted from videoanalyzer `scripts/whisper.py` (`_post_whisper`, `_retry_after`):
-- Other 4xx (not 429/529): re-raise the original error at once; retrying cannot help.
+- Other 4xx (not 429): map authentication, credit and not-found errors; otherwise re-raise immediately.
 - 429/529: honor `Retry-After`, otherwise double the delay. After `max_rate_retries` retries: QuotaError.
   A 429 whose body reports out-of-credit (e.g. `insufficient_quota`) is QuotaError at once.
 - 5xx, lost connection, timeout: double the delay. After `max_net_retries` retries: NetworkError.
@@ -182,7 +182,7 @@ def _is_network_error(exc: BaseException) -> bool:
 
 
 def _transient_kind(exc: BaseException, status: int | None, body: str) -> str | None:
-    """'rate' (429/529 with retry budget left), 'net' (5xx, lost connection, timeout), or None."""
+    """'rate' (429/529 unless out of credit), 'net' (5xx, lost connection, timeout), or None."""
     if status is None:
         return "net" if _is_network_error(exc) else None
     if status in RATE_LIMIT_STATUSES:

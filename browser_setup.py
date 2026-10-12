@@ -25,8 +25,7 @@ def ensure_chromium() -> Path:
         executable = Path(playwright.chromium.executable_path)
     if browsers_installed(executable):
         return executable
-    driver = compute_driver_executable()
-    command = list(driver) if isinstance(driver, tuple) else [str(driver)]
+    command = compute_driver_executable()
     print("Đang tải Chromium lần đầu (~150 MB), vui lòng chờ...", flush=True)
     result = subprocess.run([*command, "install", "chromium", "--no-shell"],
                             env=get_driver_env(), stdout=sys.stdout, stderr=subprocess.STDOUT,

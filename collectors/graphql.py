@@ -1,7 +1,7 @@
 """Parse Facebook GraphQL responses and inlined ``data-sjs`` JSON into video records.
 
-Pure functions, no browser. Every JSON path is data in ``config/graphql_paths.json``
-(see ``load_paths``); this module only walks those paths.
+Pure functions, no browser. Record paths come from ``config/graphql_paths.json``
+(see ``load_paths``); page-header social context also supports Facebook's text/link shapes.
 
 Behaviour fixed in code, not config:
 - A Story node (``__typename`` == story typename with a post_id) is collected once per
@@ -39,6 +39,7 @@ _TYPENAME_KEY = "__typename"  # GraphQL protocol key, not a Facebook field
 _NODE_ID_KEY = "id"  # GraphQL protocol key: global node id shared by a Story and its deferred fragments
 _WILDCARD = "*"  # path element: every item of a list
 _JSON_SPACE = " \r\n\t"
+_MAX_POST_IMAGES = 4
 _SJS_RE = re.compile(
     r"<script\b[^>]*?\sdata-sjs(?=[\s/>=])[^>]*>(.*?)</script\s*>",
     re.DOTALL | re.IGNORECASE,
@@ -71,6 +72,7 @@ class ChannelVideoPaths:
     duration_s: Alternatives
     broadcast_status: Alternatives
     is_live_streaming: Alternatives
+
 
 @dataclass(frozen=True)
 class GraphqlPaths:
@@ -236,10 +238,10 @@ def flatten(story: dict, paths: GraphqlPaths | None = None) -> dict | None:
             image_url = _first(media, p.image_url, _as_text)
             if image_url and image_url not in urls:
                 urls.append(image_url)
-                if len(urls) == 4:
+                if len(urls) == _MAX_POST_IMAGES:
                     break
         if not caption and not urls:
-            return None  # sự kiện, bài trống: không có gì để phân tích
+            return None  # Empty posts/events have nothing to analyze.
         record = _record(video_id, url, _first(story, p.creation_time, _as_int), caption,
                          None, feedback, None, p)
         record["format"] = "post"
@@ -299,12 +301,12 @@ def _record(video_id: str, url: str, posted_at: int | None, caption: str | None,
         "url": url,
         "posted_at": posted_at,
         "caption": caption or "",
-        **{field: value for field, (value, approximate) in counts.items()},
+        **{field: value for field, (value, _) in counts.items()},
         "duration_s": duration_s,
         "format": "reel" if p.reel_url_marker in url else "video",
         "is_live": is_live,
     }
-    approximate = {field for field, (value, approximate) in counts.items() if approximate}
+    approximate = {field for field, (_, is_approximate) in counts.items() if is_approximate}
     if approximate:
         record["_approx_counts"] = approximate
     return record
@@ -363,7 +365,7 @@ def parse_initial_html(html: str, paths: GraphqlPaths | None = None) -> list[dic
 
 
 def followers_from_text(text: str) -> int | None:
-    """Đọc dòng follower, không nhầm số đang theo dõi hoặc lượt thích."""
+    """Read a follower label without mistaking following or like counts for followers."""
     match = re.search(
         r"(\d[\d.,]*(?:\s*(?:triệu|trieu|nghìn|nghin|ngàn|ngan|tr|[knm]))?)"
         r"\s*(?:người theo dõi|followers)\b", text, re.IGNORECASE,
@@ -372,7 +374,7 @@ def followers_from_text(text: str) -> int | None:
 
 
 def _header_followers(node: dict) -> tuple[int | None, bool]:
-    """Số chính xác trước, chữ trong social context chỉ là dự phòng."""
+    """Prefer exact counts, using social-context text only as a fallback."""
     for key in ("followers_count", "follower_count"):
         value = _as_count(node.get(key))
         if value is not None and value >= 0:
@@ -402,10 +404,10 @@ def _header_followers(node: dict) -> tuple[int | None, bool]:
 
 
 def parse_page_header(html_or_json: str, paths: GraphqlPaths | None = None) -> dict:
-    """Tên và follower từ header/fragment; không đọc viewer hay tác giả bài.
+    """Read header/fragment names and followers, excluding viewers and story authors.
 
-    Hỗ trợ profile_social_context của Page kiểu User và fragment không có typename.
-    Số chính xác luôn thắng chữ làm tròn, dù xuất hiện sau trong tài liệu.
+    Support User-style Pages and fragments without a typename via profile_social_context.
+    Exact counts win over rounded text even when they appear later in the document.
     """
     p = paths if paths is not None else load_paths()
     values = _sjs_values(html_or_json) if _SJS_RE.search(html_or_json) else split_json_values(html_or_json)
@@ -541,8 +543,8 @@ def _reaction_count(feedback: dict, r: ReactionPaths) -> tuple[int | None, bool]
             if kind is not None and count is not None:
                 by_kind[kind] = count, approximate
         if by_kind:
-            combined = sum(value for value, approximate in by_kind.values()), any(
-                approximate for value, approximate in by_kind.values())
+            combined = sum(value for value, _ in by_kind.values()), any(
+                approximate for _, approximate in by_kind.values())
             if not combined[1] or total[0] is None:
                 return combined
     if total[0] is not None:
@@ -616,10 +618,6 @@ def _as_number(value: Any) -> float | None:
 
 def _as_text(value: Any) -> str | None:
     return value if isinstance(value, str) and value.strip() else None
-
-
-def _as_dict(value: Any) -> dict | None:
-    return value if isinstance(value, dict) else None
 
 
 def _as_list(value: Any) -> list | None:
