@@ -862,7 +862,8 @@ def _start_scan(settings: dict, params: pipeline.RunParams) -> None:
                               daemon=True, name="video-scan")
     st.session_state.update(running=True, scan_queue=events, stop_event=stop, scan_thread=worker,
                             scan_started=time.monotonic(), scan_log=[], scan_errors=[], progress=None,
-                            scan_result=None, question=None, scan_item_label="bài đăng" if pipeline.is_post_run(params) else "video")
+                            scan_result=None, scan_elapsed=None, question=None,
+                            scan_item_label="bài đăng" if pipeline.is_post_run(params) else "video")
     worker.start()
     st.rerun()
 
@@ -975,6 +976,29 @@ def _progress_bar(progress: pipeline.Progress) -> None:
     st.progress(min(1.0, max(0.0, fraction)), text=label)
 
 
+def _int_text(value: float | None) -> str:
+    return "—" if value is None else f"{round(value):,}".replace(",", ".")
+
+
+def _usage_panel(usage: dict | None) -> None:
+    """Số liệu dịch vụ của lần quét: tốc độ, token, số lần gọi, thời gian chờ LLM; token Jev, phút Deepgram."""
+    if not usage:
+        return
+    speed = pipeline.llm_speed(usage.get("llm_output_tokens", 0), usage.get("llm_seconds", 0.0))
+    speed_col, tokens_col, calls_col, wait_col = st.columns(4)
+    speed_col.metric("Tốc độ LLM (token/giây)", _int_text(speed),
+                     help="Token LLM trả về chia cho thời gian chờ các lần gọi (đo trên máy này).")
+    tokens_col.metric("Token LLM", _int_text(usage.get("llm_tokens", 0)),
+                      help="Tổng token gửi đi và nhận về; đây là số nhà cung cấp tính phí. "
+                           f"Trong đó {_int_text(usage.get('llm_output_tokens', 0))} token trả về.")
+    calls_col.metric("Lần gọi LLM", _int_text(usage.get("llm_calls", 0)),
+                     help="Đọc ảnh, viết phân tích, viết lại khi Jev loại hết gợi ý, nhận xét tổng hợp.")
+    wait_col.metric("Thời gian chờ LLM (giây)", _format_number(round(usage.get("llm_seconds", 0.0), 1)),
+                    help="Cộng thời gian chờ của mọi lần gọi; các mục chạy song song nên có thể lớn hơn thời gian quét.")
+    st.caption(f"Model LLM: {usage.get('llm_model') or '—'} · Token Jev: {_int_text(usage.get('jev_tokens', 0))}"
+               f" · Deepgram: {_format_number(round(usage.get('deepgram_minutes', 0.0), 2))} phút")
+
+
 def _render_running_scan() -> None:
     progress = st.session_state.progress
     with st.container(border=True):
@@ -986,6 +1010,7 @@ def _render_running_scan() -> None:
             st.markdown(_redact(progress.message))
             if progress.page_url:
                 st.caption(_redact(progress.page_url))
+            _usage_panel(progress.usage)
         else:
             st.progress(0.0, text="Đang chuẩn bị quét...")
         recent = st.session_state.scan_log[-TIMELINE_ROWS:]
@@ -1016,7 +1041,10 @@ def _render_scan_result(path: Path) -> None:
     with st.container(border=True):
         item = st.session_state.get("scan_item_label", "video")
         st.markdown(f"**✅ Quét xong · {count} {item}**" if count is not None else "**✅ Quét xong**")
-        st.caption(f"File: {path.name}")
+        elapsed = st.session_state.get("scan_elapsed")
+        st.caption(f"File: {path.name}" + (f" · tổng thời gian {_format_duration(elapsed)}" if elapsed else ""))
+        progress = st.session_state.get("progress")
+        _usage_panel(progress.usage if progress is not None else None)
         _download_button(path)
 
 
@@ -1055,6 +1083,7 @@ def _drain_scan_queue() -> bool:
                     st.session_state.question = value
                 elif kind == "finished":
                     st.session_state.running = False
+                    st.session_state.scan_elapsed = time.monotonic() - st.session_state.scan_started
                     st.session_state.question = None
                     finished = True
             else:

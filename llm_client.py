@@ -10,6 +10,8 @@ import secrets
 import json
 import logging
 import re
+import threading
+import time
 import unicodedata
 from typing import Any
 from urllib.parse import urlparse
@@ -284,6 +286,33 @@ def _is_rejection(exc: BaseException, param: str) -> bool:
 # chữ đọc được như nhau. Việc chép chữ / tóm tắt không cần suy luận nên gửi thinking=disabled.
 THINKING_OFF = {"thinking": {"type": "disabled"}}
 
+# Đo tốc độ LLM cho người dùng: mỗi luồng cộng dồn số lần gọi, token trả về và thời gian chờ của các
+# request thành công; pipeline lấy ra (meter_take) sau mỗi bước để báo token/giây.
+_meter = threading.local()
+
+
+def meter_take() -> dict:
+    """Trả {"calls", "output_tokens", "seconds"} của luồng này từ lần lấy trước, rồi đặt lại về 0."""
+    taken = {"calls": getattr(_meter, "calls", 0), "output_tokens": getattr(_meter, "output_tokens", 0),
+             "seconds": getattr(_meter, "seconds", 0.0)}
+    _meter.calls, _meter.output_tokens, _meter.seconds = 0, 0, 0.0
+    return taken
+
+
+def _record(resp: Any, seconds: float) -> None:
+    usage = getattr(resp, "usage", None)
+    output = getattr(usage, "completion_tokens", None) if usage is not None else None
+    _meter.calls = getattr(_meter, "calls", 0) + 1
+    _meter.output_tokens = getattr(_meter, "output_tokens", 0) + int(output or 0)
+    _meter.seconds = getattr(_meter, "seconds", 0.0) + seconds
+
+
+def _timed_create(client: OpenAI, **kwargs: Any) -> Any:
+    start = time.monotonic()
+    resp = client.chat.completions.create(**kwargs)
+    _record(resp, time.monotonic() - start)
+    return resp
+
 
 def _chat(
     client: OpenAI,
@@ -314,7 +343,7 @@ def _chat(
     def create(**extra: Any) -> Any:
         while True:
             try:
-                return with_retry(lambda: client.chat.completions.create(**kwargs, **extra), service="llm")
+                return with_retry(lambda: _timed_create(client, **kwargs, **extra), service="llm")
             except Exception as exc:
                 if "extra_body" in kwargs and _is_rejection(exc, "thinking"):
                     logger.info("Endpoint LLM không nhận thinking, dùng reasoning_effort thay thế")

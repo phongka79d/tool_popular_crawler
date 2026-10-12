@@ -188,6 +188,20 @@ class TestWriteAnalysis:
         assert "temperature" not in comp.calls[2]
         assert comp.calls[2]["max_tokens"] == llm_client.FALLBACK_MAX_TOKENS
 
+    def test_meter_counts_successful_calls_per_thread_and_resets_on_take(self):
+        reply = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps(VALID)))],
+                                usage=SimpleNamespace(total_tokens=900, completion_tokens=600))
+        rejected = FakeStatusError("400 - unsupported response_format")
+        client, _ = fake_client(rejected, reply)
+        llm_client.meter_take()
+
+        llm_client.write_analysis(client, "m-1", VIDEO, LABELS, SETTINGS)
+        taken = llm_client.meter_take()
+
+        assert (taken["calls"], taken["output_tokens"]) == (1, 600)  # lượt bị từ chối không tính
+        assert taken["seconds"] >= 0
+        assert llm_client.meter_take() == {"calls": 0, "output_tokens": 0, "seconds": 0.0}
+
     def test_fallback_is_kept_for_the_bad_json_retry(self):
         rejected = FakeStatusError("400 - unsupported response_format")
         client, comp = fake_client(rejected, _reply("không phải json", total=1), _reply(json.dumps(VALID), total=1))

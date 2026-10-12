@@ -335,7 +335,18 @@ def test_rejected_suggestions_are_rewritten_only_once(harness):
 def test_usage_counts_analysis_check_commentary_and_transcript(harness):
     h = harness
     h.run()
-    assert h.exports[0][2]["usage"] == {"jev_tokens": 14, "llm_tokens": 17, "deepgram_minutes": 0.5}
+    usage = h.exports[0][2]["usage"]
+    assert {k: usage[k] for k in ("jev_tokens", "llm_tokens", "deepgram_minutes", "llm_model")} == {
+        "jev_tokens": 14, "llm_tokens": 17, "deepgram_minutes": 0.5, "llm_model": "llm-test"}
+
+
+def test_run_summary_reports_llm_speed_in_vietnamese_format():
+    usage = {"llm_model": "claude-haiku-5-5", "llm_calls": 12, "llm_output_tokens": 23_400, "llm_seconds": 98.4}
+
+    assert pipeline.usage_summary(usage) == (
+        "LLM claude-haiku-5-5: 12 lần gọi, 23.400 token trả về, 98,4 giây chờ, trung bình 238 token/giây.")
+    assert pipeline.usage_summary({"llm_calls": 0}) == ""
+
 
 
 def test_cli_builds_requested_params(harness, monkeypatch):

@@ -78,6 +78,7 @@ class Progress:
     error: str | None = None
     step: int = 0  # số việc đã xong trong bước hiện tại (ví dụ số video đã phân tích)
     steps: int = 0  # tổng số việc của bước hiện tại; 0 khi không đếm trước được
+    usage: dict | None = None  # ảnh chụp run_log["usage"]: token, số lần gọi, thời gian và tốc độ LLM
 
 
 def _safe_message(exc: object, credentials: dict) -> str:
@@ -90,6 +91,36 @@ def _safe_message(exc: object, credentials: dict) -> str:
 
 def _count_text(value: int | None) -> str:
     return f"{value:,}".replace(",", ".") if value is not None else "?"
+
+
+def llm_speed(output_tokens: float, seconds: float) -> int | None:
+    """Token LLM trả về mỗi giây chờ; None khi chưa có thời gian đo."""
+    return round(output_tokens / seconds) if seconds > 0 else None
+
+
+def _seconds_text(seconds: float) -> str:
+    return f"{seconds:.1f}".replace(".", ",")
+
+
+def _speed_text(meter: dict) -> str:
+    """Đuôi tiến độ cho một bước: ' · LLM 2.083 token trong 9,8 giây (213 token/giây)'."""
+    if not meter["calls"]:
+        return ""
+    speed = llm_speed(meter["output_tokens"], meter["seconds"])
+    return (f" · LLM {_count_text(meter['output_tokens'])} token trong {_seconds_text(meter['seconds'])} giây"
+            + (f" ({_count_text(speed)} token/giây)" if speed is not None else ""))
+
+
+def usage_summary(usage: dict) -> str:
+    """Một câu tổng kết LLM của lần chạy; rỗng khi chưa gọi LLM."""
+    calls = usage.get("llm_calls", 0)
+    if not calls:
+        return ""
+    speed = llm_speed(usage.get("llm_output_tokens", 0), usage.get("llm_seconds", 0.0))
+    return (f"LLM {usage.get('llm_model', '')}: {_count_text(calls)} lần gọi, "
+            f"{_count_text(usage.get('llm_output_tokens', 0))} token trả về, "
+            f"{_seconds_text(usage.get('llm_seconds', 0.0))} giây chờ"
+            + (f", trung bình {_count_text(speed)} token/giây." if speed is not None else "."))
 
 
 def check_all_keys(settings: dict, *, require_deepgram: bool = True) -> dict[str, str | None]:
@@ -165,7 +196,8 @@ def run(
         "finished_at": None,
         "params": params_log,
         "pages": [],
-        "usage": {"jev_tokens": 0, "llm_tokens": 0, "deepgram_minutes": 0.0},
+        "usage": {"jev_tokens": 0, "llm_tokens": 0, "deepgram_minutes": 0.0, "llm_model": settings["llm"]["model"],
+                  "llm_calls": 0, "llm_output_tokens": 0, "llm_seconds": 0.0},
         "messages": [],
     }
     credentials = {name: keys.get_key(name) for name in ("jev", "deepgram", "llm")}
@@ -216,7 +248,8 @@ def run(
             url, index = video.page_url, channels.index(video.page_url) + 1
         if error is None:
             logger.info("%s", message)
-        on_progress(Progress(stage, index, len(channels), url, message, done, error, step, steps))
+        on_progress(Progress(stage, index, len(channels), url, message, done, error, step, steps,
+                             dict(run_log["usage"])))
 
     def checkpoint() -> None:
         if abort.is_set():
@@ -240,6 +273,12 @@ def run(
     def add_usage(name: str, amount: float) -> None:
         with lock:
             run_log["usage"][name] += amount
+
+    def add_meter(meter: dict) -> None:
+        with lock:
+            run_log["usage"]["llm_calls"] += meter["calls"]
+            run_log["usage"]["llm_output_tokens"] += meter["output_tokens"]
+            run_log["usage"]["llm_seconds"] += meter["seconds"]
 
     def jev_instance():
         nonlocal jev
@@ -280,6 +319,7 @@ def run(
                      step=analyzed_count, steps=submitted_count)
 
         checkpoint()
+        llm_client.meter_take()  # bỏ số đo còn sót của mục trước trên luồng này
         try:
             if post_run:
                 video.transcript = ""
@@ -300,6 +340,9 @@ def run(
                                 llm_client.reasoning_effort(settings),
                             )
                             add_usage("llm_tokens", image_tokens)
+                            meter = llm_client.meter_take()
+                            add_meter(meter)
+                            say(f"đọc ảnh xong{_speed_text(meter)}")
                             if video.transcript:
                                 video.transcript_status = "images"
                                 db.save_transcript(video.video_id, video.transcript, "images", video.hook)
@@ -393,10 +436,13 @@ def run(
                         fatal.append(exc)  # chỉ lỗi đầu tiên; các luồng khác dừng vì abort
                     abort.set()
                 return
+            finally:
+                meter = llm_client.meter_take()  # cả lượt gọi trước khi lỗi vẫn tính vào tổng
+                add_meter(meter)
             with lock:
                 analyzed_count += 1
-                emit("analyze", f"{item_label.capitalize()} {number}: xong, {result}.", video=video,
-                     step=analyzed_count, steps=submitted_count)
+                emit("analyze", f"{item_label.capitalize()} {number}: xong, {result}{_speed_text(meter)}.",
+                     video=video, step=analyzed_count, steps=submitted_count)
 
         for video in page_passed:
             checkpoint()
@@ -575,10 +621,14 @@ def run(
         if not partial and not llm_unavailable and not stop_event.is_set():
             try:
                 checkpoint()
+                llm_client.meter_take()  # bỏ lượt kiểm tra key/ảnh trước khi quét
                 emit("export", "LLM viết nhận xét tổng hợp cho file Excel…")
                 summary["commentary"], usage = llm_client.write_commentary(
                     llm_instance(), settings["llm"]["model"], summary, llm_client.reasoning_effort(settings))
                 run_log["usage"]["llm_tokens"] += _tokens(usage)
+                meter = llm_client.meter_take()
+                add_meter(meter)
+                emit("export", f"Nhận xét tổng hợp xong{_speed_text(meter)}.")
             except QuotaError as exc:
                 if exc.service != "llm":
                     add_error(exc)
@@ -595,7 +645,8 @@ def run(
         run_log["finished_at"] = datetime.now(timezone.utc).isoformat()
         emit("export", f"Đang ghi file Excel ({len(passed)} {item_label})…")
         result = export_excel.export(passed, summary, run_log)
-        emit("done", "Đã xuất kết quả một phần." if partial or stop_event.is_set() else "Đã xuất kết quả.", done=True)
+        done_text = "Đã xuất kết quả một phần." if partial or stop_event.is_set() else "Đã xuất kết quả."
+        emit("done", f"{done_text} {usage_summary(run_log['usage'])}".strip(), done=True)
         return result
     finally:
         if run_log["finished_at"] is None:
