@@ -22,10 +22,10 @@ Trang mở khi đã lưu Jev và LLM; quét video cần thêm Deepgram (chép l�
 
 **Giảm rủi ro tài khoản bị khóa:** tool quét bằng trình duyệt thật, cuộn và nghỉ như người dùng, nghỉ 30–60 giây giữa các kênh, và chỉ dùng cookie tài khoản khi video không xem được ẩn danh. Facebook chủ yếu khóa theo hành vi, nên: dùng tài khoản phụ đã có tuổi và hoạt động bình thường; mỗi lần chỉ quét vài chục kênh, không chạy liên tục nhiều lần trong ngày; không chạy song song trên nhiều máy với cùng tài khoản; không dùng VPN/proxy đổi quốc gia giữa các lần chạy. Gặp checkpoint thì xác minh bằng tay rồi nghỉ vài ngày trước khi quét tiếp.
 
-![Tab Chạy quét: ✗ cho biết dịch vụ nào lỗi, tool sẽ không chạy](docs/img/tab-chay-quet.png)
+![Tab Chạy quét: chọn loại quét (Video thường, Reel, Live) và ngưỡng lượt xem](docs/img/tab-chay-quet.png)
 
 ## 4. Trang Kết quả
-File mới nhất nằm trên cùng; bấm tải file Excel hoặc **Mở thư mục** `output/`. File `cong-thuc_YYYY-MM-DD_HHmm.xlsx` có bảng video/công thức, tổng hợp và nhật ký chạy. Đọc nhật ký khi một kênh bị bỏ qua hoặc thiếu chỉ số. Gợi ý AI cần được kiểm tra trước khi sử dụng, đặc biệt nội dung sức khỏe và quảng cáo.
+File mới nhất nằm trên cùng; bấm tải file Excel hoặc **Mở thư mục** `output/`. File `cong-thuc_YYYY-MM-DD_HHmm.xlsx` có 3 trang: **Chi tiết video** (hoặc **Chi tiết bài đăng**) xếp theo điểm công thức, cột chia nhóm màu (Thông tin bài, Chỉ số, Nội dung, Công thức (Jev), Gợi ý làm lại), có bộ lọc ở dòng tiêu đề, link **Mở bài ↗** bấm được, thanh màu cho điểm và ô đỏ khi có cờ rủi ro; **Tổng hợp công thức** có bảng, biểu đồ theo nhóm chủ đề và nhận xét; **Nhật ký** ghi tham số và lỗi của lần chạy. File bài đăng ẩn các cột chỉ dành cho video (lượt xem, thời lượng, thoại). **Điểm Jev** là trung bình các điểm hook, cảm xúc, giá trị thực tiễn, khả năng chia sẻ Jev chấm. Đọc nhật ký khi một kênh bị bỏ qua hoặc thiếu chỉ số. Gợi ý AI cần được kiểm tra trước khi sử dụng, đặc biệt nội dung sức khỏe và quảng cáo.
 
 ![Tab Kết quả](docs/img/tab-ket-qua.png)
 
