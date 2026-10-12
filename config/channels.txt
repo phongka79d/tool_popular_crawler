@@ -1,0 +1,2 @@
+# Mỗi dòng 1 link page Facebook. Dòng bắt đầu bằng # bị bỏ qua.
+# https://www.facebook.com/ten-page

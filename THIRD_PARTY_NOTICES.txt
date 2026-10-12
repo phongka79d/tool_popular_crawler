@@ -1,0 +1,58 @@
+Third-party notices
+===================
+
+Parts of this tool adapt code or patterns from the projects below. MIT-licensed
+code keeps the original copyright notice as required by the MIT License:
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+
+- TopStriker33/vyralforge @ b57d96b — MIT
+  Copyright (c) 2026 Vyral Forge Contributors
+  Used in: db.py (conn() context manager, upsert pattern, posts schema),
+  llm_client.py (fence stripping, banned-word compliance check).
+
+- Mharis-code/videoanalyzer @ aa0c88a — MIT
+  Copyright (c) 2026 Muhammad Haris
+  Used in: collectors/transcript.py (ffmpeg audio extraction flags),
+  retry.py (retry/backoff policy, Retry-After handling).
+
+- mohdtalal3/facebook_post_comment_scraper @ 0c33360 — MIT
+  Copyright (c) 2026 Muhammad Talal
+  Used in: collectors/graphql.py (video attachment detection, i18n share count).
+
+- kevinzg/facebook-scraper @ 567711f — MIT
+  Copyright (c) 2019 Kevin Zúñiga
+  Used in: collectors/cookies.py (cookie file formats).
+
+- JeremySNR/clip-forge @ 5fbd6cf — MIT
+  Copyright (c) 2026 Cutawan Contributors
+  Used in: keys.py (key masking, secure-storage flag), collectors/cookies.py
+  (Netscape cookie file check).
+
+- typesafe-ai/skills @ 65a39f3 — MIT
+  Copyright (c) 2026 TypeSafe AI
+  Used in: jev_client.py (question design guidance).
+
+- yt-dlp/yt-dlp @ 8973412 — Unlicense (public domain)
+  Used as a library (collectors/ytdlp.py) and as reference for
+  <script data-sjs> parsing in collectors/graphql.py.
+
+Read-only references (no license; ideas re-implemented, no code copied):
+- winhtuan/crawler-social @ 5e8934f
+- JayWebtech/autoshorts @ f17b04c
