@@ -64,6 +64,7 @@ LLM_PROVIDERS = {
     "OpenRouter": "https://openrouter.ai/api/v1",
     "OpenAI": "https://api.openai.com/v1",
     "Google Gemini": "https://generativelanguage.googleapis.com/v1beta/openai/",
+    "Anthropic (Claude)": "https://api.anthropic.com/v1/",
 }
 LLM_CUSTOM = "Khác (tự nhập)"
 PAGE_SETTINGS = "Cài đặt"

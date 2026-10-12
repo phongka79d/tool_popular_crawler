@@ -12,6 +12,7 @@ import logging
 import re
 import unicodedata
 from typing import Any
+from urllib.parse import urlparse
 
 from openai import OpenAI
 from PIL import Image, ImageDraw, ImageFont, ImageOps
@@ -84,9 +85,25 @@ _FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
 _SUGGESTION_FIELDS = ("hook_moi", "y_tuong")
 
 
+ANTHROPIC_HOST = "api.anthropic.com"
+ANTHROPIC_VERSION = "2023-06-01"
+# Endpoint bắt buộc max_tokens (400 nhắc max_tokens) thì gọi lại với mức này; đủ cho phân tích kèm suy luận.
+FALLBACK_MAX_TOKENS = 16000
+
+
+def is_anthropic(base_url: str) -> bool:
+    return urlparse(base_url).hostname == ANTHROPIC_HOST
+
+
 def make_client(base_url: str, api_key: str) -> OpenAI:
-    """Client OpenAI trỏ tới endpoint của người dùng. Tắt retry của SDK để retry.with_retry quản lý."""
-    return OpenAI(base_url=base_url, api_key=api_key, max_retries=0, timeout=REQUEST_TIMEOUT_S)
+    """Client OpenAI trỏ tới endpoint của người dùng. Tắt retry của SDK để retry.with_retry quản lý.
+
+    Anthropic: lớp tương thích OpenAI nhận Bearer cho chat, còn GET /models là API gốc cần x-api-key.
+    """
+    headers = {"x-api-key": api_key, "anthropic-version": ANTHROPIC_VERSION} if is_anthropic(base_url) else None
+    return OpenAI(base_url=base_url, api_key=api_key, max_retries=0, timeout=REQUEST_TIMEOUT_S,
+                  default_headers=headers)
+
 
 def vision_cached(llm: dict) -> bool | None:
     cache = llm.get("vision", {})
@@ -191,7 +208,10 @@ def list_models(base_url: str, api_key: str) -> list[dict]:
     None khi endpoint không trả giá (chỉ kiểu OpenRouter có trường pricing). Ném ServiceError nếu lỗi.
     """
     client = make_client(base_url, api_key)
-    page = with_retry(client.models.list, service="llm")
+    # Anthropic chia trang 20 model/lần; xin tối đa 1000 để có đủ danh sách trong một trang.
+    query = {"limit": 1000} if is_anthropic(base_url) else None
+    page = with_retry(lambda: client.models.list(extra_query=query) if query else client.models.list(),
+                      service="llm")
     models = [_model_info(m) for m in page.data]
     return sorted(models, key=lambda m: m["id"])
 
@@ -277,7 +297,8 @@ def _chat(
     """Gọi chat completion, trả (chữ, tổng token, còn bật json_mode không).
 
     thinking=False xin tắt suy luận (extra_body thinking=disabled); endpoint từ chối thì dùng reasoning_effort.
-    Endpoint từ chối response_format, thinking hoặc reasoning_effort (400) thì gọi lại không kèm tham số đó.
+    Endpoint từ chối response_format, thinking, reasoning_effort hoặc temperature (400; Claude 4.7+ chỉ nhận
+    temperature 1) thì gọi lại không kèm tham số đó; endpoint bắt buộc max_tokens thì gọi lại kèm max_tokens.
     """
     kwargs: dict[str, Any] = {"model": model, "messages": messages}
     if temperature is not None:
@@ -300,6 +321,12 @@ def _chat(
                 elif "reasoning_effort" in kwargs and _is_rejection(exc, "reasoning_effort"):
                     logger.info("Endpoint LLM không nhận reasoning_effort, gọi lại không kèm tham số này")
                     del kwargs["reasoning_effort"]
+                elif "temperature" in kwargs and _is_rejection(exc, "temperature"):
+                    logger.info("Model LLM không nhận temperature đã đặt, gọi lại với mặc định của model")
+                    del kwargs["temperature"]
+                elif "max_tokens" not in kwargs and _is_rejection(exc, "max_tokens"):
+                    logger.info("Endpoint LLM bắt buộc max_tokens, gọi lại với %d", FALLBACK_MAX_TOKENS)
+                    kwargs["max_tokens"] = FALLBACK_MAX_TOKENS
                 else:
                     raise
 

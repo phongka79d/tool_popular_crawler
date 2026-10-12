@@ -166,6 +166,18 @@ class TestWriteAnalysis:
 
         assert "reasoning_effort" not in comp.calls[0]
 
+    def test_claude_temperature_and_required_max_tokens_are_handled(self):
+        temperature = FakeStatusError("Error code: 400 - temperature: only 1 is supported for this model")
+        max_tokens = FakeStatusError("Error code: 400 - max_tokens: Field required")
+        client, comp = fake_client(temperature, max_tokens, _reply(json.dumps(VALID), total=9))
+
+        out = llm_client.write_analysis(client, "claude-x", VIDEO, LABELS, SETTINGS)
+
+        assert out == {**VALID, "_usage": 9}
+        assert comp.calls[0]["temperature"] == 0.25
+        assert "temperature" not in comp.calls[2]
+        assert comp.calls[2]["max_tokens"] == llm_client.FALLBACK_MAX_TOKENS
+
     def test_fallback_is_kept_for_the_bad_json_retry(self):
         rejected = FakeStatusError("400 - unsupported response_format")
         client, comp = fake_client(rejected, _reply("không phải json", total=1), _reply(json.dumps(VALID), total=1))
@@ -432,6 +444,47 @@ def test_list_models_sorts_and_converts_per_token_price_to_per_million(monkeypat
     assert models[1]["price_in"] is None and models[1]["price_out"] is None
     assert models[2] == {"id": "z-model", "owned_by": "x", "context_length": 131072,
                          "price_in": 0.8, "price_out": 1.6}
+
+
+def test_anthropic_models_list_uses_native_auth_and_one_full_page(monkeypatch):
+    import httpx2 as httpx  # HTTP stack of openai 3.x
+
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={
+            "data": [
+                {"type": "model", "id": "claude-sonnet-4-6", "display_name": "Claude Sonnet 4.6",
+                 "created_at": "2026-02-17T00:00:00Z"},
+                {"type": "model", "id": "claude-haiku-4-5", "display_name": "Claude Haiku 4.5",
+                 "created_at": "2025-10-01T00:00:00Z"},
+            ],
+            "has_more": False, "first_id": "claude-sonnet-4-6", "last_id": "claude-haiku-4-5",
+        })
+
+    real_openai = llm_client.OpenAI
+    monkeypatch.setattr(llm_client, "OpenAI", lambda **kw: real_openai(
+        **kw, http_client=httpx.Client(transport=httpx.MockTransport(handler))))
+
+    models = llm_client.list_models("https://api.anthropic.com/v1/", "sk-ant-test")
+
+    assert [m["id"] for m in models] == ["claude-haiku-4-5", "claude-sonnet-4-6"]
+    assert models[0]["price_in"] is None
+    (request,) = requests
+    assert request.url.path == "/v1/models"
+    assert request.url.params["limit"] == "1000"
+    assert request.headers["x-api-key"] == "sk-ant-test"
+    assert request.headers["anthropic-version"] == llm_client.ANTHROPIC_VERSION
+
+
+def test_other_endpoints_get_no_anthropic_headers(monkeypatch):
+    seen: dict = {}
+    monkeypatch.setattr(llm_client, "OpenAI", lambda **kw: seen.update(kw))
+
+    llm_client.make_client("https://api.anthropic.com.evil.test/v1", "sk-test")
+
+    assert seen["default_headers"] is None
 
 
 def test_shipped_ban_list_has_plan_words():
