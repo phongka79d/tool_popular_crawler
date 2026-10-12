@@ -1,10 +1,10 @@
 {
   "jev": {"model": "jev-1.13", "yes_threshold": 0.5, "min_confidence": 0.6},
-  "llm": {"base_url": "", "model": "", "temperature": 0.4},
+  "llm": {"base_url": "", "model": "", "temperature": 0.4, "reasoning_effort": "low"},
   "stt": {"provider": "deepgram", "model": "nova-3", "language": "vi",
           "keyterms_file": "config/keyterms.txt", "fallback": "local_whisper",
           "whisper_model": "small"},
-  "scan": {"min_views": 10000, "min_interactions": 200, "delay_min_s": 3, "delay_max_s": 8,
+  "scan": {"video_kinds": ["video", "reel"], "min_views": 10000, "min_interactions": 200, "delay_min_s": 3, "delay_max_s": 8,
            "page_delay_min_s": 30, "page_delay_max_s": 60,
            "max_videos_per_page": 200, "max_scroll_rounds": 60, "stall_rounds": 4},
   "score_weights": {"ratio_median": 40, "ratio_median_cap": 5, "replicable": 25,

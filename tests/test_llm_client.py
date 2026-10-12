@@ -147,6 +147,25 @@ class TestWriteAnalysis:
         assert comp.calls[0]["response_format"] == {"type": "json_object"}
         assert "response_format" not in comp.calls[1]
 
+    def test_reasoning_effort_is_sent_and_dropped_when_endpoint_rejects_it(self):
+        rejected = FakeStatusError("Error code: 400 - Unrecognized request argument: reasoning_effort")
+        client, comp = fake_client(rejected, _reply(json.dumps(VALID), total=40))
+
+        out = llm_client.write_analysis(client, "m-1", VIDEO, LABELS, SETTINGS)
+
+        assert out == {**VALID, "_usage": 40}
+        assert comp.calls[0]["reasoning_effort"] == "low"
+        assert "reasoning_effort" not in comp.calls[1]
+        assert comp.calls[1]["response_format"] == {"type": "json_object"}
+
+    def test_empty_reasoning_effort_setting_sends_no_parameter(self):
+        client, comp = fake_client(_reply(json.dumps(VALID)))
+        settings = {**SETTINGS, "llm": {**SETTINGS["llm"], "reasoning_effort": ""}}
+
+        llm_client.write_analysis(client, "m-1", VIDEO, LABELS, settings)
+
+        assert "reasoning_effort" not in comp.calls[0]
+
     def test_fallback_is_kept_for_the_bad_json_retry(self):
         rejected = FakeStatusError("400 - unsupported response_format")
         client, comp = fake_client(rejected, _reply("không phải json", total=1), _reply(json.dumps(VALID), total=1))

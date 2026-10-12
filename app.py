@@ -41,7 +41,7 @@ DEFAULT_SETTINGS = {
     "stt": {"provider": "deepgram", "model": "", "language": "vi",
             "keyterms_file": "config/keyterms.txt", "fallback": "local_whisper",
             "whisper_model": "small"},
-    "scan": {"min_views": 10000, "min_interactions": 200, "delay_min_s": 3, "delay_max_s": 8,
+    "scan": {"video_kinds": ["video", "reel"], "min_views": 10000, "min_interactions": 200, "delay_min_s": 3, "delay_max_s": 8,
              "page_delay_min_s": 30, "page_delay_max_s": 60,
              "max_videos_per_page": 200, "max_scroll_rounds": 60, "stall_rounds": 4},
     "score_weights": {"ratio_median": 40, "ratio_median_cap": 5, "replicable": 25,
@@ -741,9 +741,16 @@ def _scan_options(settings: dict, locked: bool) -> pipeline.RunParams:
                              help="Bài đăng lấy nội dung chữ/ảnh từ bảng tin chính; phân tích caption, không tải audio.")
         formats = {"post"}
         if scan_kind == "Video":
-            choice = st.selectbox("Loại video", ["Video", "Reel", "Cả hai"], index=2, disabled=locked,
-                                  help="Reel là video dọc ngắn; Cả hai lấy cả video thường và Reel.")
-            formats = {"video", "reel"} if choice == "Cả hai" else {"reel" if choice == "Reel" else "video"}
+            saved = settings["scan"].get("video_kinds", ["video", "reel"])
+            formats = {
+                kind for kind, label in (
+                    ("video", "Video thường"), ("reel", "Reel"),
+                    ("video_live", "Video (Live)"), ("reel_live", "Reel (Live)")
+                )
+                if st.checkbox(label, value=kind in saved, key=f"scan_kind_{kind}", disabled=locked)
+            }
+            if not formats:
+                st.caption("Chọn ít nhất một loại video để quét.")
     with right, st.container(border=True):
         if scan_kind == "Bài đăng":
             minimum = int(st.number_input(
@@ -766,6 +773,8 @@ def _start_scan(settings: dict, params: pipeline.RunParams) -> None:
         return
     threshold = "min_interactions" if pipeline.is_post_run(params) else "min_views"
     settings["scan"][threshold] = getattr(params, threshold)
+    if not pipeline.is_post_run(params):
+        settings["scan"]["video_kinds"] = sorted(params.formats)
     config.save_settings(settings)
     events, stop = queue.Queue(), threading.Event()
     worker = threading.Thread(target=_scan_worker, args=(params, copy.deepcopy(settings), events, stop),
@@ -782,7 +791,7 @@ def _scan_page(settings: dict) -> None:
     locked = _busy()
     params = _scan_options(settings, locked)
     _key_status_panel(settings, locked, require_deepgram=not pipeline.is_post_run(params))
-    if st.button("Bắt đầu quét", type="primary", width="stretch", disabled=locked, icon=":material/play_arrow:"):
+    if st.button("Bắt đầu quét", type="primary", width="stretch", disabled=locked or not params.formats, icon=":material/play_arrow:"):
         _start_scan(settings, params)
 
 

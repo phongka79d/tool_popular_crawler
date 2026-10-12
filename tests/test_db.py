@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 import db
+import jev_client
 from models import Page, Video
 
 
@@ -152,18 +153,18 @@ def test_upsert_page_keeps_name_and_followers_when_incoming_empty(path: Path) ->
 def test_jev_cache_roundtrip(path: Path) -> None:
     answers = {"topic": "kien_thuc_benh", "relevant": 0.91, "note": "Tiếng Việt có dấu"}
     usage = {"tokens": 321}
-    db.save_jev("v1", "jev-1.13", "labels", answers, usage, path=path)
+    db.save_jev("v1", "jev-1.13", jev_client.LABELS_KIND, answers, usage, path=path)
 
-    assert db.get_jev("v1", "jev-1.13", "labels", path=path) == answers
-    assert db.get_jev("v1", "jev-1.14", "labels", path=path) is None
+    assert db.get_jev("v1", "jev-1.13", jev_client.LABELS_KIND, path=path) == answers
+    assert db.get_jev("v1", "jev-1.14", jev_client.LABELS_KIND, path=path) is None
     assert db.get_jev("v1", "jev-1.13", "suggestion_check", path=path) is None
-    assert db.get_jev("v2", "jev-1.13", "labels", path=path) is None
+    assert db.get_jev("v2", "jev-1.13", jev_client.LABELS_KIND, path=path) is None
 
 
 def test_jev_save_again_replaces_answers(path: Path) -> None:
-    db.save_jev("v1", "jev-1.13", "labels", {"relevant": 0.2}, {}, path=path)
-    db.save_jev("v1", "jev-1.13", "labels", {"relevant": 0.8}, {"tokens": 5}, path=path)
-    assert db.get_jev("v1", "jev-1.13", "labels", path=path) == {"relevant": 0.8}
+    db.save_jev("v1", "jev-1.13", "suggestion_check", {"relevant": 0.2}, {}, path=path)
+    db.save_jev("v1", "jev-1.13", "suggestion_check", {"relevant": 0.8}, {"tokens": 5}, path=path)
+    assert db.get_jev("v1", "jev-1.13", "suggestion_check", path=path) == {"relevant": 0.8}
     with db.conn(path) as c:
         count = c.execute("SELECT COUNT(*) FROM jev_answers").fetchone()[0]
     assert count == 1
@@ -212,3 +213,23 @@ def test_run_log_roundtrip(path: Path) -> None:
 def test_finish_run_rejects_unknown_run_id(path: Path) -> None:
     with pytest.raises(ValueError):
         db.finish_run(9999, {}, path=path)
+
+
+def test_init_db_migrates_old_video_schema_without_losing_rows(tmp_path):
+    path = tmp_path / "old.db"
+    with db.conn(path) as c:
+        c.executescript(db.SCHEMA.replace("    is_live           INTEGER NOT NULL DEFAULT 0,\n", ""))
+        c.execute("INSERT INTO videos (video_id, url, format) VALUES ('old', 'old-url', 'video')")
+    db.init_db(path)
+    db.init_db(path)
+    assert db.get_video("old", path).url == "old-url"
+    assert db.get_video("old", path).is_live is False
+    with db.conn(path) as c:
+        assert "is_live" in {row["name"] for row in c.execute("PRAGMA table_info(videos)")}
+
+
+def test_upsert_preserves_known_live_status(path):
+    db.upsert_video(_video(is_live=True), path)
+    assert db.get_video("v1", path).is_live is True
+    db.upsert_video(_video(is_live=False), path)
+    assert db.get_video("v1", path).is_live is True

@@ -39,6 +39,16 @@
     ["attachments", "*", "styles", "attachment", "media", "length_in_second"],
     ["attachments", "*", "media", "length_in_second"]
   ],
+  "broadcast_status": [
+    ["attachments", "*", "media", "broadcast_status"],
+    ["attachments", "*", "styles", "attachment", "media", "broadcast_status"],
+    ["attachments", "*", "all_subattachments", "nodes", "*", "media", "broadcast_status"]
+  ],
+  "is_live_streaming": [
+    ["attachments", "*", "media", "is_live_streaming"],
+    ["attachments", "*", "styles", "attachment", "media", "is_live_streaming"],
+    ["attachments", "*", "all_subattachments", "nodes", "*", "media", "is_live_streaming"]
+  ],
   "views": [
     ["video_view_count"],
     ["video_view_count_renderer", "feedback", "video_view_count"],
@@ -100,6 +110,8 @@
     "views": [["play_count"]],
     "feedback": [["feedback"]],
     "duration_ms": [["video_thumbnail_overlays_renderer", "video", "playable_duration_in_ms"]],
-    "duration_s": [["video_thumbnail_overlays_renderer", "video", "playable_duration"]]
+    "duration_s": [["video_thumbnail_overlays_renderer", "video", "playable_duration"]],
+    "broadcast_status": [["video_thumbnail_overlays_renderer", "video", "broadcast_status"], ["broadcast_status"]],
+    "is_live_streaming": [["video_thumbnail_overlays_renderer", "video", "is_live_streaming"], ["is_live_streaming"]]
   }
 }

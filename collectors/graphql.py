@@ -67,6 +67,8 @@ class ChannelVideoPaths:
     feedback: Alternatives  # reactions/comments/shares then use the shared counter paths
     duration_ms: Alternatives
     duration_s: Alternatives
+    broadcast_status: Alternatives
+    is_live_streaming: Alternatives
 
 @dataclass(frozen=True)
 class GraphqlPaths:
@@ -83,6 +85,8 @@ class GraphqlPaths:
     video_markers: Alternatives  # relative to feedback; any non-null value marks a video
     duration_ms: Alternatives  # relative to story, milliseconds (preferred)
     duration_s: Alternatives  # relative to story, seconds (fallback)
+    broadcast_status: Alternatives
+    is_live_streaming: Alternatives
     views: Alternatives  # relative to feedback
     comments: Alternatives  # relative to feedback
     shares: Alternatives  # relative to feedback
@@ -226,7 +230,8 @@ def flatten(story: dict, paths: GraphqlPaths | None = None) -> dict | None:
         return record
     return _record(video_id, url, _first(story, p.creation_time, _as_int), caption,
                    _first(feedback, p.views, _as_count), feedback,
-                   _duration(story, p.duration_ms, p.duration_s), p)
+                   _duration(story, p.duration_ms, p.duration_s), p,
+                   _is_live(story, p.broadcast_status, p.is_live_streaming))
 
 
 def flatten_channel_video(video: dict, paths: GraphqlPaths | None = None) -> dict | None:
@@ -244,7 +249,8 @@ def flatten_channel_video(video: dict, paths: GraphqlPaths | None = None) -> dic
     if views is None:
         views = _first(feedback, p.views, _as_count)
     return _record(video_id, url, _first(video, c.creation_time, _as_int), _first(video, c.message, _as_text),
-                   views, feedback, _duration(video, c.duration_ms, c.duration_s), p)
+                   views, feedback, _duration(video, c.duration_ms, c.duration_s), p,
+                   _is_live(video, c.broadcast_status, c.is_live_streaming))
 
 
 def _merged(node: dict, alternatives: Alternatives) -> dict:
@@ -260,8 +266,14 @@ def _duration(node: dict, ms_paths: Alternatives, s_paths: Alternatives) -> floa
     return duration_ms / 1000 if duration_ms is not None else _first(node, s_paths, _as_number)
 
 
+def _is_live(node: dict, status_paths: Alternatives, streaming_paths: Alternatives) -> bool:
+    return any(bool(value) for value in _all_values(node, status_paths)) or any(
+        value is True for value in _all_values(node, streaming_paths)
+    )
+
+
 def _record(video_id: str, url: str, posted_at: int | None, caption: str | None, views: int | None,
-            feedback: dict, duration_s: float | None, p: GraphqlPaths) -> dict:
+            feedback: dict, duration_s: float | None, p: GraphqlPaths, is_live: bool = False) -> dict:
     return {
         "video_id": video_id,
         "url": url,
@@ -273,6 +285,7 @@ def _record(video_id: str, url: str, posted_at: int | None, caption: str | None,
         "shares": _first(feedback, p.shares, _as_count),
         "duration_s": duration_s,
         "format": "reel" if p.reel_url_marker in url else "video",
+        "is_live": is_live,
     }
 
 
@@ -331,6 +344,9 @@ def _videos_from(values: list, p: GraphqlPaths) -> list[dict]:
                 videos.append(record)
                 continue
             for key, value in record.items():
+                if key == "is_live":
+                    existing[key] = existing.get(key, False) or value
+                    continue
                 if existing.get(key) in (None, "") and value not in (None, ""):
                     existing[key] = value
     log.debug("GraphQL: %d story, %d tile, %d video", len(stories), tiles, len(videos))

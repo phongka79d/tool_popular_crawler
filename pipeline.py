@@ -23,7 +23,7 @@ import llm_client
 from collectors import transcript, ytdlp
 from collectors.facebook import FacebookScanner, page_url_problem
 from errors import AuthError, BrowserUnavailable, LoginRequired, NetworkError, QuotaError, ServiceError
-from models import Video
+from models import VIDEO_KINDS, Video
 
 logger = logging.getLogger(__name__)
 
@@ -300,7 +300,7 @@ def run(
             kept: list = []
             for attempt in range(2):
                 checkpoint()
-                say("LLM viết phân tích và gợi ý (thường 1–2 phút)…" if attempt == 0
+                say("LLM viết phân tích và gợi ý (thường dưới 1 phút)…" if attempt == 0
                     else "Jev loại hết gợi ý; LLM viết lại lần 2…")
                 analysis = llm_client.write_analysis(llm_instance(), settings["llm"]["model"], video, video.jev, settings)
                 add_usage("llm_tokens", _tokens(analysis.get("_usage")))
@@ -515,7 +515,8 @@ def run(
             try:
                 checkpoint()
                 emit("export", "LLM viết nhận xét tổng hợp cho file Excel…")
-                summary["commentary"], usage = llm_client.write_commentary(llm_instance(), settings["llm"]["model"], summary)
+                summary["commentary"], usage = llm_client.write_commentary(
+                    llm_instance(), settings["llm"]["model"], summary, llm_client.reasoning_effort(settings))
                 run_log["usage"]["llm_tokens"] += _tokens(usage)
             except QuotaError as exc:
                 if exc.service != "llm":
@@ -549,13 +550,14 @@ def main(argv: list[str] | None = None) -> int:
     applog.use_utf8_console()  # tiếng Việt không làm hỏng CLI trên console mã cũ (cp1252)
     parser = argparse.ArgumentParser(description="Quét video hoặc bài đăng Facebook và xuất công thức nội dung ra Excel.")
     parser.add_argument("--days", type=int, default=14)
-    parser.add_argument("--formats", default="reel,video")
+    parser.add_argument("--formats", default="video,reel",
+                        help="video,reel,video_live,reel_live hoặc riêng post")
     parser.add_argument("--min-views", type=int, default=None)
     parser.add_argument("--min-interactions", type=int, default=None)
     args = parser.parse_args(argv)
     formats = {item.strip() for item in args.formats.split(",") if item.strip()}
-    if args.days <= 0 or not formats or (formats != {"post"} and not formats <= {"reel", "video"}):
-        parser.error("Số ngày phải lớn hơn 0; định dạng gồm reel,video hoặc riêng post.")
+    if args.days <= 0 or not formats or (formats != {"post"} and not formats <= VIDEO_KINDS):
+        parser.error("Số ngày phải lớn hơn 0; định dạng gồm video,reel,video_live,reel_live hoặc riêng post.")
     settings = config.load_settings()
     min_views = args.min_views if args.min_views is not None else settings["scan"].get("min_views", 10000)
     min_interactions = args.min_interactions if args.min_interactions is not None else settings["scan"].get("min_interactions", 200)

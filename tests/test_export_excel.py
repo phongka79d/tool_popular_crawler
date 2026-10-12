@@ -188,10 +188,10 @@ def test_post_export_labels_and_detail_title(tmp_path):
     try:
         assert workbook.sheetnames[0] == "Chi tiết bài đăng"
         detail = workbook["Chi tiết bài đăng"]
-        assert detail.cell(2, _col("Định dạng")).value == "Bài đăng"
-        assert detail.cell(2, _col("Tổng tương tác")).value == 250
-        assert detail.cell(2, _col("Điểm Jev (0–100)")).value == 75
-        assert workbook["Tổng hợp công thức"].cell(2, 2).value == "Số bài"
+        assert detail.cell(3, _col("Định dạng")).value == "Bài đăng"
+        assert detail.cell(3, _col("Tổng tương tác")).value == 250
+        assert detail.cell(3, _col("Điểm Jev (0–100)")).value == 75
+        assert workbook["Tổng hợp công thức"].cell(5, 2).value == "Số bài"
     finally:
         workbook.close()
 
@@ -202,46 +202,46 @@ def test_sheet_names_in_order(wb) -> None:
 
 def test_detail_header_order_matches_plan(detail) -> None:
     assert detail.max_column == len(HEADERS) == 39
-    assert [detail.cell(1, c).value for c in range(1, len(HEADERS) + 1)] == HEADERS
+    assert [detail.cell(2, c).value for c in range(1, len(HEADERS) + 1)] == HEADERS
 
 
 def test_rows_sorted_by_score_desc_with_missing_score_last(detail) -> None:
-    assert detail.max_row == 5
-    assert [detail.cell(r, _col("STT")).value for r in range(2, 6)] == [1, 2, 3, 4]
-    assert [detail.cell(r, _col("Kênh")).value for r in range(2, 6)] == [
+    assert detail.max_row == 6
+    assert [detail.cell(r, _col("STT")).value for r in range(3, 7)] == [1, 2, 3, 4]
+    assert [detail.cell(r, _col("Kênh")).value for r in range(3, 7)] == [
         "Kênh B", "Kênh D", "Kênh A", "Kênh C",
     ]
-    assert [detail.cell(r, _col("Điểm công thức (0–100)")).value for r in range(2, 6)] == [
+    assert [detail.cell(r, _col("Điểm công thức (0–100)")).value for r in range(3, 7)] == [
         90.0, 70.0, 55.0, None,
     ]
 
 
 def test_freeze_panes_and_autofilter(detail) -> None:
-    assert detail.freeze_panes == "C2"
-    assert detail.auto_filter.ref == "A1:AM5"
+    assert detail.freeze_panes == "C3"
+    assert detail.auto_filter.ref == "A2:AM6"
 
 
-def test_risky_row_has_light_yellow_fill(detail) -> None:
-    risky_row = 2  # Kênh B: has risk flags, score 90
-    for c in range(1, len(HEADERS) + 1):
-        cell = detail.cell(risky_row, c)
-        assert cell.fill.fill_type == "solid", cell.coordinate
-        assert cell.fill.fgColor.rgb[-6:] == "FFF2CC", cell.coordinate
+def test_risk_highlight_is_limited_to_nonempty_flags(detail) -> None:
+    risky = detail.cell(3, _col("Cờ rủi ro"))
+    assert risky.fill.fill_type == "solid"
+    assert risky.fill != detail.cell(3, _col("Kênh")).fill
+    assert detail.cell(4, _col("Cờ rủi ro")).value is None
 
 
-def test_clean_row_has_no_fill(detail) -> None:
-    clean_row = 3  # Kênh D: no risk flags
-    assert detail.cell(clean_row, _col("Kênh")).fill.fill_type is None
+def test_data_rows_have_readable_borders_and_capped_height(detail) -> None:
+    for row in range(3, 7):
+        assert detail.cell(row, _col("Kênh")).border.bottom.style
+        assert 24 <= detail.row_dimensions[row].height <= 90
 
 
 def test_number_and_percent_formats(detail) -> None:
-    row = 2  # Kênh B: has every metric filled in
+    row = 3  # Kênh B: has every metric filled in
     assert detail.cell(row, _col("View")).number_format == "#,##0"
     assert detail.cell(row, _col("Follower kênh")).number_format == "#,##0"
     assert detail.cell(row, _col("Thời lượng (giây)")).number_format == "#,##0"
     assert detail.cell(row, _col("View/Follower")).number_format == "0.0%"
     assert detail.cell(row, _col("View/Follower")).value == pytest.approx(0.4)
-    assert detail.cell(row, _col("Hệ số so trung vị kênh")).number_format == "0.0%"
+    assert detail.cell(row, _col("Hệ số so trung vị kênh")).number_format == "#,##0.00"
     assert detail.cell(row, _col("Tỷ lệ tương tác")).number_format == "0.0%"
     assert detail.cell(row, _col("Tỷ lệ share")).number_format == "0.00%"
     assert detail.cell(row, _col("Tỷ lệ share")).value == pytest.approx(0.0075)
@@ -258,21 +258,21 @@ def test_long_text_columns_wrap_at_width_60(detail) -> None:
     ):
         col = _col(header)
         assert _width(detail, col) == 60, header
-        assert detail.cell(2, col).alignment.wrap_text is True, header
+        assert detail.cell(3, col).alignment.wrap_text is True, header
 
 
 def test_short_columns_keep_default_width_without_wrap(detail) -> None:
     col = _col("Kênh")
     assert _width(detail, col) == 24
-    assert not detail.cell(2, col).alignment.wrap_text
+    assert not detail.cell(3, col).alignment.wrap_text
 
 
 def test_formula_like_caption_stays_literal_text(detail) -> None:
-    assert detail.cell(2, _col("Caption")).value == CAPTION_B
+    assert detail.cell(3, _col("Caption")).value == CAPTION_B
 
 
 def test_detail_values_map_from_jev_llm_and_metrics(detail) -> None:
-    row = 4  # Kênh A
+    row = 5  # Kênh A
     assert detail.cell(row, _col("Ngày đăng")).value == datetime(2025, 10, 9, 15, 53, 20)
     assert detail.cell(row, _col("Định dạng")).value == "Reel"
     assert detail.cell(row, _col("Chủ đề bài")).value == "Dấu hiệu nhận biết bệnh"
@@ -294,12 +294,12 @@ def test_detail_values_map_from_jev_llm_and_metrics(detail) -> None:
     ("Vị trí CTA", "Cuối video, sau phần giải thích dấu hiệu"),
 ])
 def test_analysis_formula_fields_export_from_llm(detail, header, expected) -> None:
-    assert detail.cell(4, _col(header)).value == expected
-    assert detail.cell(5, _col(header)).value is None
+    assert detail.cell(5, _col(header)).value == expected
+    assert detail.cell(6, _col(header)).value is None
 
 
 def test_risk_flags_uncertain_labels_and_failed_transcript_in_notes(detail) -> None:
-    row = 2  # Kênh B
+    row = 3  # Kênh B
     assert detail.cell(row, _col("Cờ rủi ro")).value == "Khẳng định tuyệt đối, So sánh đối thủ"
     assert detail.cell(row, _col("Nhóm chủ đề")).value == "Pháp lý GPP (chưa chắc)"
     notes = detail.cell(row, _col("Ghi chú")).value
@@ -311,7 +311,7 @@ def test_risk_flags_uncertain_labels_and_failed_transcript_in_notes(detail) -> N
 
 
 def test_missing_jev_llm_fields_are_blank_and_raw_goes_to_notes(detail) -> None:
-    row = 5  # Kênh C: no score, empty jev, raw LLM text only
+    row = 6  # Kênh C: no score, empty jev, raw LLM text only
     assert detail.cell(row, _col("Điểm công thức (0–100)")).value is None
     assert detail.cell(row, _col("Chủ đề bài")).value is None
     assert detail.cell(row, _col("Gợi ý 1")).value is None
@@ -324,7 +324,7 @@ def test_empty_export_still_writes_three_sheets(tmp_path: Path) -> None:
     path = xl.export([], {}, {}, out_dir=tmp_path, now=NOW)
     wb = load_workbook(path)
     assert wb.sheetnames == ["Chi tiết video", "Tổng hợp công thức", "Nhật ký"]
-    assert wb["Chi tiết video"].max_row == 1
+    assert wb["Chi tiết video"].max_row == 2
 
 
 def test_summary_sheet_tables_and_commentary(wb) -> None:
@@ -398,3 +398,18 @@ def test_build_summary_tables_groups_and_averages() -> None:
 
 def test_build_summary_tables_empty() -> None:
     assert xl.build_summary_tables([]) == {"by_topic": [], "by_hook": [], "commentary": ""}
+
+
+def test_live_labels_in_details_and_log_params(tmp_path):
+    videos = [Video(kind, kind, "page", format=kind.removesuffix("_live"), is_live=kind.endswith("_live"))
+              for kind in ("video", "reel", "video_live", "reel_live", "post")]
+    path = xl.export(videos, {}, {"params": {"formats": ["video_live", "reel_live"]}}, out_dir=tmp_path, now=NOW)
+    workbook = load_workbook(path)
+    try:
+        detail = workbook[xl.SHEET_DETAIL]
+        assert {detail.cell(row, _col("Định dạng")).value for row in range(3, 8)} == {
+            "Video", "Reel", "Video (Live)", "Reel (Live)", "Bài đăng"}
+        values = [cell.value for row in workbook[xl.SHEET_LOG] for cell in row]
+        assert "Reel (Live), Video (Live)" in values
+    finally:
+        workbook.close()

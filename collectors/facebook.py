@@ -26,7 +26,7 @@ import config
 from collectors import graphql
 from collectors.cookies import has_login_cookies, load_cookie_file, write_netscape
 from errors import BrowserUnavailable, LoginRequired
-from models import Page
+from models import Page, video_kind
 from normalize import is_older_than, parse_count
 
 logger = logging.getLogger(__name__)
@@ -279,12 +279,14 @@ class _Collector:
 
     def __init__(self, formats: set[str], days: int, max_videos: int) -> None:
         self._formats = formats
+        self._base_formats = {kind.removesuffix("_live") for kind in formats}
         self._days = days
         self.limit = max_videos
         self.items_seen = 0  # feed Bài đăng chỉ đếm post; tab video đếm mọi record như trước
         self._by_id: dict[str, dict] = {}
         self._old_formats: set[str] = set()
         self._old_post_ids: set[str] = set()
+        self._live_ids: set[str] = set()
 
     def add(self, items: list[dict], tab_format: str) -> None:
         for item in items:
@@ -292,7 +294,7 @@ class _Collector:
             fmt = item.get("format")
             if video_id and ("post" not in self._formats or fmt == "post"):
                 self.items_seen += 1
-            if not video_id or fmt not in self._formats:
+            if not video_id or fmt not in self._base_formats:
                 continue
             posted_at = item.get("posted_at")
             if posted_at is not None and is_older_than(posted_at, self._days):
@@ -303,11 +305,22 @@ class _Collector:
                     if fmt != "post" or len(self._old_post_ids) >= 3:
                         self._old_formats.add(tab_format)
                 continue
+            if item.get("is_live"):
+                self._live_ids.add(video_id)
+            is_live = video_id in self._live_ids
+            if video_kind(fmt, is_live) not in self._formats:
+                self._by_id.pop(video_id, None)
+                continue
             existing = self._by_id.get(video_id)
             if existing is None:
                 self._by_id[video_id] = dict(item)
+                if is_live:
+                    self._by_id[video_id]["is_live"] = True
                 continue
             for key, value in item.items():
+                if key == "is_live":
+                    existing[key] = existing.get(key, False) or value
+                    continue
                 if existing.get(key) in (None, "") and value not in (None, ""):
                     existing[key] = value
 
@@ -497,7 +510,8 @@ class FacebookScanner:
         tab trống, đạt số vòng tối đa, đủ max_videos, gặp bài cũ, hoặc stop_event được bật.
         `on_progress` nhận từng bước (mở tab, mỗi vòng cuộn, lý do dừng) để hiện cho người dùng.
         """
-        tabs = [(fmt, tab) for fmt, tab in _TABS if fmt in formats]
+        base_formats = {kind.removesuffix("_live") for kind in formats}
+        tabs = [(fmt, tab) for fmt, tab in _TABS if fmt in base_formats]
         if not tabs or max_videos <= 0:
             return []
         report = on_progress or (lambda message: None)

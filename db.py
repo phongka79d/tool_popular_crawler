@@ -17,7 +17,7 @@ from typing import Any, Iterator
 import config
 from models import Page, Video
 
-JEV_KINDS = ("labels", "suggestion_check")
+JEV_KINDS = ("labels_v2", "suggestion_check")  # labels_v2 = jev_client.LABELS_KIND (bộ câu hỏi hiện tại)
 
 # Schema lives in code (not a .sql file) so the PyInstaller build needs no extra data files.
 SCHEMA = """
@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS videos (
     page_followers    INTEGER,
     posted_at         INTEGER,
     format            TEXT,
+    is_live           INTEGER NOT NULL DEFAULT 0,
     duration_s        REAL,
     views             INTEGER,
     reactions         INTEGER,
@@ -91,10 +92,10 @@ _TRANSCRIPT_MERGE = """
 
 _UPSERT_VIDEO_SQL = f"""
 INSERT INTO videos (
-    video_id, url, page_url, page_name, page_followers, posted_at, format, duration_s,
+    video_id, url, page_url, page_name, page_followers, posted_at, format, is_live, duration_s,
     views, reactions, comments, shares, caption, transcript, transcript_status, hook, updated_at
 ) VALUES (
-    :video_id, :url, :page_url, :page_name, :page_followers, :posted_at, :format, :duration_s,
+    :video_id, :url, :page_url, :page_name, :page_followers, :posted_at, :format, :is_live, :duration_s,
     :views, :reactions, :comments, :shares, :caption, :transcript, :transcript_status, :hook,
     :updated_at
 )
@@ -105,6 +106,7 @@ ON CONFLICT(video_id) DO UPDATE SET
     page_followers = COALESCE(excluded.page_followers, videos.page_followers),
     posted_at = COALESCE(excluded.posted_at, videos.posted_at),
     format = COALESCE(NULLIF(excluded.format, ''), videos.format),
+    is_live = MAX(videos.is_live, excluded.is_live),
     duration_s = COALESCE(excluded.duration_s, videos.duration_s),
     views = COALESCE(excluded.views, videos.views),
     reactions = COALESCE(excluded.reactions, videos.reactions),
@@ -151,6 +153,8 @@ def init_db(path: str | Path | None = None) -> None:
     """Create all tables and indexes. Safe to call on every start."""
     with conn(path) as c:
         c.executescript(SCHEMA)
+        if "is_live" not in {row["name"] for row in c.execute("PRAGMA table_info(videos)")}:
+            c.execute("ALTER TABLE videos ADD COLUMN is_live INTEGER NOT NULL DEFAULT 0")
 
 
 def upsert_page(page: Page, path: str | Path | None = None) -> None:
@@ -322,6 +326,7 @@ def _video_params(video: Video) -> dict[str, Any]:
         "page_followers": video.page_followers,
         "posted_at": video.posted_at,
         "format": video.format,
+        "is_live": int(video.is_live),
         "duration_s": video.duration_s,
         "views": video.views,
         "reactions": video.reactions,
@@ -344,6 +349,7 @@ def _row_to_video(row: sqlite3.Row) -> Video:
         page_followers=row["page_followers"],
         posted_at=row["posted_at"],
         format=row["format"] or "video",
+        is_live=bool(row["is_live"]),
         duration_s=row["duration_s"],
         views=row["views"],
         reactions=row["reactions"],

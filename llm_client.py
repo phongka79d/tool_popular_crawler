@@ -20,6 +20,14 @@ logger = logging.getLogger(__name__)
 
 REQUEST_TIMEOUT_S = 120.0
 JSON_RESPONSE_FORMAT = {"type": "json_object"}
+# Đo trên gpt-6-luna: phân tích 1 bài 64,5 s mặc định → 14,6 s với "low", chất lượng tương đương.
+# Đổi qua settings llm.reasoning_effort; "" để không gửi tham số này.
+DEFAULT_REASONING_EFFORT = "low"
+
+
+def reasoning_effort(settings: dict) -> str:
+    return settings.get("llm", {}).get("reasoning_effort", DEFAULT_REASONING_EFFORT)
+
 
 # Khung góc nhìn, mẫu hook điền chỗ trống và vị trí CTA lấy từ videoanalyzer SKILL.md Step 4 (MIT).
 SYSTEM_PROMPT = """Bạn là biên tập viên content cho page B2B ngành dược (khách: chủ nhà thuốc, dược sĩ).
@@ -34,7 +42,7 @@ Trả về JSON đúng các khóa:
  "tom_tat": "2-3 câu",
  "hook_goc": "câu mở đầu của video",
  "ly_do_viral": "1-2 câu, nêu là giả thuyết",
- "goc_nhin": "1-2 câu theo khung 'Nhiều người nghĩ... đối lại Thực tế là...'",
+ "goc_nhin": "1-2 câu theo khung 'Nhiều người nghĩ..., nhưng thực tế...'",
  "mau_hook_dien_cho_trong": "một mẫu câu mở đầu có chỗ trống [ ] để người khác điền và làm lại",
  "vi_tri_cta": "đầu, giữa hoặc cuối video, kèm cơ chế (mồi bình luận, inbox nhận tài liệu, lưu, chia sẻ); ghi 'không có CTA' nếu không kêu gọi",
  "goi_y_nhan_ban": [{"hook_moi": "", "y_tuong": ""}, ... đúng 3 mục]}"""
@@ -50,7 +58,7 @@ Trả về JSON đúng các khóa:
  "tom_tat": "2-3 câu",
  "hook_goc": "dòng đầu tiên của caption",
  "ly_do_viral": "1-2 câu, nêu là giả thuyết",
- "goc_nhin": "1-2 câu theo khung 'Nhiều người nghĩ... đối lại Thực tế là...'",
+ "goc_nhin": "1-2 câu theo khung 'Nhiều người nghĩ..., nhưng thực tế...'",
  "mau_hook_dien_cho_trong": "mẫu mở bài có chỗ trống [ ]",
  "vi_tri_cta": "đầu, giữa hoặc cuối bài đăng, kèm cơ chế (bình luận, inbox, lưu, chia sẻ); ghi 'không có CTA' nếu không kêu gọi",
  "goi_y_nhan_ban": [{"hook_moi": "", "y_tuong": ""}, ... đúng 3 mục]}
@@ -168,12 +176,12 @@ def _total_tokens(resp: Any) -> int:
     return int(usage.total_tokens or 0) if usage is not None else 0
 
 
-def _is_response_format_rejection(exc: BaseException) -> bool:
-    """Endpoint từ chối vì không hỗ trợ response_format: lỗi 400 có nhắc tới response_format."""
+def _is_rejection(exc: BaseException, param: str) -> bool:
+    """Endpoint từ chối một tham số nó không hỗ trợ: lỗi 400 có nhắc tới tên tham số."""
     status = getattr(exc, "status_code", None)
     if status is None:
         status = getattr(getattr(exc, "response", None), "status_code", None)
-    return status == 400 and "response_format" in str(exc).lower()
+    return status == 400 and param in str(exc).lower()
 
 
 def _chat(
@@ -182,27 +190,38 @@ def _chat(
     messages: list[dict[str, str]],
     temperature: float | None,
     json_mode: bool,
+    reasoning_effort: str | None = None,
 ) -> tuple[str, int, bool]:
     """Gọi chat completion, trả (chữ, tổng token, còn bật json_mode không).
 
-    json_mode=True mà endpoint từ chối response_format (400) thì gọi lại không kèm response_format.
+    Endpoint từ chối response_format hoặc reasoning_effort (400) thì gọi lại không kèm tham số đó.
     """
     kwargs: dict[str, Any] = {"model": model, "messages": messages}
     if temperature is not None:
         kwargs["temperature"] = temperature
+    if reasoning_effort:
+        kwargs["reasoning_effort"] = reasoning_effort
+
+    def create(**extra: Any) -> Any:
+        try:
+            return with_retry(lambda: client.chat.completions.create(**kwargs, **extra), service="llm")
+        except Exception as exc:
+            if "reasoning_effort" not in kwargs or not _is_rejection(exc, "reasoning_effort"):
+                raise
+            logger.info("Endpoint LLM không nhận reasoning_effort, gọi lại không kèm tham số này")
+            del kwargs["reasoning_effort"]
+            return with_retry(lambda: client.chat.completions.create(**kwargs, **extra), service="llm")
+
     if json_mode:
         try:
-            resp = with_retry(
-                lambda: client.chat.completions.create(response_format=JSON_RESPONSE_FORMAT, **kwargs),
-                service="llm",
-            )
+            resp = create(response_format=JSON_RESPONSE_FORMAT)
         except Exception as exc:
-            if not _is_response_format_rejection(exc):
+            if not _is_rejection(exc, "response_format"):
                 raise
             logger.info("Endpoint LLM không nhận response_format, gọi lại không kèm response_format")
         else:
             return _reply_text(resp), _total_tokens(resp), True
-    resp = with_retry(lambda: client.chat.completions.create(**kwargs), service="llm")
+    resp = create()
     return _reply_text(resp), _total_tokens(resp), False
 
 
@@ -215,11 +234,12 @@ def write_analysis(client: OpenAI, model: str, video: Video, labels: dict, setti
     Lỗi xác thực, hết hạn mức, mạng do with_retry ném ra ngoài.
     """
     temperature = settings["llm"]["temperature"]
+    effort = reasoning_effort(settings)
     messages: list[dict[str, str]] = [
         {"role": "system", "content": POST_SYSTEM_PROMPT if video.format == "post" else SYSTEM_PROMPT},
         {"role": "user", "content": _user_prompt(video, labels)},
     ]
-    text, usage, json_mode = _chat(client, model, messages, temperature, json_mode=True)
+    text, usage, json_mode = _chat(client, model, messages, temperature, json_mode=True, reasoning_effort=effort)
     data = parse_json_loose(text)
     if data is None:
         logger.warning("LLM trả JSON không đọc được (video %s), hỏi lại 1 lần", video.video_id)
@@ -228,7 +248,7 @@ def write_analysis(client: OpenAI, model: str, video: Video, labels: dict, setti
             {"role": "assistant", "content": text},
             {"role": "user", "content": RETRY_PROMPT},
         ]
-        text, extra, _ = _chat(client, model, retry_messages, temperature, json_mode=json_mode)
+        text, extra, _ = _chat(client, model, retry_messages, temperature, json_mode=json_mode, reasoning_effort=effort)
         usage += extra
         data = parse_json_loose(text)
         if data is None:
@@ -267,7 +287,9 @@ def _label(labels: dict, key: str) -> str:
     return str(labels.get(key) or "(không rõ)")
 
 
-def write_commentary(client: OpenAI, model: str, summary_tables: dict) -> tuple[str, int]:
+def write_commentary(
+    client: OpenAI, model: str, summary_tables: dict, reasoning_effort: str | None = DEFAULT_REASONING_EFFORT
+) -> tuple[str, int]:
     """Viết 5-7 dòng nhận xét "công thức đang thắng" từ bảng by_topic và by_hook.
 
     Trả (chữ nhận xét, tổng token). Chỉ gửi các cột của bảng đếm (không gửi caption, transcript hay nhận xét cũ).
@@ -283,7 +305,7 @@ def write_commentary(client: OpenAI, model: str, summary_tables: dict) -> tuple[
         {"role": "system", "content": COMMENTARY_SYSTEM_PROMPT},
         {"role": "user", "content": json.dumps(tables, ensure_ascii=False, indent=2)},
     ]
-    text, tokens, _ = _chat(client, model, messages, temperature=None, json_mode=False)
+    text, tokens, _ = _chat(client, model, messages, temperature=None, json_mode=False, reasoning_effort=reasoning_effort)
     return text, tokens
 
 

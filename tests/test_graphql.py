@@ -25,6 +25,7 @@ REEL = {
     "shares": 1520,
     "duration_s": 27.48,
     "format": "reel",
+    "is_live": False,
 }
 
 VIDEO = {
@@ -38,6 +39,7 @@ VIDEO = {
     "shares": 57,
     "duration_s": 61.437,
     "format": "video",
+    "is_live": False,
 }
 
 HTML_REEL = {
@@ -51,6 +53,7 @@ HTML_REEL = {
     "shares": 4,
     "duration_s": 19.96,
     "format": "reel",
+    "is_live": False,
 }
 
 HTML_VIDEO = {
@@ -64,6 +67,7 @@ HTML_VIDEO = {
     "shares": 3000,
     "duration_s": 73.0,
     "format": "video",
+    "is_live": False,
 }
 
 
@@ -159,6 +163,7 @@ def test_flatten_keeps_photo_post_and_share_with_own_message():
         "caption": "Lịch khám sức khỏe đầu năm, mời quý khách đặt hẹn",
         "views": None, "reactions": 40, "comments": None, "shares": 3,
         "duration_s": None, "format": "post",
+        "is_live": False,
     }
     share = gql.flatten(_story(_sample_stories(), "700000000000004"))
     assert share["format"] == "post"
@@ -340,6 +345,7 @@ def test_reels_tab_story_takes_counters_from_deferred_fragments_by_node_id():
         "shares": 16,
         "duration_s": 31.5,
         "format": "reel",
+        "is_live": False,
     }]
 
 
@@ -351,6 +357,7 @@ def test_parse_initial_html_reads_only_data_sjs_blobs():
         "caption": "Thông báo lịch nghỉ lễ của nhà thuốc",
         "views": None, "reactions": 21, "comments": None, "shares": 1,
         "duration_s": None, "format": "post",
+        "is_live": False,
     }, HTML_VIDEO]
 
 
@@ -417,6 +424,7 @@ def test_videos_tab_tiles_become_records_with_play_count_as_views():
         "shares": None,
         "duration_s": pytest.approx(101.471),
         "format": "video",
+        "is_live": False,
     }
 
 
@@ -434,3 +442,35 @@ def test_config_loads_and_every_alternative_is_a_non_empty_path():
     for path in checked:
         assert path, "a path must not be empty"
         assert all(isinstance(key, (str, int)) for key in path)
+
+
+@pytest.mark.parametrize("status,streaming,expected", [
+    (None, False, False), ("", False, False), ("VOD_READY", False, True),
+    ("LIVE", False, True), (None, True, True),
+])
+@pytest.mark.parametrize("reel", [False, True])
+def test_live_status_from_story_and_channel_shapes(status, streaming, expected, reel):
+    url = "https://www.facebook.com/reel/123/" if reel else "https://www.facebook.com/Page/videos/123/"
+    media = {"__typename": "Video", "broadcast_status": status, "is_live_streaming": streaming}
+    story = {"__typename": "Story", "post_id": "123", "permalink_url": url,
+             "attachments": [{"media": media}]}
+    tile = _channel_tile("123", url)
+    video = tile["node"]["channel_tab_thumbnail_renderer"]["video"]
+    video["video_thumbnail_overlays_renderer"]["video"].update(media)
+    for record in (gql.flatten(story), gql.flatten_channel_video(video)):
+        assert record["is_live"] is expected
+        assert record["format"] == ("reel" if reel else "video")
+
+
+def test_live_status_missing_is_false():
+    assert gql.flatten(_video_story())["is_live"] is False
+    assert gql.flatten_channel_video({"id": "123"})["is_live"] is False
+
+
+def test_tile_live_evidence_enriches_existing_story():
+    story = _video_story(post_id="123")
+    tile = _channel_tile("123", "https://www.facebook.com/Page/videos/123/")
+    tile["node"]["channel_tab_thumbnail_renderer"]["video"]["video_thumbnail_overlays_renderer"]["video"]["broadcast_status"] = "VOD_READY"
+    records = gql.parse_graphql_response(json.dumps([story, tile]))
+    assert len(records) == 1
+    assert records[0]["is_live"] is True

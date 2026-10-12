@@ -19,6 +19,7 @@ def harness(monkeypatch, tmp_path):
         rows={"large": [{"video_id": "v1", "url": "https://facebook.test/v1", "views": 100_000,
                          "reactions": 100, "comments": 20, "shares": 40}]},
         errors={}, scans=[], pauses=[], progress=[], exports=[], finished=[],
+        scan_formats=[],
         page_saved=[], video_saved=[], label_cache={}, llm_cache={},
         jev_calls=[], analysis_calls=[], suggestion_calls=[], commentary_calls=[],
         relevant=0.9, jev_error=None, llm_error=None, login_error=None,
@@ -78,6 +79,7 @@ def harness(monkeypatch, tmp_path):
 
         def scan_page(self, url, **kwargs):
             state.scans.append(url)
+            state.scan_formats.append(kwargs["formats"])
             if state.scan_hook:
                 state.scan_hook(url, kwargs["stop_event"])
             if state.scan_stop:
@@ -127,7 +129,7 @@ def harness(monkeypatch, tmp_path):
         state.suggestion_calls.append(video.video_id)
         return ([] if state.reject_suggestions else suggestions), {}, {"total_tokens": 4}
 
-    def commentary(client, model, summary):
+    def commentary(client, model, summary, *args):
         state.commentary_calls.append(deepcopy(summary))
         return "Công thức đang thắng", 5
 
@@ -578,3 +580,35 @@ def test_stop_during_second_page_exports_rows_not_yet_filtered(harness):
     assert [video.video_id for video in h.exports[0][0]] == ["v1", "v2"]
     assert [page["passed"] for page in h.exports[0][2]["pages"]] == [1, 1]
     assert "v2" not in h.jev_calls
+
+
+@pytest.mark.parametrize("formats", ["video_live", "reel_live", "video,reel", "video,reel,video_live,reel_live"])
+def test_cli_accepts_live_kinds(harness, monkeypatch, formats):
+    seen = []
+    monkeypatch.setattr(pipeline, "run", lambda params, settings, progress, stop: seen.append(params) or Path("result.xlsx"))
+    assert pipeline.main(["--formats", formats]) == 0
+    assert seen[0].formats == set(formats.split(","))
+
+
+@pytest.mark.parametrize("formats", ["post,video_live", "live", ""])
+def test_cli_rejects_mixed_posts_or_unknown_kinds(formats):
+    with pytest.raises(SystemExit):
+        pipeline.main(["--formats", formats])
+
+
+def test_pipeline_preserves_collected_live_flag(harness):
+    h = harness
+    h.params.formats = {"video_live"}
+    h.rows["large"][0].update(format="video", is_live=True)
+    assert h.run() is not None
+    assert h.video_saved[0].is_live is True
+    assert h.exports[0][0][0].is_live is True
+    assert h.exports[0][2]["params"]["formats"] == ["video_live"]
+    assert h.scan_formats == [{"video_live"}]
+
+
+def test_cli_defaults_exclude_live(harness, monkeypatch):
+    seen = []
+    monkeypatch.setattr(pipeline, "run", lambda params, settings, progress, stop: seen.append(params) or Path("result.xlsx"))
+    assert pipeline.main([]) == 0
+    assert seen[0].formats == {"video", "reel"}

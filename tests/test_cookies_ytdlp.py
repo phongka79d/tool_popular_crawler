@@ -421,6 +421,27 @@ def test_post_collector_counts_only_posts():
     assert collector.items_seen == 0 and collector.count() == 0
 
 
+@pytest.mark.parametrize("kinds,expected", [
+    ({"video", "reel"}, {"video", "reel"}),
+    ({"video_live"}, {"video_live"}), ({"reel_live"}, {"reel_live"}),
+    ({"video", "video_live", "reel", "reel_live"}, {"video", "video_live", "reel", "reel_live"}),
+])
+def test_collector_filters_live_kinds(kinds, expected):
+    collector = facebook._Collector(kinds, 30, 100)
+    rows = [{"video_id": kind, "format": kind.removesuffix("_live"), "is_live": kind.endswith("_live")}
+            for kind in ("video", "reel", "video_live", "reel_live")]
+    collector.add(rows, "video")
+    assert {row["video_id"] for row in collector.videos()} == expected
+
+
+def test_unrequested_old_live_still_stops_base_video_tab(monkeypatch):
+    monkeypatch.setattr(facebook, "is_older_than", lambda timestamp, days: True)
+    collector = facebook._Collector({"video"}, 30, 100)
+    collector.add([{"video_id": "old-live", "format": "video", "is_live": True, "posted_at": 1}], "video")
+    assert collector.done("video")
+    assert collector.videos() == []
+
+
 # ---------- yt-dlp helpers ----------
 
 def _install_fake_ydl(monkeypatch, info=None, on_download=None) -> dict:
@@ -680,3 +701,27 @@ def test_download_audio_first_seconds_falls_back_to_full_audio(monkeypatch, tmp_
 
     assert out is not None and out.exists()
     assert attempts == ["ranged", "full"]
+
+
+def test_collector_later_live_evidence_removes_default_record():
+    collector = facebook._Collector({"video", "reel"}, 30, 100)
+    record = {"video_id": "123", "format": "video"}
+    collector.add([record], "video")
+    collector.add([{**record, "is_live": True}], "video")
+    collector.add([record], "video")
+    assert collector.videos() == []
+
+
+@pytest.mark.parametrize("kinds,bases", [
+    ({"video_live"}, {"video"}), ({"reel_live"}, {"reel"}),
+    ({"video", "video_live", "reel_live"}, {"video", "reel"}),
+])
+def test_live_kinds_select_each_base_tab_once(monkeypatch, kinds, bases):
+    scanner = facebook.FacebookScanner(settings={"scan": {}})
+    scanner._page = SimpleNamespace(on=lambda *args: None, remove_listener=lambda *args: None)
+    calls = []
+    monkeypatch.setattr(scanner, "_scan_tab", lambda url, fmt, *args: calls.append(fmt) or "hết bài")
+    monkeypatch.setattr(scanner, "_export_cookies", lambda: None)
+    assert scanner.scan_page("https://www.facebook.com/Page", 30, kinds, 100) == []
+    assert set(calls) == bases
+    assert len(calls) == len(bases)

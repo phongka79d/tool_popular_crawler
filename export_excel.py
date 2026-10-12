@@ -11,12 +11,14 @@ from typing import Any, Callable, Collection
 
 from openpyxl import Workbook
 from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
-from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.chart import BarChart, Reference
+from openpyxl.formatting.rule import ColorScaleRule, DataBarRule, FormulaRule
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
 import config
-from models import Video
+from models import KIND_LABELS, Video, video_kind
 from normalize import to_vn_datetime
 
 log = logging.getLogger(__name__)
@@ -39,6 +41,10 @@ _UNCERTAIN_NAMES = {
     "cta": "CTA",
     "relevant": "Liên quan ngành",
     "replicable": "Làm lại được",
+    "cam_xuc_manh": "Cảm xúc mạnh",
+    "gia_tri_thuc_tien": "Giá trị thực tiễn",
+    "ket_thuc_tron_y": "Kết thúc trọn ý",
+    "kha_nang_chia_se": "Khả năng chia sẻ",
 }
 _PARAM_LABELS = {
     "days": "Số ngày quét",
@@ -46,7 +52,6 @@ _PARAM_LABELS = {
     "min_views": "Lượt xem tối thiểu",
     "min_interactions": "Tương tác tối thiểu",
 }
-_FORMAT_LABELS = {"reel": "Reel", "video": "Video", "post": "Bài đăng"}
 
 FMT_INT = "#,##0"
 FMT_DEC1 = "#,##0.0"
@@ -56,10 +61,13 @@ FMT_PCT1 = "0.0%"
 FMT_PCT2 = "0.00%"
 FMT_DATETIME = "dd/mm/yyyy hh:mm"
 
-RISK_FILL = PatternFill(fill_type="solid", start_color="FFF2CC", end_color="FFF2CC")
-HEADER_FILL = PatternFill(fill_type="solid", start_color="D9E1F2", end_color="D9E1F2")
-HEADER_FONT = Font(bold=True)
-TITLE_FONT = Font(bold=True, size=12)
+RISK_FILL = PatternFill("solid", fgColor="FCE4E4")
+HEADER_FILL = PatternFill("solid", fgColor="234E63")
+HEADER_FONT = Font(name="Calibri", bold=True, color="FFFFFF", size=11)
+TITLE_FONT = Font(name="Calibri", bold=True, color="234E63", size=14)
+BODY_FONT = Font(name="Calibri", color="243746", size=11)
+ZEBRA_FILL = PatternFill("solid", fgColor="F3F7FA")
+ROW_BORDER = Border(bottom=Side(style="hair", color="DCE5EB"))
 TOP = Alignment(vertical="top")
 TOP_WRAP = Alignment(vertical="top", wrap_text=True)
 HEADER_ALIGN = Alignment(vertical="center", wrap_text=True)
@@ -154,7 +162,7 @@ COLUMNS: tuple[_Column, ...] = (
     _Column("Kênh", lambda v, _: v.page_name or v.page_url, width=24),
     _Column("Follower kênh", lambda v, _: v.page_followers, FMT_INT),
     _Column("Ngày đăng", lambda v, _: _naive_vn(v.posted_at), FMT_DATETIME, width=17),
-    _Column("Định dạng", lambda v, _: _FORMAT_LABELS.get(v.format, v.format), width=10),
+    _Column("Định dạng", lambda v, _: KIND_LABELS.get(video_kind(v.format, v.is_live), v.format), width=14),
     _Column("Thời lượng (giây)", lambda v, _: v.duration_s, FMT_INT, width=13),
     _Column("Link bài", lambda v, _: v.url, width=40, link=True),
     # Chỉ số
@@ -219,9 +227,21 @@ def export(
     detail = wb.active
     post_run = set((run_log.get("params") or {}).get("formats") or []) == {"post"}
     detail.title = SHEET_POST_DETAIL if post_run else SHEET_DETAIL
-    _write_details(detail, videos)
-    _write_summary(wb.create_sheet(SHEET_SUMMARY), summary or {}, post_run=post_run)
+    _write_details(detail, videos, post_run=post_run)
+    _write_summary(wb.create_sheet(SHEET_SUMMARY), summary or {}, post_run=post_run, moment=moment)
     _write_run_log(wb.create_sheet(SHEET_LOG), run_log or {})
+    for ws, colour in zip(wb.worksheets, ("287D8E", "55A58B", "8295A3")):
+        ws.sheet_properties.tabColor = colour
+        ws.sheet_view.showGridLines = False
+        ws.page_setup.orientation = "landscape"
+        ws.page_setup.paperSize = ws.PAPERSIZE_A3 if ws is detail else ws.PAPERSIZE_A4
+        ws.page_setup.fitToWidth = 1
+        ws.page_setup.fitToHeight = 0
+        ws.sheet_properties.pageSetUpPr.fitToPage = True
+        ws.print_options.horizontalCentered = True
+        if not ws.print_area:
+            ws.print_area = ws.dimensions
+    wb.active = 0
     wb.save(path)
     log.info("Đã xuất Excel: %s (%d %s)", path.name, len(videos), "bài đăng" if post_run else "video")
     return path
@@ -319,28 +339,84 @@ def _put(
     return cell
 
 
-def _write_details(ws: Worksheet, videos: list[Video]) -> None:
+# Bài đăng không có lượt xem, thời lượng hay thoại: ẩn các cột luôn trống này (vẫn giữ để bố cục hai loại file giống nhau).
+_VIDEO_ONLY_HEADERS = frozenset({
+    "Thời lượng (giây)", "View", "View/Follower", "Tỷ lệ tương tác", "Tỷ lệ share", "Nội dung thoại",
+})
+
+
+def _write_details(ws: Worksheet, videos: list[Video], *, post_run: bool = False) -> None:
+    groups = (
+        (1, 7, "Thông tin bài", "DCEAF3"),
+        (8, 16, "Chỉ số", "DDF0E8"),
+        (17, 24, "Nội dung", "EEE7F5"),
+        (25, 34, "Công thức (Jev)", "FFF0D6"),
+        (35, 39, "Gợi ý làm lại", "F8E3DA"),
+    )
+    for first, last, title, colour in groups:
+        ws.merge_cells(start_row=1, start_column=first, end_row=1, end_column=last)
+        for c in range(first, last + 1):
+            ws.cell(1, c).fill = PatternFill("solid", fgColor=colour)
+        cell = _put(ws, 1, first, title, align=HEADER_ALIGN)
+        cell.font = TITLE_FONT
     for c, col in enumerate(COLUMNS, start=1):
-        header = _put(ws, 1, c, col.header, align=HEADER_ALIGN)
+        header = _put(ws, 2, c, col.header, align=HEADER_ALIGN)
         header.font = HEADER_FONT
         header.fill = HEADER_FILL
-        ws.column_dimensions[get_column_letter(c)].width = LONG_WIDTH if col.long else col.width
-    ws.row_dimensions[1].height = 32
+        width = 16 if col.link else LONG_WIDTH if col.long else col.width
+        ws.column_dimensions[get_column_letter(c)].width = width
+        if post_run and col.header in _VIDEO_ONLY_HEADERS:
+            ws.column_dimensions[get_column_letter(c)].hidden = True
+    ws.row_dimensions[1].height = 28
+    ws.row_dimensions[2].height = 44
 
     ordered = sorted(videos, key=_score_order)
-    for r, video in enumerate(ordered, start=2):
-        risky = bool(_risk_flags(video))
+    for r, video in enumerate(ordered, start=3):
+        height = 30.0
         for c, col in enumerate(COLUMNS, start=1):
-            cell = _put(
-                ws, r, c, col.get(video, r - 1), col.fmt, TOP_WRAP if col.long else TOP
-            )
+            wrap = col.long or col.header == "Cờ rủi ro"
+            fmt = FMT_DEC2 if col.header == "Hệ số so trung vị kênh" else col.fmt
+            cell = _put(ws, r, c, col.get(video, r - 2), fmt, TOP_WRAP if wrap else TOP)
+            cell.font = BODY_FONT
+            cell.border = ROW_BORDER
+            if r % 2:
+                cell.fill = ZEBRA_FILL
+            if wrap and isinstance(cell.value, str):
+                height = max(height, _text_height(cell.value, chars_per_line=LONG_WIDTH if col.long else col.width))
             if col.link and isinstance(cell.value, str) and cell.value.startswith("http"):
                 cell.hyperlink = cell.value
-            if risky:
+                cell.hyperlink.display = "Mở bài ↗"
+                # Retain the source URL as the cell value, but show a compact link in Excel.
+                cell.number_format = ';;;"Mở bài ↗"'
+                cell.font = Font(name="Calibri", color="0563C1", underline="single", size=11)
+            if col.header == "Cờ rủi ro" and cell.value:
                 cell.fill = RISK_FILL
+        ws.row_dimensions[r].height = min(90, height)
 
-    ws.freeze_panes = "C2"  # freeze header row, STT and Kênh
-    ws.auto_filter.ref = f"A1:{get_column_letter(len(COLUMNS))}{len(ordered) + 1}"
+    ws.freeze_panes = "C3"
+    ws.auto_filter.ref = f"A2:{get_column_letter(len(COLUMNS))}{len(ordered) + 2}"
+    ws.print_title_rows = "1:2"
+    ws.sheet_view.zoomScale = 85
+    if ordered:
+        end = len(ordered) + 2
+        for c, col in enumerate(COLUMNS, start=1):
+            letter = get_column_letter(c)
+            region = f"{letter}3:{letter}{end}"
+            if col.header.startswith(("Điểm công thức", "Điểm Jev")):
+                ws.conditional_formatting.add(region, DataBarRule(
+                    start_type="num", start_value=0, end_type="num", end_value=100,
+                    color="65B5A2", showValue=True,
+                ))
+            elif col.header.startswith(("Liên quan ngành", "Làm lại được")):
+                ws.conditional_formatting.add(region, ColorScaleRule(
+                    start_type="num", start_value=0, start_color="F5D8D5",
+                    mid_type="num", mid_value=0.5, mid_color="FFF3CE",
+                    end_type="num", end_value=1, end_color="CFEBDD",
+                ))
+            elif col.header == "Cờ rủi ro":
+                ws.conditional_formatting.add(region, FormulaRule(
+                    formula=[f'LEN({letter}3)>0'], fill=RISK_FILL,
+                ))
 
 
 def _write_table(
@@ -354,16 +430,25 @@ def _write_table(
 ) -> int:
     """Write a titled table starting at row `start`. Returns the first free row after a blank line."""
     _put(ws, start, 1, title).font = TITLE_FONT
+    ws.merge_cells(start_row=start, start_column=1, end_row=start, end_column=len(headers))
+    ws.row_dimensions[start].height = 28
     header_row = start + 1
     for c, h in enumerate(headers, start=1):
         cell = _put(ws, header_row, c, h, align=HEADER_ALIGN)
         cell.font = HEADER_FONT
         cell.fill = HEADER_FILL
+    ws.row_dimensions[header_row].height = 34
     for i, values in enumerate(rows, start=1):
         r = header_row + i
         for c, value in enumerate(values, start=1):
             fmt = fmts[c - 1] if fmts else None
-            _put(ws, r, c, value, fmt, TOP_WRAP if c in wrap else TOP)
+            cell = _put(ws, r, c, value, fmt, TOP_WRAP if c in wrap else TOP)
+            cell.font = BODY_FONT
+            cell.border = ROW_BORDER
+            if i % 2:
+                cell.fill = ZEBRA_FILL
+        height = max((_text_height(str(values[c - 1] or ""), 60) for c in wrap), default=24)
+        ws.row_dimensions[r].height = min(90, max(24, height))
     return header_row + len(rows) + 2
 
 
@@ -374,15 +459,53 @@ def _group_values(rows: list[dict] | None) -> list[list[Any]]:
     ]
 
 
-def _write_summary(ws: Worksheet, summary: dict, *, post_run: bool = False) -> None:
+def _write_summary(ws: Worksheet, summary: dict, *, post_run: bool = False, moment: datetime | None = None) -> None:
     for letter, width in zip("ABCD", (34, 14, 18, 24)):
         ws.column_dimensions[letter].width = width
+    ws.column_dimensions["C"].hidden = post_run  # bài đăng không có lượt xem
+    ws.merge_cells("A1:D1")
+    _put(ws, 1, 1, SHEET_SUMMARY).font = Font(name="Calibri", size=20, bold=True, color="234E63")
+    ws.row_dimensions[1].height = 36
+    ws.merge_cells("A2:D2")
+    subtitle = "Bài đăng" if post_run else "Video"
+    if moment is not None:
+        subtitle += f" • {moment:%d/%m/%Y %H:%M} (giờ Việt Nam)"
+    _put(ws, 2, 1, subtitle).font = Font(name="Calibri", size=11, color="607785")
+    ws.row_dimensions[2].height = 24
+    ws.freeze_panes = "B6"
     headers = ["Số bài" if post_run else "Số video", "View trung bình", "Điểm công thức trung bình"]
     fmts = [None, FMT_INT, FMT_INT, FMT_DEC1]
     row = _write_table(
-        ws, 1, "Bảng 1 – Theo nhóm chủ đề", ["Nhóm chủ đề", *headers],
+        ws, 4, "Bảng 1 – Theo nhóm chủ đề", ["Nhóm chủ đề", *headers],
         _group_values(summary.get("by_topic")), fmts,
     )
+    topics = summary.get("by_topic") or []
+    if len(topics) >= 2:
+        chart = BarChart()
+        chart.type = "bar"
+        chart.style = 10
+        chart.title = "Số bài theo nhóm chủ đề" if post_run else "Số video theo nhóm chủ đề"
+        # openpyxl's x axis is the category axis, even for a horizontal bar chart.
+        chart.x_axis.title = "Nhóm chủ đề"
+        chart.y_axis.title = "Số bài" if post_run else "Số video"
+        chart.x_axis.delete = False
+        chart.y_axis.delete = False
+        chart.x_axis.tickLblPos = "nextTo"
+        chart.y_axis.tickLblPos = "nextTo"
+        chart.y_axis.numFmt = "0"
+        chart.y_axis.majorUnit = max(1, math.ceil(max(r.get("count") or 0 for r in topics) / 6))
+        chart.y_axis.scaling.min = 0
+        chart.add_data(Reference(ws, min_col=2, min_row=5, max_row=5 + len(topics)), titles_from_data=True)
+        chart.set_categories(Reference(ws, min_col=1, min_row=6, max_row=5 + len(topics)))
+        chart.series[0].graphicalProperties.solidFill = "55A58B"
+        chart.series[0].graphicalProperties.line.noFill = True
+        chart.legend = None
+        chart.width = 21
+        chart.height = max(8, min(16, len(topics) * 0.7 + 4))
+        ws.add_chart(chart, "F4")
+        ws.column_dimensions["E"].width = 3
+        for letter in "FGHIJKLMNO":
+            ws.column_dimensions[letter].width = 10
     row = _write_table(
         ws, row, "Bảng 2 – Theo kiểu hook", ["Kiểu hook", *headers],
         _group_values(summary.get("by_hook")), fmts,
@@ -392,8 +515,13 @@ def _write_summary(ws: Worksheet, summary: dict, *, post_run: bool = False) -> N
     text = _text(summary.get("commentary")) or "Chưa có nhận xét."
     note_row = row + 1
     ws.merge_cells(start_row=note_row, start_column=1, end_row=note_row, end_column=4)
-    _put(ws, note_row, 1, text, align=TOP_WRAP)
-    ws.row_dimensions[note_row].height = _text_height(text, chars_per_line=80)
+    note = _put(ws, note_row, 1, text, align=TOP_WRAP)
+    note.font = BODY_FONT
+    note.fill = PatternFill("solid", fgColor="E8F2EF")
+    note.border = ROW_BORDER
+    ws.row_dimensions[note_row].height = min(240, _text_height(text, chars_per_line=80))
+    if len(topics) >= 2:
+        ws.print_area = f"A1:O{max(35, note_row + 8)}"
 
 
 def _text_height(text: str, chars_per_line: int) -> float:
@@ -444,7 +572,9 @@ def _write_run_log(ws: Worksheet, run_log: dict) -> None:
     )
     row = _write_table(
         ws, row, "Tham số đã chọn", ["Tham số", "Giá trị"],
-        [[_PARAM_LABELS.get(key, key), value] for key, value in params.items()],
+        [[_PARAM_LABELS.get(key, key),
+          ", ".join(KIND_LABELS.get(kind, kind) for kind in sorted(value)) if key == "formats" else value]
+         for key, value in params.items()],
         wrap={2},
     )
     row = _write_table(
@@ -454,6 +584,11 @@ def _write_run_log(ws: Worksheet, run_log: dict) -> None:
         [None, None, FMT_INT, FMT_INT, FMT_INT, FMT_INT, None, None],
         wrap={7, 8},
     )
+    for r in range(row - len(pages) - 1, row - 1):
+        error = ws.cell(r, 8)
+        if error.value:
+            error.fill = RISK_FILL
+            error.font = Font(name="Calibri", color="9C3030", size=11)
     row = _write_table(
         ws, row, "Sử dụng", ["Token Jev", "Token LLM", "Phút Deepgram"],
         [[usage.get("jev_tokens"), usage.get("llm_tokens"), usage.get("deepgram_minutes")]],
@@ -464,3 +599,4 @@ def _write_run_log(ws: Worksheet, run_log: dict) -> None:
         [[i, message] for i, message in enumerate(messages, start=1)],
         wrap={2},
     )
+    ws.freeze_panes = "B3"
