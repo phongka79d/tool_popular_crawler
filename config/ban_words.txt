@@ -1,0 +1,19 @@
+# Từ và cụm từ cấm trong gợi ý của LLM (ngành dược). Mỗi dòng một cụm, không phân biệt hoa thường.
+# Dòng bắt đầu bằng dấu # là chú thích, bị bỏ qua khi đọc.
+# ĐỘI PHÁP CHẾ PHẢI DUYỆT DANH SÁCH NÀY trước khi dùng cho nội dung thật.
+khỏi hẳn
+chữa khỏi
+khỏi bệnh
+hết bệnh
+dứt điểm
+đặc trị
+trị tận gốc
+đảm bảo khỏi
+cam kết
+100%
+tuyệt đối
+không có tác dụng phụ
+không tác dụng phụ
+tốt nhất
+hiệu quả nhất
+duy nhất

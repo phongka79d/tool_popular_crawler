@@ -1,0 +1,528 @@
+"""Offline tests for collectors/transcript.py. Mọi HTTP, ffmpeg, faster-whisper và DB đều được giả lập."""
+from __future__ import annotations
+
+import subprocess
+import sys
+import types
+from pathlib import Path
+from typing import Any
+
+import pytest
+import requests
+
+from collectors import transcript
+from errors import AuthError, QuotaError, ServiceError
+from models import Video
+
+STT = {
+    "provider": "deepgram",
+    "model": "nova-3",
+    "language": "vi",
+    "keyterms_file": "config/keyterms.txt",
+    "fallback": "local_whisper",
+    "whisper_model": "small",
+}
+
+DG_PAYLOAD = {
+    "metadata": {"duration": 61.5, "language": "vi"},
+    "results": {"channels": [{"alternatives": [{
+        "transcript": "Chủ nhà thuốc cần biết điều này.",
+        "words": [
+            {"word": "chu", "punctuated_word": "Chủ", "start": 0.1, "end": 0.4},
+            {"word": "nha", "punctuated_word": "nhà", "start": 0.4, "end": 0.7},
+            {"word": "", "punctuated_word": " ", "start": 0.7, "end": 0.7},
+            {"word": "thuoc", "punctuated_word": "thuốc", "start": 0.7, "end": 1.1},
+        ],
+    }]}]},
+}
+
+TIMED_WORDS = [
+    {"punctuated_word": "Chủ", "start": 0.2, "end": 0.5},
+    {"punctuated_word": "nhà", "start": 0.8, "end": 1.1},
+    {"punctuated_word": "thuốc", "start": 1.4, "end": 1.8},
+    {"punctuated_word": "cần", "start": 2.2, "end": 2.6},
+    {"punctuated_word": "biết", "start": 2.8, "end": 3.2},
+    {"punctuated_word": "điều", "start": 3.3, "end": 3.6},
+    {"punctuated_word": "này.", "start": 3.9, "end": 4.2},
+]
+TIMED_HOOK = "Chủ nhà thuốc cần biết điều này."
+
+AUTH_MSG = "API key [deepgram] không hợp lệ. Vào Cài đặt để nhập lại."
+QUOTA_MSG = "Tài khoản Deepgram đã hết credit/hạn mức."
+
+
+def w(token: str, start: float) -> dict:
+    return {"punctuated_word": token, "start": start, "end": start + 0.3}
+
+
+class FakeResponse:
+    """Tối thiểu giống requests.Response: status_code, json(), raise_for_status() như thật."""
+
+    def __init__(self, status_code: int, payload: Any = None) -> None:
+        self.status_code = status_code
+        self._payload = payload
+
+    def json(self) -> Any:
+        return self._payload
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise requests.HTTPError(f"{self.status_code} Error", response=self)
+
+
+def _video(**overrides: Any) -> Video:
+    base: dict[str, Any] = {
+        "video_id": "vid1",
+        "url": "https://www.facebook.com/reel/1",
+        "page_url": "https://www.facebook.com/page",
+        "caption": "Cảnh báo sai lầm khi bán thuốc\nDòng hai",
+    }
+    base.update(overrides)
+    return Video(**base)
+
+
+# --- hook_3s ---------------------------------------------------------------
+
+def test_hook_stops_before_3s_then_extends_to_sentence_end():
+    words = [
+        w("Chủ", 0.5), w("nhà", 1.5), w("thuốc", 2.9),   # trong 3 giây đầu, chưa hết câu
+        w("cần", 3.2), w("biết", 3.8), w("điều.", 4.5),  # nối thêm tới dấu kết câu
+        w("Này", 5.0),                                   # câu sau, không được lấy
+    ]
+    assert transcript.hook_3s(words) == "Chủ nhà thuốc cần biết điều."
+
+
+def test_hook_does_not_extend_when_window_already_ends_sentence():
+    words = [w("Sai", 0.0), w("lầm.", 1.0), w("Tiếp", 3.5)]
+    assert transcript.hook_3s(words) == "Sai lầm."
+
+
+def test_word_starting_exactly_at_3s_is_outside_the_window():
+    words = [w("Một", 0.0), w("hai.", 2.0), w("Ba", 3.0)]
+    assert transcript.hook_3s(words) == "Một hai."
+
+
+def test_hook_takes_whole_transcript_when_it_ends_without_sentence_end():
+    words = [w("Chỉ", 0.5), w("một", 1.0), w("câu", 2.0)]
+    assert transcript.hook_3s(words) == "Chỉ một câu"
+
+
+def test_hook_extension_is_capped_when_no_sentence_end_appears():
+    words = [w("a", 0.5), w("b", 1.0)] + [w(f"t{i}", 3.5 + i * 0.1) for i in range(100)]
+    hook = transcript.hook_3s(words)
+    assert hook.split() == ["a", "b"] + [f"t{i}" for i in range(transcript.HOOK_MAX_EXTRA_WORDS)]
+
+
+def test_hook_empty_words_returns_empty_string():
+    assert transcript.hook_3s([]) == ""
+
+
+def test_hook_returns_empty_when_no_word_starts_in_first_3s():
+    assert transcript.hook_3s([w("Xin", 3.5), w("chào.", 4.0)]) == ""
+
+
+# --- first_lines_hook -------------------------------------------------------
+
+def test_first_lines_hook_uses_first_caption_line_cut_to_200_chars():
+    caption = "x" * 250 + "\nDòng hai"
+    assert transcript.first_lines_hook(caption, "lời thoại") == "x" * 200
+
+
+def test_first_lines_hook_strips_blank_leading_space_and_keeps_first_line_only():
+    assert transcript.first_lines_hook("   Dòng một   \nDòng hai", "") == "Dòng một"
+
+
+def test_first_lines_hook_falls_back_to_first_30_transcript_words_without_caption():
+    text = " ".join(f"t{i}" for i in range(40))
+    assert transcript.first_lines_hook("", text) == " ".join(f"t{i}" for i in range(30))
+
+
+def test_first_lines_hook_empty_inputs_return_empty_string():
+    assert transcript.first_lines_hook("", "") == ""
+    assert transcript.first_lines_hook("   \n  ", "") == ""
+
+
+# --- transcribe_deepgram ----------------------------------------------------
+
+def test_transcribe_deepgram_sends_params_keyterms_and_headers_then_parses(tmp_path, monkeypatch):
+    audio = tmp_path / "a.mp3"
+    audio.write_bytes(b"ID3fake-audio")
+    sent: dict[str, Any] = {}
+
+    def fake_post(url: str, **kwargs: Any) -> FakeResponse:
+        sent["url"] = url
+        sent["kwargs"] = kwargs
+        sent["body"] = kwargs["data"].read()
+        return FakeResponse(200, DG_PAYLOAD)
+
+    monkeypatch.setattr(transcript.requests, "post", fake_post)
+    result = transcript.transcribe_deepgram(audio, "secret-key", STT, ["Thông tư 02", "GPP"])
+
+    assert sent["url"] == "https://api.deepgram.com/v1/listen"
+    assert sent["kwargs"]["params"] == [
+        ("model", "nova-3"),
+        ("language", "vi"),
+        ("smart_format", "true"),
+        ("keyterm", "Thông tư 02"),
+        ("keyterm", "GPP"),
+    ]
+    assert sent["kwargs"]["headers"] == {
+        "Authorization": "Token secret-key",
+        "Content-Type": "audio/mpeg",
+    }
+    assert sent["kwargs"]["timeout"] == transcript.DEEPGRAM_TIMEOUT_S
+    assert sent["body"] == b"ID3fake-audio"
+
+    assert result["text"] == "Chủ nhà thuốc cần biết điều này."
+    assert result["duration"] == pytest.approx(61.5)
+    assert result["words"] == [
+        {"punctuated_word": "Chủ", "start": 0.1, "end": 0.4},
+        {"punctuated_word": "nhà", "start": 0.4, "end": 0.7},
+        {"punctuated_word": "thuốc", "start": 0.7, "end": 1.1},
+    ]
+
+
+def test_transcribe_deepgram_401_raises_auth_error_without_retrying(tmp_path, monkeypatch):
+    audio = tmp_path / "a.mp3"
+    audio.write_bytes(b"x")
+    calls: list[str] = []
+
+    def fake_post(url: str, **kwargs: Any) -> FakeResponse:
+        calls.append(url)
+        return FakeResponse(401, {"err_msg": "INVALID_AUTH"})
+
+    monkeypatch.setattr(transcript.requests, "post", fake_post)
+    with pytest.raises(AuthError) as info:
+        transcript.transcribe_deepgram(audio, "bad-key", STT, [])
+    assert info.value.service == "deepgram"
+    assert len(calls) == 1
+
+
+def test_transcribe_deepgram_malformed_response_raises_service_error(tmp_path, monkeypatch):
+    audio = tmp_path / "a.mp3"
+    audio.write_bytes(b"x")
+    monkeypatch.setattr(transcript.requests, "post",
+                        lambda url, **kwargs: FakeResponse(200, {"results": {"channels": []}}))
+    with pytest.raises(ServiceError) as info:
+        transcript.transcribe_deepgram(audio, "k", STT, [])
+    assert info.value.service == "deepgram"
+
+
+# --- check_key --------------------------------------------------------------
+
+def test_check_key_posts_bundled_sample_and_accepts_success(monkeypatch):
+    monkeypatch.setattr(transcript.config, "load_settings", lambda: {"stt": STT})
+    sent: dict[str, Any] = {}
+
+    def fake_post(url: str, **kwargs: Any) -> FakeResponse:
+        sent["body"] = kwargs["data"].read()
+        return FakeResponse(200, {"results": {"channels": [{"alternatives": [
+            {"transcript": "", "words": []}]}]}, "metadata": {"duration": 1.0}})
+
+    monkeypatch.setattr(transcript.requests, "post", fake_post)
+    assert transcript.check_key("good-key") is None
+    assert sent["body"] == transcript.SAMPLE_PATH.read_bytes()
+
+
+def test_check_key_raises_auth_error_on_401(monkeypatch):
+    monkeypatch.setattr(transcript.config, "load_settings", lambda: {"stt": STT})
+    monkeypatch.setattr(transcript.requests, "post", lambda url, **kwargs: FakeResponse(401))
+    with pytest.raises(AuthError):
+        transcript.check_key("bad-key")
+
+
+# --- extract_audio ----------------------------------------------------------
+
+def test_extract_audio_uses_contract_ffmpeg_flags(tmp_path, monkeypatch):
+    src = tmp_path / "raw.mp4"
+    src.write_bytes(b"raw")
+    dst = tmp_path / "out" / "a.mp3"
+    seen: dict[str, Any] = {}
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
+        seen["cmd"] = cmd
+        Path(cmd[-1]).write_bytes(b"ID3")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(transcript, "_ffmpeg_exe", lambda: "C:/tools/ffmpeg.exe")
+    monkeypatch.setattr(transcript.subprocess, "run", fake_run)
+
+    assert transcript.extract_audio(src, dst) == dst
+    cmd = seen["cmd"]
+    assert cmd[0] == "C:/tools/ffmpeg.exe"
+    assert cmd[cmd.index("-i") + 1] == str(src.resolve())
+    vn = cmd.index("-vn")
+    assert cmd[vn:vn + 9] == ["-vn", "-acodec", "libmp3lame", "-ar", "16000",
+                              "-ac", "1", "-b:a", "64k"]
+
+
+def test_extract_audio_returns_none_when_output_is_empty(tmp_path, monkeypatch):
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
+        Path(cmd[-1]).write_bytes(b"")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(transcript, "_ffmpeg_exe", lambda: "ffmpeg")
+    monkeypatch.setattr(transcript.subprocess, "run", fake_run)
+    assert transcript.extract_audio(tmp_path / "raw.mp4", tmp_path / "a.mp3") is None
+
+
+def test_extract_audio_returns_none_on_ffmpeg_error(tmp_path, monkeypatch):
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(cmd, 1, "", "Invalid data found")
+
+    monkeypatch.setattr(transcript, "_ffmpeg_exe", lambda: "ffmpeg")
+    monkeypatch.setattr(transcript.subprocess, "run", fake_run)
+    assert transcript.extract_audio(tmp_path / "raw.mp4", tmp_path / "a.mp3") is None
+
+
+# --- transcribe_local -------------------------------------------------------
+
+@pytest.fixture
+def fresh_whisper_cache():
+    transcript._load_whisper.cache_clear()
+    yield
+    transcript._load_whisper.cache_clear()
+
+
+def test_transcribe_local_uses_cpu_int8_vi_word_timestamps(monkeypatch, fresh_whisper_cache):
+    created: dict[str, Any] = {}
+
+    class FakeWord:
+        def __init__(self, word: str, start: float, end: float) -> None:
+            self.word, self.start, self.end = word, start, end
+
+    class FakeSegment:
+        def __init__(self, text: str, words: list[FakeWord] | None) -> None:
+            self.text, self.words = text, words
+
+    class FakeInfo:
+        duration = 4.2
+
+    class FakeWhisperModel:
+        def __init__(self, size: str, device: str, compute_type: str) -> None:
+            created["init"] = (size, device, compute_type)
+
+        def transcribe(self, path: str, language: str, word_timestamps: bool):
+            created["call"] = (path, language, word_timestamps)
+            segments = [
+                FakeSegment(" Chủ nhà thuốc.", [FakeWord(" Chủ", 0.1, 0.4),
+                                                 FakeWord(" nhà", 0.4, 0.7),
+                                                 FakeWord(" thuốc.", 0.7, 1.2)]),
+                FakeSegment("   ", None),
+            ]
+            return iter(segments), FakeInfo()
+
+    fake_module = types.ModuleType("faster_whisper")
+    fake_module.WhisperModel = FakeWhisperModel  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake_module)
+
+    result = transcript.transcribe_local(Path("a.mp3"), "small")
+
+    assert created["init"] == ("small", "cpu", "int8")
+    assert created["call"] == ("a.mp3", "vi", True)
+    assert result == {
+        "text": "Chủ nhà thuốc.",
+        "duration": 4.2,
+        "words": [
+            {"punctuated_word": "Chủ", "start": 0.1, "end": 0.4},
+            {"punctuated_word": "nhà", "start": 0.4, "end": 0.7},
+            {"punctuated_word": "thuốc.", "start": 0.7, "end": 1.2},
+        ],
+    }
+
+
+# --- get_transcript ---------------------------------------------------------
+
+class Env:
+    """Ghi lại các lời gọi của các phụ thuộc đã được giả lập trong get_transcript."""
+
+    def __init__(self) -> None:
+        self.cached: tuple[str, str] | None = None
+        self.stored: Video | None = None
+        self.saved: list[tuple[str, str, str, str]] = []
+        self.download_ok = True
+        self.extract_ok = True
+        self.downloads = 0
+        self.raw_path: Path | None = None
+        self.audio_path: Path | None = None
+        self.dg_calls: list[tuple[Path, str, dict, list[str]]] = []
+        self.deepgram: Any = None
+        self.local_calls: list[tuple[Path, str]] = []
+        self.local: Any = None
+
+
+@pytest.fixture
+def env(monkeypatch) -> Env:
+    e = Env()
+
+    def fake_download(url: str, out_dir: Path) -> Path | None:
+        e.downloads += 1
+        if not e.download_ok:
+            return None
+        e.raw_path = Path(out_dir) / "raw.m4a"
+        e.raw_path.write_bytes(b"raw")
+        return e.raw_path
+
+    def fake_extract(src: Path, dst: Path) -> Path | None:
+        if not e.extract_ok:
+            return None
+        e.audio_path = Path(dst)
+        e.audio_path.write_bytes(b"ID3")
+        return e.audio_path
+
+    def fake_deepgram(path: Path, api_key: str, stt: dict, keyterms: list[str]) -> Any:
+        e.dg_calls.append((Path(path), api_key, dict(stt), list(keyterms)))
+        if isinstance(e.deepgram, BaseException):
+            raise e.deepgram
+        return e.deepgram
+
+    def fake_local(path: Path, model_size: str) -> Any:
+        e.local_calls.append((Path(path), model_size))
+        if isinstance(e.local, BaseException):
+            raise e.local
+        return e.local
+
+    monkeypatch.setattr(transcript.db, "get_transcript", lambda video_id: e.cached)
+    monkeypatch.setattr(transcript.db, "get_video", lambda video_id: e.stored)
+    monkeypatch.setattr(transcript.db, "save_transcript",
+                        lambda video_id, text, status, hook: e.saved.append((video_id, text, status, hook)))
+    monkeypatch.setattr(transcript, "download_audio", fake_download)
+    monkeypatch.setattr(transcript, "extract_audio", fake_extract)
+    monkeypatch.setattr(transcript, "transcribe_deepgram", fake_deepgram)
+    monkeypatch.setattr(transcript, "transcribe_local", fake_local)
+    return e
+
+
+def test_deepgram_success_saves_ok_bills_minutes_and_removes_temp_audio(env, tmp_path):
+    env.deepgram = {"text": TIMED_HOOK, "duration": 90.0, "words": TIMED_WORDS}
+    video = _video()
+
+    minutes = transcript.get_transcript(video, "dg-key", STT, ["GPP"], tmp_path / "tmp")
+
+    assert minutes == pytest.approx(1.5)
+    assert env.dg_calls == [(env.audio_path, "dg-key", STT, ["GPP"])]
+    assert env.local_calls == []
+    assert video.transcript == TIMED_HOOK
+    assert video.transcript_status == "ok"
+    assert video.hook == TIMED_HOOK
+    assert video.notes == []
+    assert env.saved == [("vid1", TIMED_HOOK, "ok", TIMED_HOOK)]
+    assert not env.audio_path.exists()
+    assert not env.raw_path.exists()
+
+
+@pytest.mark.parametrize("error", [AuthError("deepgram", AUTH_MSG), QuotaError("deepgram", QUOTA_MSG)])
+def test_auth_or_quota_error_falls_back_to_local_whisper(env, tmp_path, error):
+    env.deepgram = error
+    env.local = {"text": "Chủ nhà thuốc.", "duration": 4.0, "words": TIMED_WORDS}
+    video = _video()
+
+    minutes = transcript.get_transcript(video, "dg-key", STT, [], tmp_path / "tmp")
+
+    assert minutes == 0.0
+    assert env.local_calls == [(env.audio_path, "small")]
+    assert video.transcript == "Chủ nhà thuốc."
+    assert video.transcript_status == "ok"
+    assert video.hook == TIMED_HOOK
+    assert video.notes == []
+    assert env.saved == [("vid1", "Chủ nhà thuốc.", "ok", TIMED_HOOK)]
+    assert not env.audio_path.exists()
+    assert not env.raw_path.exists()
+
+
+def test_auth_error_without_fallback_marks_failed_with_note(env, tmp_path):
+    env.deepgram = AuthError("deepgram", AUTH_MSG)
+    stt = {**STT, "fallback": "none"}
+    video = _video()
+
+    minutes = transcript.get_transcript(video, "dg-key", stt, [], tmp_path / "tmp")
+
+    assert minutes == 0.0
+    assert env.local_calls == []
+    assert video.transcript == ""
+    assert video.transcript_status == "failed"
+    assert video.notes == ["Chưa lấy được thoại"]
+    expected_hook = "Cảnh báo sai lầm khi bán thuốc"
+    assert video.hook == expected_hook
+    assert env.saved == [("vid1", "", "failed", expected_hook)]
+
+
+def test_local_whisper_failure_marks_failed_without_raising(env, tmp_path):
+    env.deepgram = QuotaError("deepgram", QUOTA_MSG)
+    env.local = RuntimeError("không tải được model")
+    video = _video()
+
+    minutes = transcript.get_transcript(video, "dg-key", STT, [], tmp_path / "tmp")
+
+    assert minutes == 0.0
+    assert video.transcript_status == "failed"
+    assert video.notes == ["Chưa lấy được thoại"]
+    assert env.saved[0][2] == "failed"
+
+
+def test_empty_transcript_is_no_speech_and_still_bills_deepgram_minutes(env, tmp_path):
+    env.deepgram = {"text": "", "duration": 12.0, "words": []}
+    video = _video()
+
+    minutes = transcript.get_transcript(video, "dg-key", STT, [], tmp_path / "tmp")
+
+    assert minutes == pytest.approx(0.2)
+    assert video.transcript == ""
+    assert video.transcript_status == "no_speech"
+    assert video.notes == ["Không có thoại"]
+    expected_hook = "Cảnh báo sai lầm khi bán thuốc"
+    assert video.hook == expected_hook
+    assert env.saved == [("vid1", "", "no_speech", expected_hook)]
+
+
+def test_download_failure_marks_failed_and_skips_deepgram(env, tmp_path):
+    env.download_ok = False
+    video = _video()
+
+    minutes = transcript.get_transcript(video, "dg-key", STT, [], tmp_path / "tmp")
+
+    assert minutes == 0.0
+    assert env.dg_calls == []
+    assert video.transcript_status == "failed"
+    assert video.notes == ["Chưa lấy được thoại"]
+
+
+def test_cached_ok_transcript_skips_download_and_reuses_stored_hook(env, tmp_path):
+    env.cached = ("Chủ nhà thuốc.", "ok")
+    env.stored = Video(video_id="vid1", url="", page_url="", hook="Hook đã lưu")
+    video = _video()
+
+    minutes = transcript.get_transcript(video, "dg-key", STT, [], tmp_path / "tmp")
+
+    assert minutes == 0.0
+    assert env.downloads == 0
+    assert env.dg_calls == []
+    assert env.saved == []
+    assert video.transcript == "Chủ nhà thuốc."
+    assert video.transcript_status == "ok"
+    assert video.hook == "Hook đã lưu"
+
+
+def test_cached_no_speech_adds_note_and_falls_back_to_caption_hook(env, tmp_path):
+    env.cached = ("", "no_speech")
+    video = _video()
+
+    transcript.get_transcript(video, "dg-key", STT, [], tmp_path / "tmp")
+
+    assert env.downloads == 0
+    assert video.transcript_status == "no_speech"
+    assert video.notes == ["Không có thoại"]
+    assert video.hook == "Cảnh báo sai lầm khi bán thuốc"
+
+
+def test_cached_failed_transcript_is_retried(env, tmp_path):
+    env.cached = ("", "failed")
+    env.deepgram = {"text": "Chủ nhà.", "duration": 6.0, "words": []}
+    video = _video()
+
+    minutes = transcript.get_transcript(video, "dg-key", STT, [], tmp_path / "tmp")
+
+    assert env.downloads == 1
+    assert minutes == pytest.approx(0.1)
+    assert video.transcript_status == "ok"
+    assert env.saved[0][2] == "ok"

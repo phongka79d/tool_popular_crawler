@@ -1,0 +1,34 @@
+# Thuật ngữ dược gửi kèm khi chuyển thoại (tham số keyterm của Deepgram), mỗi dòng một thuật ngữ.
+# Gồm GPP, thông tư, hoạt chất thường gặp và tên nhóm thuốc. Dòng bắt đầu bằng # là chú thích.
+GPP
+Thực hành tốt nhà thuốc
+thông tư
+Bộ Y tế
+Cục Quản lý Dược
+dược sĩ
+nhà thuốc
+thuốc kê đơn
+thuốc không kê đơn
+hoạt chất
+paracetamol
+ibuprofen
+amoxicillin
+azithromycin
+cefixim
+omeprazol
+esomeprazol
+loratadin
+cetirizin
+dexamethason
+metformin
+amlodipin
+losartan
+atorvastatin
+salbutamol
+vitamin C
+vitamin D3
+kháng sinh
+kháng viêm
+giảm đau hạ sốt
+kháng histamin
+thực phẩm chức năng
