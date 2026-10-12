@@ -1,0 +1,14 @@
+{
+  "page": {
+    "name": "h1",
+    "followers_text": "span:has-text('người theo dõi'), a:has-text('người theo dõi')",
+    "followers_pattern": "(\\d[\\d.,]*(?:\\s*(?:[KkMm]|N|Tr|nghìn|triệu)\\b)?)\\s*(?:người theo dõi|followers)"
+  },
+  "tabs": {
+    "reel": "reels",
+    "video": "videos"
+  },
+  "login": {
+    "blocked_path_prefixes": ["/checkpoint", "/login"]
+  }
+}

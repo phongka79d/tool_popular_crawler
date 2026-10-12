@@ -229,3 +229,4 @@ tests/fixtures/live/
 # Locally installed agent skills (restore via skills-lock.json)
 .agents/
 .claude/
+!VideoCongThuc.spec
