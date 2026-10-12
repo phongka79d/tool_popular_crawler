@@ -183,6 +183,15 @@ def test_post_run_skips_metadata_transcript_and_deepgram(harness, monkeypatch):
     assert any("bài đăng" in progress.message.lower() for progress in h.progress)
 
 
+def test_picture_only_post_is_skipped_unless_images_are_read(harness):
+    h = harness
+    h.params = pipeline.RunParams(14, {"post"})
+    h.rows["large"][0].update(format="post", views=None, caption="Có chữ")
+    h.rows["large"].append(dict(h.rows["large"][0], video_id="pic", caption="", image_urls=["u"]))
+    assert h.run() is not None
+    assert [post.video_id for post in h.exports[0][0]] == ["v1"]
+
+
 def test_group_link_is_skipped_without_opening_or_pausing(harness, monkeypatch):
     h = harness
     group = "https://www.facebook.com/groups/123"
@@ -612,3 +621,31 @@ def test_cli_defaults_exclude_live(harness, monkeypatch):
     monkeypatch.setattr(pipeline, "run", lambda params, settings, progress, stop: seen.append(params) or Path("result.xlsx"))
     assert pipeline.main([]) == 0
     assert seen[0].formats == {"video", "reel"}
+
+
+def test_post_images_unsupported_model_stops_before_scanning(harness, monkeypatch):
+    h = harness
+    h.params = pipeline.RunParams(14, {"post"})
+    h.settings["scan"]["read_images"] = True
+    monkeypatch.setattr(pipeline.llm_client, "check_vision", lambda *args: False)
+    monkeypatch.setattr(pipeline.config, "save_settings", lambda settings: None)
+    assert h.run() is None
+    assert h.scans == []
+    assert any("không nhận ảnh" in p.message for p in h.progress)
+
+
+def test_post_images_cached_description_avoids_reading_and_text_analysis_cache(harness, monkeypatch):
+    h = harness
+    h.params = pipeline.RunParams(14, {"post"})
+    h.settings["scan"]["read_images"] = True
+    llm = h.settings["llm"]
+    llm["vision"] = {"base_url": llm["base_url"], "model": llm["model"], "ok": True}
+    h.rows["large"][0].update(format="post", caption="Caption", image_urls=["image"])
+    h.llm_cache["v1"] = {"chu_de_bai": "text-only stale"}
+    monkeypatch.setattr(pipeline.db, "get_transcript", lambda ident: ("Image words", "images"))
+    monkeypatch.setattr(pipeline, "download_images", lambda urls: pytest.fail("cached images downloaded"))
+    assert h.run() is not None
+    post = h.exports[0][0][0]
+    assert post.transcript == "Image words"
+    assert post.transcript_status == "images"
+    assert h.analysis_calls == ["v1"]

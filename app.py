@@ -665,6 +665,51 @@ def _facebook_section(fb_ready: bool, locked: bool) -> None:
                 _import_cookie_file(uploaded)
 
 
+def _taxonomy_section(locked: bool) -> None:
+    with st.expander("Nhãn phân loại (Jev)"):
+        st.caption("Sửa tên và mô tả, thêm dòng cuối bảng hoặc chọn dòng để xóa. Mỗi nhóm cần ít nhất 2 nhãn.")
+        st.caption("Thay đổi nhãn khiến Jev phân loại lại nội dung ở lần quét tiếp theo, phát sinh một khoản phí Jev nhỏ.")
+        taxonomy = config.load_taxonomy()
+        revision = st.session_state.get("taxonomy_revision", 0)
+        groups = {}
+        with st.form(f"taxonomy_form_{revision}", border=False):
+            for group, title in config.TAXONOMY_GROUPS.items():
+                st.markdown(f"**{title}**")
+                groups[group] = st.data_editor(
+                    config.taxonomy_rows(taxonomy, group),
+                    column_config={
+                        "code": None,
+                        "name": st.column_config.TextColumn("Tên hiển thị"),
+                        "description": st.column_config.TextColumn("Mô tả cho Jev (càng rõ càng tốt, nên có ví dụ)", width="large"),
+                    },
+                    column_order=["name", "description"], hide_index=True,
+                    num_rows="dynamic", disabled=locked, width="stretch",
+                    key=f"taxonomy_{group}_{revision}",
+                )
+                fixed = [taxonomy["labels"][code] for code in ("khong_co", "khac") if code in taxonomy[group]]
+                st.caption("Nhãn luôn được giữ (không chỉnh sửa): " + ", ".join(fixed))
+            saved = st.form_submit_button("Lưu nhãn", type="primary", disabled=locked)
+        if saved:
+            try:
+                config.save_taxonomy(groups)
+            except (ValueError, OSError) as exc:
+                st.error(str(exc))
+            else:
+                st.session_state.taxonomy_revision = revision + 1
+                st.session_state.notice = "Đã lưu nhãn phân loại Jev."
+                st.rerun()
+        confirmed = st.checkbox("Tôi xác nhận khôi phục nhãn mặc định", disabled=locked, key=f"taxonomy_reset_{revision}")
+        if st.button("Khôi phục nhãn mặc định", disabled=locked or not confirmed):
+            try:
+                config.reset_taxonomy()
+            except OSError as exc:
+                st.error(str(exc))
+            else:
+                st.session_state.taxonomy_revision = revision + 1
+                st.session_state.notice = "Đã khôi phục nhãn mặc định."
+                st.rerun()
+
+
 def _settings_page(settings: dict, guide: _Guide) -> None:
     locked = _busy()
     st.caption("🔒 Key chỉ được lưu trong Windows Credential Manager, không ghi ra file.")
@@ -678,6 +723,7 @@ def _settings_page(settings: dict, guide: _Guide) -> None:
     st.subheader("2 · Kênh & Facebook")
     _channels_section(locked)
     _facebook_section(guide.fb_ready, locked)
+    _taxonomy_section(locked)
     with st.expander("⚠️ Đặt lại cấu hình"):
         st.caption("Xóa 3 API key, khôi phục settings.json mặc định và xóa danh sách kênh. Không xóa Excel, cache hay phiên Facebook.")
         confirmed = st.checkbox("Tôi xác nhận đặt lại toàn bộ cấu hình trên", key="confirm_reset", disabled=locked)
@@ -751,6 +797,31 @@ def _scan_options(settings: dict, locked: bool) -> pipeline.RunParams:
             }
             if not formats:
                 st.caption("Chọn ít nhất một loại video để quét.")
+        else:
+            previous = settings["scan"].get("read_images", False)
+            enabled = st.checkbox(
+                "Đọc nội dung ảnh trong bài (AI đọc ảnh)", value=previous, disabled=locked,
+                help="Tốn thêm khoảng 1.500–2.000 token/ảnh, tối đa 4 ảnh/bài.")
+            if enabled and not locked:
+                llm = settings["llm"]
+                ok = llm_client.vision_cached(llm)
+                if ok is None:
+                    try:
+                        with st.spinner("Đang kiểm tra model LLM đọc ảnh…"):
+                            ok = llm_client.check_vision(llm["base_url"], keys.get_key("llm"), llm["model"])
+                        llm["vision"] = {"base_url": llm["base_url"], "model": llm["model"], "ok": ok}
+                        config.save_settings(settings)
+                    except Exception as exc:
+                        st.error(_error_message(exc))
+                        enabled = False
+                if ok is False:
+                    st.error(llm_client.vision_error(llm["model"]))
+                    enabled = False
+                elif ok is True:
+                    st.success("Model LLM hỗ trợ đọc ảnh.")
+            if not locked and enabled != previous:
+                settings["scan"]["read_images"] = enabled
+                config.save_settings(settings)
     with right, st.container(border=True):
         if scan_kind == "Bài đăng":
             minimum = int(st.number_input(

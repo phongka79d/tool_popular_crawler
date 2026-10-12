@@ -4,6 +4,9 @@ LLM chỉ viết chữ. Nhãn Jev đã gắn được đưa vào prompt làm khu
 """
 from __future__ import annotations
 
+import base64
+import io
+import secrets
 import json
 import logging
 import re
@@ -11,6 +14,7 @@ import unicodedata
 from typing import Any
 
 from openai import OpenAI
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from errors import AuthError, NetworkError, QuotaError, ServiceError
 from models import Video
@@ -48,9 +52,9 @@ Trả về JSON đúng các khóa:
  "goi_y_nhan_ban": [{"hook_moi": "", "y_tuong": ""}, ... đúng 3 mục]}"""
 
 POST_SYSTEM_PROMPT = """Bạn là biên tập viên content cho page B2B ngành dược (khách: chủ nhà thuốc, dược sĩ).
-Đầu vào là bài đăng chữ/ảnh: chỉ dùng caption và các nhãn Jev (chủ đề, kiểu hook, cấu trúc, CTA).
+Đầu vào là bài đăng chữ/ảnh: dùng caption, nội dung ảnh đã đọc (nếu có) và các nhãn Jev (chủ đề, kiểu hook, cấu trúc, CTA).
 Giữ nguyên nhãn. Viết tiếng Việt tự nhiên; không khẳng định tuyệt đối, so sánh đối thủ hoặc chép nguyên câu bài gốc.
-Không bịa nội dung, số liệu, lời chứng thực hay chi tiết trong ảnh không được mô tả trong caption.
+Không bịa nội dung, số liệu, lời chứng thực hay chi tiết trong ảnh không có trong đầu vào.
 Thiếu dữ liệu cho khóa nào thì ghi "không có dữ liệu". Hook gốc là dòng đầu tiên của caption.
 Lý do viral chỉ là giả thuyết dựa trên cách viết, không phải kết luận nhân quả.
 Trả về JSON đúng các khóa:
@@ -83,6 +87,70 @@ _SUGGESTION_FIELDS = ("hook_moi", "y_tuong")
 def make_client(base_url: str, api_key: str) -> OpenAI:
     """Client OpenAI trỏ tới endpoint của người dùng. Tắt retry của SDK để retry.with_retry quản lý."""
     return OpenAI(base_url=base_url, api_key=api_key, max_retries=0, timeout=REQUEST_TIMEOUT_S)
+
+def vision_cached(llm: dict) -> bool | None:
+    cache = llm.get("vision", {})
+    if cache.get("base_url") == llm.get("base_url") and cache.get("model") == llm.get("model"):
+        return cache.get("ok") if isinstance(cache.get("ok"), bool) else None
+    return None
+
+
+def vision_error(model: str) -> str:
+    return (f"Model LLM hiện tại ({model}) không nhận ảnh nên không dùng được tuỳ chọn này. "
+            "Đổi sang model hỗ trợ ảnh ở Cài đặt.")
+
+
+def _image_part(data: bytes, mime: str) -> dict:
+    encoded = base64.b64encode(data).decode("ascii")
+    return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{encoded}"}}
+
+
+def check_vision(base_url: str, api_key: str, model: str) -> bool:
+    """Probe actual image reading without exposing the random answer in the prompt."""
+    number = str(secrets.randbelow(9000) + 1000)
+    image = Image.new("RGB", (420, 140), "white")
+    draw = ImageDraw.Draw(image)
+    font = ImageFont.load_default(size=36)
+    draw.text((20, 15), "Đọc số trong ảnh", fill="black", font=font)
+    draw.text((20, 70), number, fill="black", font=font)
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    messages = [{"role": "user", "content": [
+        {"type": "text", "text": "Đọc và trả lại đúng số có bốn chữ số trong ảnh."},
+        _image_part(buffer.getvalue(), "image/png"),
+    ]}]
+    try:
+        answer, _, _ = _chat(make_client(base_url, api_key), model, messages, None, False,
+                             reasoning_effort({}))
+    except (AuthError, QuotaError, NetworkError):
+        raise
+    except Exception as exc:
+        status = getattr(exc, "status_code", None) or getattr(getattr(exc, "response", None), "status_code", None)
+        if status == 400 or any(word in str(exc).lower() for word in ("unsupported content", "image input", "vision not supported")):
+            return False
+        raise
+    return re.search(rf"(?<!\d){number}(?!\d)", answer) is not None
+
+
+def describe_images(client: OpenAI, model: str, images: list[bytes], caption: str,
+                    reasoning_effort: str | None) -> str:
+    """Read all post images in one request; never invent illegible image text."""
+    content = [{"type": "text", "text": (
+        "Đọc các ảnh theo thứ tự. Với từng ảnh, chép nguyên văn toàn bộ chữ nhìn thấy; "
+        "chữ không đọc rõ thì ghi không đọc rõ, không đoán. Sau đó mô tả ngắn bố cục "
+        "và điểm thu hút thị giác (visual hook). Trả văn bản thuần tiếng Việt.\n"
+        f"Caption để tham khảo (không coi là chữ trong ảnh):\n{caption}"
+    )}]
+    for data in images:
+        with Image.open(io.BytesIO(data)) as source:
+            image = ImageOps.exif_transpose(source).convert("RGB")
+            image.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+            buffer = io.BytesIO()
+            image.save(buffer, format="JPEG", quality=85)
+        content.append(_image_part(buffer.getvalue(), "image/jpeg"))
+    text, _, _ = _chat(client, model, [{"role": "user", "content": content}], None, False, reasoning_effort)
+    return text
+
 
 
 def check_key(base_url: str, api_key: str, model: str) -> None:
@@ -263,10 +331,12 @@ def _user_prompt(video: Video, labels: dict) -> str:
         caption = video.caption or ""
         hook = caption.splitlines()[0] if caption else "(không có)"
         content = (
-            f"Bài đăng chữ/ảnh, chỉ phân tích caption:\n{caption or '(không có)'}\n\n"
+            f"Bài đăng chữ/ảnh, caption:\n{caption or '(không có)'}\n\n"
             f"Hook (dòng đầu caption):\n{hook}\n\n"
             "Xác định vị trí CTA trong bài đăng; gợi ý là ý tưởng bài đăng mới.\n\n"
         )
+        if video.transcript_status == "images" and video.transcript:
+            content += f"Nội dung ảnh đã đọc:\n{video.transcript}\n\n"
     else:
         content = (
             f"Caption:\n{video.caption or '(không có)'}\n\n"

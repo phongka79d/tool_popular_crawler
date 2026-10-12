@@ -8,7 +8,7 @@ $Dist = Join-Path $Root 'dist'
 $Package = Join-Path $Dist 'VideoCongThuc'
 $Archive = Join-Path $Dist 'VideoCongThuc.zip'
 $Templates = @(
-    'settings.json', 'channels.txt', 'taxonomy.json', 'selectors.json',
+    'settings.json', 'channels.txt', 'taxonomy.json', 'taxonomy.default.json', 'selectors.json',
     'graphql_paths.json', 'keyterms.txt', 'ban_words.txt'
 )
 $Documents = @('THIRD_PARTY_NOTICES.txt', 'HUONG-DAN.md')

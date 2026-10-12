@@ -28,7 +28,7 @@ class ScanUI:
     def radio(self, label, options, **kwargs):
         return self.scan_kind if label == "Loại quét" else "14"
 
-    def checkbox(self, label, *, value, key, disabled):
+    def checkbox(self, label, *, value, disabled, key="", **kwargs):
         self.labels.append((label, value, disabled))
         return value if self.selected is None else key.removeprefix("scan_kind_") in self.selected
 
@@ -60,7 +60,7 @@ def test_saved_live_choices_and_post_mode(monkeypatch):
     ui = ScanUI(scan_kind="Bài đăng")
     monkeypatch.setattr(app, "st", ui)
     assert app._scan_options(settings, False).formats == {"post"}
-    assert not ui.labels
+    assert settings["scan"].get("read_images", False) is False
 
 
 def test_empty_choice_disables_start_and_explains(monkeypatch):

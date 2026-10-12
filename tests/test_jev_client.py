@@ -111,6 +111,11 @@ class FakeClient:
 
 
 class FakeDb:
+    @staticmethod
+    def analysis_cache_key(video):
+        import db
+        return db.analysis_cache_key(video)
+
     def __init__(self):
         self.rows: dict[tuple[str, str, str], dict] = {}
         self.saved: list[tuple] = []
@@ -338,7 +343,7 @@ def test_ask_labels_miss_calls_once_saves_and_returns_raw(fake_db, raw, monkeypa
     assert services == ["jev"]
     assert answers == raw
     assert usage == {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120}
-    assert fake_db.saved == [("vid1", "jev-1.13", jev_client.LABELS_KIND, raw, usage)]
+    assert fake_db.saved == [("vid1", jev_client.labels_cache_model("jev-1.13", TAXONOMY), jev_client.LABELS_KIND, raw, usage)]
 
 
 def test_ask_labels_none_usage_counts_as_zero(fake_db, raw):
@@ -348,7 +353,7 @@ def test_ask_labels_none_usage_counts_as_zero(fake_db, raw):
 
 
 def test_ask_labels_cache_hit_makes_no_call(fake_db, raw):
-    fake_db.rows[("vid1", "jev-1.13", jev_client.LABELS_KIND)] = raw
+    fake_db.rows[("vid1", jev_client.labels_cache_model("jev-1.13", TAXONOMY), jev_client.LABELS_KIND)] = raw
     client = FakeClient(sdk_response(raw))
     answers, usage = jev_client.ask_labels(client, make_video(), TAXONOMY, SETTINGS)
     assert client.calls == []
@@ -358,13 +363,13 @@ def test_ask_labels_cache_hit_makes_no_call(fake_db, raw):
 
 
 def test_ask_labels_cache_is_keyed_by_model(fake_db, raw):
-    fake_db.rows[("vid1", "jev-1.13", jev_client.LABELS_KIND)] = raw
+    fake_db.rows[("vid1", jev_client.labels_cache_model("jev-1.13", TAXONOMY), jev_client.LABELS_KIND)] = raw
     other = {**SETTINGS, "jev": {**SETTINGS["jev"], "model": "jev-2"}}
     client = FakeClient(sdk_response(raw))
     jev_client.ask_labels(client, make_video(), TAXONOMY, other)
     assert len(client.calls) == 1
     assert client.calls[0]["model"] == "jev-2"
-    assert fake_db.saved[0][1:3] == ("jev-2", jev_client.LABELS_KIND)
+    assert fake_db.saved[0][1:3] == (jev_client.labels_cache_model("jev-2", TAXONOMY), jev_client.LABELS_KIND)
 
 
 def test_ask_labels_missing_answer_raises_and_does_not_cache(fake_db, raw):
@@ -390,6 +395,32 @@ def test_ask_labels_post_uses_caption_only_and_interprets_every_answer(fake_db, 
     assert "transcript" not in call["state"]
     assert set(call["questions"]) == set(answers)
     assert "jev_viral" in jev_client.interpret_labels(answers, SETTINGS, TAXONOMY)
+
+
+def test_changed_criteria_misses_label_cache(fake_db, raw):
+    changed = {**TAXONOMY, "topic": {**TAXONOMY["topic"], "moi": "Một chủ đề mới"}}
+    client = FakeClient(sdk_response(raw))
+    jev_client.ask_labels(client, make_video(), TAXONOMY, SETTINGS)
+    jev_client.ask_labels(client, make_video(), TAXONOMY, SETTINGS)
+    jev_client.ask_labels(client, make_video(), changed, SETTINGS)
+    assert len(client.calls) == 2
+    assert fake_db.saved[0][1] != fake_db.saved[1][1]
+
+
+def test_taxonomy_cache_hash_is_stable_and_ignores_display_names():
+    reordered = {key: dict(reversed(list(value.items()))) for key, value in TAXONOMY.items()}
+    renamed = {**TAXONOMY, "labels": {**TAXONOMY["labels"], "cau_hoi": "Tên mới"}}
+    key = jev_client.labels_cache_model("jev-1.13", TAXONOMY)
+    assert jev_client.labels_cache_model("jev-1.13", reordered) == key
+    assert jev_client.labels_cache_model("jev-1.13", renamed) == key
+
+
+def test_user_added_code_displays_custom_name(raw):
+    taxonomy = {**TAXONOMY, "labels": {**TAXONOMY["labels"], "duoc_lieu": "Dược liệu"}}
+    raw["topic"] = _choice("duoc_lieu")
+    labels = jev_client.interpret_labels(raw, SETTINGS, taxonomy)
+    assert labels["topic"] == "Dược liệu"
+    assert labels["topic_code"] == "duoc_lieu"
 
 
 # --- check_suggestions ---------------------------------------------------------

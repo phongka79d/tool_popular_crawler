@@ -80,6 +80,9 @@ class GraphqlPaths:
     fallback_url: str  # used when the story has no permalink; "{video_id}" placeholder
     reel_url_marker: str  # a url containing this marker is a reel
     message: Alternatives  # relative to story, caption text
+    image_attachments: Alternatives  # relative to story, attachment order
+    image_media: Alternatives  # relative to attachment, photo media only
+    image_url: Alternatives  # relative to photo media, preferred image then fallback
     feedback: Alternatives  # relative to story, the counter block that the counts start from
     media_typename: Alternatives  # relative to story; a Video media makes the story a video
     video_markers: Alternatives  # relative to feedback; any non-null value marks a video
@@ -222,11 +225,23 @@ def flatten(story: dict, paths: GraphqlPaths | None = None) -> dict | None:
     fallback = p.fallback_url.format(video_id=video_id) if is_video else f"https://www.facebook.com/{video_id}"
     url = _first(story, p.permalink_url, _as_text) or fallback
     if not is_video:
-        if not caption:
-            return None  # sự kiện, ảnh trống chữ: không có gì để phân tích
+        urls: list[str] = []
+        media_nodes = (media for attachment in _all_values(story, p.image_attachments)
+                       for media in _all_values(attachment, p.image_media))
+        for media in media_nodes:
+            if not isinstance(media, dict) or media.get(_TYPENAME_KEY) != "Photo":
+                continue
+            image_url = _first(media, p.image_url, _as_text)
+            if image_url and image_url not in urls:
+                urls.append(image_url)
+                if len(urls) == 4:
+                    break
+        if not caption and not urls:
+            return None  # sự kiện, bài trống: không có gì để phân tích
         record = _record(video_id, url, _first(story, p.creation_time, _as_int), caption,
                          None, feedback, None, p)
         record["format"] = "post"
+        record["image_urls"] = urls
         return record
     return _record(video_id, url, _first(story, p.creation_time, _as_int), caption,
                    _first(feedback, p.views, _as_count), feedback,

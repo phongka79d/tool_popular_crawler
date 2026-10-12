@@ -28,6 +28,7 @@ class Video:
     comments: int | None = None
     shares: int | None = None
     caption: str = ""
+    image_urls: list[str] = field(default_factory=list)
     # --- computed by filters.compute_metrics ---
     interactions: int | None = None
     ratio_follow: float | None = None
@@ -36,7 +37,7 @@ class Video:
     share_rate: float | None = None
     # --- transcript (collectors/transcript.py) ---
     transcript: str = ""
-    transcript_status: str = ""       # "ok" | "no_speech" | "failed" | ""
+    transcript_status: str = ""       # "ok" | "no_speech" | "failed" | "images" | ""
     hook: str = ""
     # --- analysis ---
     jev: dict = field(default_factory=dict)   # jev_client.interpret_labels() output

@@ -7,6 +7,7 @@ Every public function takes an optional `path`; the default is `config.DB_PATH`.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import time
@@ -208,6 +209,14 @@ def save_transcript(
             {"video_id": video_id, "transcript": text, "transcript_status": status,
              "hook": hook, "updated_at": _now()},
         )
+
+def analysis_cache_key(video: Video) -> str:
+    """Separate image-informed post analysis from the existing text-only cache."""
+    if video.format == "post" and video.transcript_status == "images" and video.transcript:
+        digest = hashlib.sha256(video.transcript.encode("utf-8")).hexdigest()
+        return f"{video.video_id}:images:{digest}"
+    return video.video_id
+
 
 
 def get_jev(

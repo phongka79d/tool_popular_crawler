@@ -359,13 +359,15 @@ def _write_details(ws: Worksheet, videos: list[Video], *, post_run: bool = False
             ws.cell(1, c).fill = PatternFill("solid", fgColor=colour)
         cell = _put(ws, 1, first, title, align=HEADER_ALIGN)
         cell.font = TITLE_FONT
+    has_images = post_run and any(v.transcript_status == "images" and v.transcript for v in videos)
     for c, col in enumerate(COLUMNS, start=1):
-        header = _put(ws, 2, c, col.header, align=HEADER_ALIGN)
+        title = "Nội dung ảnh" if has_images and col.header == "Nội dung thoại" else col.header
+        header = _put(ws, 2, c, title, align=HEADER_ALIGN)
         header.font = HEADER_FONT
         header.fill = HEADER_FILL
         width = 16 if col.link else LONG_WIDTH if col.long else col.width
         ws.column_dimensions[get_column_letter(c)].width = width
-        if post_run and col.header in _VIDEO_ONLY_HEADERS:
+        if post_run and col.header in _VIDEO_ONLY_HEADERS and not (has_images and col.header == "Nội dung thoại"):
             ws.column_dimensions[get_column_letter(c)].hidden = True
     ws.row_dimensions[1].height = 28
     ws.row_dimensions[2].height = 44

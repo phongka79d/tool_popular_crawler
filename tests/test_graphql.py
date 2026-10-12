@@ -163,7 +163,7 @@ def test_flatten_keeps_photo_post_and_share_with_own_message():
         "caption": "Lịch khám sức khỏe đầu năm, mời quý khách đặt hẹn",
         "views": None, "reactions": 40, "comments": None, "shares": 3,
         "duration_s": None, "format": "post",
-        "is_live": False,
+        "is_live": False, "image_urls": ["https://scontent.example.invalid/synthetic-photo-3.jpg"],
     }
     share = gql.flatten(_story(_sample_stories(), "700000000000004"))
     assert share["format"] == "post"
@@ -357,7 +357,7 @@ def test_parse_initial_html_reads_only_data_sjs_blobs():
         "caption": "Thông báo lịch nghỉ lễ của nhà thuốc",
         "views": None, "reactions": 21, "comments": None, "shares": 1,
         "duration_s": None, "format": "post",
-        "is_live": False,
+        "is_live": False, "image_urls": ["https://scontent.example.invalid/synthetic-photo-12.jpg"],
     }, HTML_VIDEO]
 
 

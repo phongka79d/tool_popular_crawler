@@ -6,6 +6,8 @@ weights and thresholds can change without calling Jev again.
 from __future__ import annotations
 
 import logging
+import hashlib
+import json
 from typing import Any
 
 import db
@@ -83,7 +85,7 @@ FORMULA_LEVELS = [
 
 
 def build_state(video: Video, my_page_desc: str) -> dict:
-    """Truncated source text; written posts never include transcript state."""
+    """Truncated source text; image-informed posts also include image text."""
     caption = video.caption or ""
     is_post = video.format == "post"
     first_line = caption.splitlines()[0] if caption else ""
@@ -92,15 +94,16 @@ def build_state(video: Video, my_page_desc: str) -> dict:
         "caption": caption[:CAPTION_MAX],
         "my_page": my_page_desc,
     }
-    if not is_post:
+    if not is_post or video.transcript_status == "images":
         state["transcript"] = (video.transcript or "")[:TRANSCRIPT_MAX]
     return state
 
 
-def build_questions(taxonomy: dict, is_post: bool = False) -> dict[str, Choice | Noul | Score]:
+def build_questions(taxonomy: dict, is_post: bool = False, has_images: bool = False) -> dict[str, Choice | Noul | Score]:
     """All content kinds use the same answer keys, with source-specific wording."""
-    source = "`caption`" if is_post else "`caption` và `transcript` (khi không có thoại, chỉ dựa vào `caption`)"
-    layout_source = "`caption`" if is_post else "`transcript` hoặc `caption` khi không có thoại"
+    post_source = "`caption` và `transcript` (nội dung ảnh đã đọc)" if has_images else "`caption`"
+    source = post_source if is_post else "`caption` và `transcript` (khi không có thoại, chỉ dựa vào `caption`)"
+    layout_source = post_source if is_post else "`transcript` hoặc `caption` khi không có thoại"
     questions: dict[str, Choice | Noul | Score] = {
         "topic": Choice(
             instructions=f"Chủ đề chính của {source} thuộc nhóm nào?",
@@ -141,23 +144,34 @@ def build_questions(taxonomy: dict, is_post: bool = False) -> dict[str, Choice |
             instructions = instructions.replace("`transcript` hoặc `caption`", "`caption`")
             instructions = instructions.replace("`transcript`", "`caption`")
             instructions = instructions.replace("video này", "bài viết này").replace("Người xem", "Người đọc")
+            if has_images:
+                instructions = instructions.replace("`caption`", post_source)
         else:
             instructions += " Nếu không có thoại, chỉ dựa vào `caption`."
         questions[key] = Score(instructions=instructions, criteria=list(levels))
     return questions
 
 
+def labels_cache_model(model: str, taxonomy: dict) -> str:
+    """Namespace label caches by criteria, never send this key to the API."""
+    criteria = {key: taxonomy[key] for key in CHOICE_KEYS}
+    encoded = json.dumps(criteria, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
+    return f"{model}:taxonomy:{digest}"
+
+
 def ask_labels(
     client: TypeSafeClient, video: Video, taxonomy: dict, settings: dict
 ) -> tuple[dict, dict]:
-    """One Jev call with every label question. Cached per model: a cache hit makes no call."""
+    """One Jev call, cached per model and taxonomy criteria."""
     model = settings["jev"]["model"]
-    cached = db.get_jev(video.video_id, model, LABELS_KIND)
+    cache_model = labels_cache_model(model, taxonomy)
+    cached = db.get_jev(db.analysis_cache_key(video), cache_model, LABELS_KIND)
     if cached is not None:
         logger.info("Dùng lại nhãn Jev đã lưu của video %s", video.video_id)
         return cached, dict(ZERO_USAGE)
 
-    questions = build_questions(taxonomy, is_post=video.format == "post")
+    questions = build_questions(taxonomy, is_post=video.format == "post", has_images=video.transcript_status == "images")
     state = build_state(video, _my_page_desc(settings))
     response = with_retry(
         lambda: client.system_one(state=state, questions=questions, model=model),
@@ -166,7 +180,7 @@ def ask_labels(
     raw = _answers_to_raw(response)
     _check_complete(raw, questions)
     usage = _usage_of(response)
-    db.save_jev(video.video_id, model, LABELS_KIND, raw, usage)
+    db.save_jev(db.analysis_cache_key(video), cache_model, LABELS_KIND, raw, usage)
     return raw, usage
 
 
@@ -233,6 +247,8 @@ def check_suggestions(
     is_post = video.format == "post"
     original = "bài gốc" if is_post else "video gốc"
     source = "`caption`" if is_post else "`transcript` (hoặc `caption` khi không có thoại)"
+    if is_post and video.transcript_status == "images":
+        source = "`caption` và `transcript` (nội dung ảnh đã đọc)"
     questions: dict[str, Choice | Noul | Score] = {}
     for i in range(len(suggestions)):
         questions[f"giu_cong_thuc_{i}"] = Score(
@@ -261,7 +277,7 @@ def check_suggestions(
             for s in suggestions
         ],
     }
-    if not is_post:
+    if not is_post or video.transcript_status == "images":
         state["transcript"] = (video.transcript or "")[:TRANSCRIPT_MAX]
     response = with_retry(
         lambda: client.system_one(state=state, questions=questions, model=model),

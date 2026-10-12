@@ -12,6 +12,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+import io
+import requests
+from PIL import Image
 import applog
 import config
 import db
@@ -43,6 +46,23 @@ class RunParams:
 
 def is_post_run(params: RunParams) -> bool:
     return params.formats == {"post"}
+
+def download_images(urls: list[str]) -> list[bytes]:
+    """Fetch expiring post images on an analysis worker; skip unavailable/broken images."""
+    images = []
+    for url in urls[:4]:
+        try:
+            response = requests.get(url, timeout=(10, 30))
+            response.raise_for_status()
+            data = response.content
+            with Image.open(io.BytesIO(data)) as image:
+                image.verify()
+            images.append(data)
+        except (requests.RequestException, OSError, ValueError):
+            logger.warning("Không tải/đọc được một ảnh bài đăng, bỏ qua ảnh này")
+    logger.info("Đã tải %d/%d ảnh bài đăng", len(images), min(len(urls), 4))
+    return images
+
 
 
 @dataclass
@@ -264,6 +284,22 @@ def run(
                 video.transcript_status = ""
                 video.hook = next((line.strip() for line in video.caption.splitlines() if line.strip()), "")[:transcript.CAPTION_HOOK_CHARS].strip()
                 say("đọc caption bài đăng…")
+                if settings["scan"].get("read_images", False) and video.image_urls:
+                    cached_images = db.get_transcript(video.video_id)
+                    if cached_images and cached_images[1] == "images" and cached_images[0]:
+                        video.transcript, video.transcript_status = cached_images
+                        say("dùng nội dung ảnh đã lưu…")
+                    else:
+                        images = download_images(video.image_urls)
+                        say(f"AI đọc {len(images)} ảnh…")
+                        if images:
+                            video.transcript = llm_client.describe_images(
+                                llm_instance(), settings["llm"]["model"], images, video.caption,
+                                llm_client.reasoning_effort(settings),
+                            )
+                            if video.transcript:
+                                video.transcript_status = "images"
+                                db.save_transcript(video.video_id, video.transcript, "images", video.hook)
             else:
                 views = f"{_count_text(video.views)} lượt xem" if video.views is not None else "chưa rõ lượt xem"
                 say(f"tải audio và chép lời ({views})…")
@@ -291,7 +327,7 @@ def run(
             checkpoint()
             if video.jev.get("relevant_p", 0) < 0.5:
                 return "không liên quan ngành, không cần LLM"
-            cached = db.get_llm(video.video_id)
+            cached = db.get_llm(db.analysis_cache_key(video))
             if cached is not None:
                 video.llm = cached
                 return "dùng phân tích LLM đã lưu"
@@ -316,12 +352,12 @@ def run(
                     say(f"Jev kiểm tra {len(suggestions)} gợi ý…")
                     kept, check_raw, usage = jev_client.check_suggestions(jev_instance(), video, suggestions, settings)
                     add_usage("jev_tokens", _tokens(usage))
-                    db.save_jev(video.video_id, settings["jev"]["model"], "suggestion_check", check_raw, usage)
+                    db.save_jev(db.analysis_cache_key(video), settings["jev"]["model"], "suggestion_check", check_raw, usage)
                 video.llm["goi_y_nhan_ban"] = kept
                 checkpoint()
                 if kept or attempt == 1:
                     break
-            db.save_llm(video.video_id, settings["llm"]["model"], video.llm)
+            db.save_llm(db.analysis_cache_key(video), settings["llm"]["model"], video.llm)
             return f"giữ {len(kept)} gợi ý"
         except QuotaError as exc:
             if exc.service != "llm":
@@ -388,6 +424,16 @@ def run(
                     if reason:
                         add_error(reason)
                 return None
+            if post_run and settings["scan"].get("read_images", False):
+                llm_settings = settings["llm"]
+                if llm_client.vision_cached(llm_settings) is not True:
+                    emit("keys", "Đang kiểm tra model LLM đọc ảnh…")
+                    ok = llm_client.check_vision(llm_settings["base_url"], credentials["llm"], llm_settings["model"])
+                    llm_settings["vision"] = {"base_url": llm_settings["base_url"], "model": llm_settings["model"], "ok": ok}
+                    config.save_settings(settings)
+                    if not ok:
+                        add_error(llm_client.vision_error(llm_settings["model"]))
+                        return None
             channels = config.load_lines("config/channels.txt")
             checkpoint()
             emit("scan", f"API key dùng được. Mở trình duyệt quét (chạy ẩn) cho {len(channels)} kênh…")
@@ -436,6 +482,8 @@ def run(
                             video = Video(**values)
                             if video.video_id in seen:
                                 continue
+                            if post_run and not video.caption and not settings["scan"].get("read_images", False):
+                                continue  # bài chỉ có ảnh: cần bật đọc ảnh mới phân tích được
                             seen.add(video.video_id)
                             db.upsert_video(video)
                             collected.append(video)

@@ -15,6 +15,14 @@
     ["content", "story", "message", "text"],
     ["message", "text"]
   ],
+  "image_attachments": [["attachments", "*"]],
+  "image_media": [
+    ["styles", "attachment", "media"],
+    ["styles", "attachment", "all_subattachments", "nodes", "*", "media"],
+    ["media"],
+    ["all_subattachments", "nodes", "*", "media"]
+  ],
+  "image_url": [["photo_image", "uri"], ["image", "uri"], ["viewer_image", "uri"]],
   "feedback": [
     ["comet_sections", "feedback", "story", "story_ufi_container", "story", "feedback_context", "feedback_target_with_context", "comet_ufi_summary_and_actions_renderer", "feedback"],
     ["feedback", "story", "story_ufi_container", "story", "feedback_context", "feedback_target_with_context", "comet_ufi_summary_and_actions_renderer", "feedback"],
