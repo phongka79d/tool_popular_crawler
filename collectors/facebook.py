@@ -1,7 +1,7 @@
 """Đăng nhập Facebook và quét video của page bằng Playwright (PLAN §4, §11.1–§11.2).
 
 Chỉ số lấy từ phản hồi GraphQL mà trình duyệt nhận khi cuộn và từ JSON nhúng trong HTML ban đầu
-(qua collectors.graphql). Mọi selector và mẫu URL nằm trong config/selectors.json.
+(qua collectors.graphql). Các selector và tên tab nằm trong config/selectors.json.
 """
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import re
 import threading
 import time
 from collections.abc import Iterator
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 from playwright.sync_api import BrowserContext
 from playwright.sync_api import Error as PlaywrightError
@@ -71,8 +71,24 @@ def _as_count(value: object) -> int | None:
     return value if isinstance(value, int) else None
 
 
-def _page_base(page_url: str) -> str:
-    return page_url.split("#", 1)[0].split("?", 1)[0].rstrip("/")
+def tab_url(page_url: str, tab: str) -> str:
+    """URL tab chuẩn www: vanity/pg dùng đường dẫn, profile/people giữ ID qua query.
+
+    `tab` là "reels" hoặc "videos"; bỏ tham số theo dõi và fragment của URL đầu vào.
+    """
+    parsed = urlsplit(page_url)
+    path = parsed.path.strip("/")
+    parts = path.split("/")
+    if path == "profile.php":
+        profile_id = parse_qs(parsed.query)["id"][0]
+    elif len(parts) == 3 and parts[0] == "people":
+        profile_id = parts[2]
+    else:
+        if len(parts) == 2 and parts[0] == "pg":
+            path = parts[1]
+        return f"{FB_HOME}{path}/{tab}/"
+    query = urlencode({"id": profile_id, "sk": "reels_tab" if tab == "reels" else "videos"})
+    return f"{FB_HOME}profile.php?{query}"
 
 
 def _first_page(ctx: BrowserContext) -> PwPage:
@@ -315,15 +331,14 @@ class FacebookScanner:
             if resp.status == 200 and GRAPHQL_MARK in resp.url:
                 pending.append(resp)
 
-        base = _page_base(page_url)
         page.on("response", on_response)
         try:
             for fmt, tab in tabs:
                 if collector.full() or _stopped(stop_event):
                     break
-                tab_url = f"{base}/{tab}/"
+                url = tab_url(page_url, tab)
                 logger.info("Quét tab %s của %s", tab, page_url)
-                self._scan_tab(tab_url, fmt, collector, pending, stop_event)
+                self._scan_tab(url, fmt, collector, pending, stop_event)
         finally:
             page.remove_listener("response", on_response)
             self._export_cookies()

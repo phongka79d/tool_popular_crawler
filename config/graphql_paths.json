@@ -1,0 +1,80 @@
+{
+  "_doc": "JSON paths read by collectors/graphql.py. A path is a list of dict keys (strings) and list indices (integers); \"*\" means every item of a list. Each field is a list of alternative paths tried in order: the first value that converts wins (integers, numeric strings, or display strings such as \"1,2 Tr\" for counts). Paths for story fields start at the Story node; both comet_sections-wrapped and direct content/feedback projections are supported. Duplicate Story nodes fill missing fields while retaining first-seen non-empty values. Paths for views, comments, shares, reactions and video_markers start at the feedback block that the `feedback` path returns. When Facebook changes its JSON, edit this file; no rebuild is needed. Synthetic fixtures: tests/fixtures/graphql_sample.txt and tests/fixtures/initial_page.html.",
+  "story_typename": "Story",
+  "video_typename": "Video",
+  "post_id": [["post_id"]],
+  "creation_time": [["creation_time"]],
+  "permalink_url": [["permalink_url"]],
+  "fallback_url": "https://www.facebook.com/watch/?v={video_id}",
+  "reel_url_marker": "/reel/",
+  "message": [
+    ["comet_sections", "content", "story", "message", "text"],
+    ["content", "story", "message", "text"]
+  ],
+  "feedback": [
+    ["comet_sections", "feedback", "story", "story_ufi_container", "story", "feedback_context", "feedback_target_with_context", "comet_ufi_summary_and_actions_renderer", "feedback"],
+    ["feedback", "story", "story_ufi_container", "story", "feedback_context", "feedback_target_with_context", "comet_ufi_summary_and_actions_renderer", "feedback"]
+  ],
+  "media_typename": [
+    ["attachments", "*", "media", "__typename"],
+    ["attachments", "*", "styles", "attachment", "media", "__typename"],
+    ["attachments", "*", "all_subattachments", "nodes", "*", "media", "__typename"]
+  ],
+  "video_markers": [
+    ["associated_video", "id"],
+    ["video_view_count"]
+  ],
+  "duration_ms": [
+    ["attachments", "*", "styles", "attachment", "media", "playable_duration_in_ms"],
+    ["attachments", "*", "media", "playable_duration_in_ms"]
+  ],
+  "duration_s": [
+    ["attachments", "*", "styles", "attachment", "media", "length_in_second"],
+    ["attachments", "*", "media", "length_in_second"]
+  ],
+  "views": [
+    ["video_view_count"],
+    ["video_view_count_renderer", "feedback", "video_view_count"],
+    ["video_view_count_renderer", "feedback", "play_count"]
+  ],
+  "comments": [
+    ["adaptive_ufi_action_renderers", "*", "feedback", "comment_rendering_instance", "comments", "total_count"],
+    ["comments_count_summary_renderer", "feedback", "comment_rendering_instance", "comments", "total_count"],
+    ["comment_rendering_instance", "comments", "total_count"]
+  ],
+  "shares": [
+    ["adaptive_ufi_action_renderers", "*", "feedback", "share_count", "count"],
+    ["share_count", "count"],
+    ["i18n_share_count"]
+  ],
+  "reactions": {
+    "total": [["reaction_count", "count"]],
+    "edges": [["top_reactions", "edges"]],
+    "edge_count": [["reaction_count"]],
+    "edge_id": [["node", "id"]],
+    "edge_name": [["node", "localized_name"]],
+    "approx": [["i18n_reaction_count"], ["reactors", "count_reduced"]],
+    "by_id": {
+      "1635855486666999": "LIKE",
+      "1678524932434102": "LOVE",
+      "613557422527005": "CARE",
+      "613557422527858": "CARE",
+      "115940658764963": "HAHA",
+      "478547315650144": "WOW",
+      "908563459236466": "SAD",
+      "444813342392137": "ANGRY"
+    },
+    "by_name": {
+      "Thích": "LIKE",
+      "Yêu thích": "LOVE",
+      "Thương thương": "CARE",
+      "Haha": "HAHA",
+      "Wow": "WOW",
+      "Buồn": "SAD",
+      "Phẫn nộ": "ANGRY"
+    }
+  },
+  "page_typenames": ["Page"],
+  "page_name": [["name"]],
+  "page_followers": [["followers_count"]]
+}
