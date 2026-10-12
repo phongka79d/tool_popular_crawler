@@ -87,6 +87,8 @@ def _install_chromium() -> None:
     from playwright._impl._driver import compute_driver_executable, get_driver_env
     from playwright.sync_api import sync_playwright
 
+    if config.edge_path():
+        return  # quét bằng Edge có sẵn của Windows (collectors.facebook): không cần tải trình duyệt
     with sync_playwright() as playwright:
         executable = Path(playwright.chromium.executable_path)
     if _browsers_installed(executable):
@@ -99,20 +101,20 @@ def _install_chromium() -> None:
         env.setdefault("PLAYWRIGHT_BROWSERS_PATH", "0")
     print("Đang tải Chromium lần đầu (~150 MB), vui lòng chờ...", flush=True)
     # Kế thừa cửa sổ console để người dùng thấy tiến độ và lỗi tải.
-    result = subprocess.run([*command, "install", "chromium"], env=env)
+    # --no-shell: tool luôn chạy trình duyệt có cửa sổ, không dùng Headless Shell.
+    result = subprocess.run([*command, "install", "chromium", "--no-shell"], env=env)
     if result.returncode or not _browsers_installed(executable):
         print(f"Tải Chromium thất bại (mã {result.returncode}); thiếu {executable}", flush=True)
         raise RuntimeError("Không thể tải Chromium. Kiểm tra mạng và dung lượng ổ đĩa rồi thử lại.")
 
 
 def _browsers_installed(chromium_exe: Path) -> bool:
-    """Chromium (đăng nhập, có giao diện) và Headless Shell (quét) đều tải xong.
+    """Chromium đã tải xong.
 
     Playwright chỉ ghi INSTALLATION_COMPLETE khi giải nén xong, nên lần tải bị ngắt giữa chừng sẽ được tải tiếp.
     """
     chromium_dir = chromium_exe.parents[1]  # .../chromium-<rev>/chrome-win64/chrome.exe
-    shell_dir = chromium_dir.with_name(chromium_dir.name.replace("chromium-", "chromium_headless_shell-", 1))
-    return chromium_exe.is_file() and all((d / "INSTALLATION_COMPLETE").is_file() for d in (chromium_dir, shell_dir))
+    return chromium_exe.is_file() and (chromium_dir / "INSTALLATION_COMPLETE").is_file()
 
 
 @st.cache_resource(show_spinner=False)

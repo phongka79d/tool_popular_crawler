@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -16,11 +18,23 @@ MODELS_DIR = ROOT / "models"  # faster-whisper tự tải model vào đây khi c
 DB_PATH = DATA_DIR / "cache.db"
 COOKIE_FILE = DATA_DIR / "fb_cookies.txt"
 SETTINGS_FILE = CONFIG_DIR / "settings.json"
+BROWSER_UA_FILE = DATA_DIR / "browser_ua.txt"  # UA thật của trình duyệt quét, dùng lại cho yt-dlp
 
 
 def ensure_dirs() -> None:
     for d in (DATA_DIR, OUTPUT_DIR, PROFILE_DIR):
         d.mkdir(parents=True, exist_ok=True)
+
+
+def edge_path() -> str | None:
+    """msedge.exe của Microsoft Edge (cài cho máy hoặc cho người dùng), None nếu máy không có."""
+    for base in ("ProgramFiles(x86)", "ProgramFiles", "LOCALAPPDATA"):
+        root = os.environ.get(base)
+        if root:
+            exe = Path(root) / "Microsoft" / "Edge" / "Application" / "msedge.exe"
+            if exe.is_file():
+                return str(exe)
+    return shutil.which("msedge")
 
 
 def load_json(name: str) -> dict:

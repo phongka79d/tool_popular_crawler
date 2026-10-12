@@ -48,14 +48,37 @@ def _is_empty(value: object) -> bool:
 
 
 def _cookie_opts() -> dict:
-    """Dùng tệp cookie Netscape đã xuất từ profile Playwright; không đọc cookie của Chrome (PLAN §11.3)."""
+    """Cookie Netscape đã xuất từ profile trình duyệt của tool, kèm đúng User-Agent của trình duyệt đó.
+
+    Không đọc cookie của Chrome (PLAN §11.3). Cùng cookie nhưng khác UA trông như phiên bị đánh cắp,
+    nên gửi UA đã lưu khi quét/đăng nhập.
+    """
     path = config.COOKIE_FILE
     if not path.exists():
         return {}
     if not is_netscape_file(path):
         logger.warning("Tệp cookie %s không đúng định dạng Netscape; bỏ qua cookie.", path)
         return {}
-    return {"cookiefile": str(path)}
+    opts: dict = {"cookiefile": str(path)}
+    try:
+        user_agent = config.BROWSER_UA_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        user_agent = ""
+    if user_agent:
+        opts["http_headers"] = {"User-Agent": user_agent}
+    return opts
+
+
+def _with_account_fallback(run: Callable[[dict], object]) -> object:
+    """Chạy yt-dlp không cookie trước (video công khai không cần tài khoản, tài khoản không bị dính
+    vào lượt tải); chỉ khi lỗi mới thử lại bằng cookie của tài khoản phụ."""
+    try:
+        return run({})
+    except YoutubeDLError:
+        account = _cookie_opts()
+        if not account:
+            raise
+        return run(account)
 
 
 def fetch_metadata(url: str) -> dict:
@@ -64,9 +87,13 @@ def fetch_metadata(url: str) -> dict:
     Trả về view_count, comment_count, repost_count, timestamp, duration, description.
     Khóa nào yt-dlp không có thì giá trị là None.
     """
-    opts = {"skip_download": True, "quiet": True, "no_warnings": True, "noplaylist": True, **_cookie_opts()}
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(_to_watch_url(url), download=False) or {}
+    def run(extra: dict) -> dict:
+        opts = {"skip_download": True, "quiet": True, "no_warnings": True, "noplaylist": True,
+                "sleep_interval_requests": 1, **extra}
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            return ydl.extract_info(_to_watch_url(url), download=False) or {}
+
+    info = _with_account_fallback(run)
     return {key: info.get(key) for key, _cast in _FILL_FIELDS.values()}
 
 
@@ -105,21 +132,35 @@ def download_audio(url: str, out_dir: Path) -> Path | None:
     out.mkdir(parents=True, exist_ok=True)
     target = _to_watch_url(url)
     stem = "audio_" + hashlib.sha256(target.encode("utf-8")).hexdigest()[:16]
-    opts = {
-        # bestaudio là ưu tiên; /best cho video chỉ có luồng ghép, transcript.extract_audio tách tiếng sau.
-        "format": "bestaudio/best",
-        "outtmpl": os.path.join(str(out), f"{stem}.%(ext)s"),
-        "noplaylist": True,
-        "quiet": True,
-        "no_warnings": True,
-        **_cookie_opts(),
-    }
+
+    def run(extra: dict) -> Path:
+        opts = {
+            # bestaudio là ưu tiên; /best cho video chỉ có luồng ghép, transcript.extract_audio tách tiếng sau.
+            "format": "bestaudio/best",
+            "outtmpl": os.path.join(str(out), f"{stem}.%(ext)s"),
+            "noplaylist": True,
+            "quiet": True,
+            "no_warnings": True,
+            # Nghỉ ngẫu nhiên trước mỗi lượt tải như người xem lần lượt từng video.
+            "sleep_interval": 2,
+            "max_sleep_interval": 6,
+            **extra,
+        }
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                ydl.download([target])
+        except YoutubeDLError as exc:
+            # yt-dlp có thể lỗi dù file đã có (ví dụ phụ đề hỏng); quyết định theo file.
+            if _find_download(out, stem) is None:
+                raise
+            logger.warning("yt-dlp báo lỗi nhưng đã có audio (%s): %s", url, exc)
+        found = _find_download(out, stem)
+        if found is None:
+            raise YoutubeDLError("không có file audio")
+        return found
+
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            ydl.download([target])
-    except Exception as exc:  # noqa: BLE001 - yt-dlp có thể lỗi dù file đã có; quyết định theo file
-        logger.warning("yt-dlp báo lỗi khi tải audio (%s): %s", url, exc)
-    found = _find_download(out, stem)
-    if found is None:
-        logger.warning("Không tải được audio: %s", url)
-    return found
+        return _with_account_fallback(run)
+    except Exception as exc:  # noqa: BLE001 - mọi lỗi tải đều quy về "không có audio"
+        logger.warning("Không tải được audio (%s): %s", url, exc)
+        return None

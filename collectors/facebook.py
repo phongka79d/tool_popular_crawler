@@ -39,8 +39,21 @@ FB_COOKIE_URLS = ("https://www.facebook.com/", "https://m.facebook.com/", "https
 LOCALE = "vi-VN"
 GRAPHQL_MARK = "/api/graphql/"
 NAV_TIMEOUT_MS = 60_000
-RESPONSE_WAIT_MS = 8_000
-WHEEL_PX = (600, 1200)
+RESPONSE_WAIT_MS = 12_000
+WHEEL_STEP_PX = (250, 650)        # mỗi nấc lăn chuột
+WHEEL_GAP_MS = (120, 480)         # nghỉ giữa các nấc
+WHEEL_MAX_STEPS = 14              # tối đa mỗi vòng cuộn
+NEAR_BOTTOM_PX = 1500             # tới gần cuối trang thì Facebook tải thêm
+WINDOW_SIZE = "1366,900"
+# Cửa sổ thật nhưng đặt ngoài màn hình: cùng đường render với trình duyệt người dùng (không phải
+# headless shell), và tắt cơ chế giảm tốc cửa sổ bị che để trang vẫn cuộn, tải bình thường.
+HIDDEN_WINDOW_ARGS = (
+    "--window-position=-32000,-32000",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding",
+    "--disable-background-timer-throttling",
+    "--disable-features=CalculateNativeWinOcclusion",
+)
 LOGIN_POLL_S = 2.0
 LOGIN_REQUIRED_MSG = "Phiên Facebook đã hết hạn hoặc bị checkpoint. Vào Cài đặt → Đăng nhập Facebook."
 
@@ -96,12 +109,59 @@ def _first_page(ctx: BrowserContext) -> PwPage:
     return ctx.pages[0] if ctx.pages else ctx.new_page()
 
 
+def _near_bottom(page: PwPage) -> bool:
+    try:
+        return bool(page.evaluate(
+            f"window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - {NEAR_BOTTOM_PX}"
+        ))
+    except PlaywrightError:
+        return True
+
+
+def _save_user_agent(page: PwPage) -> None:
+    """Lưu UA thật của trình duyệt để yt-dlp gửi cùng UA khi phải dùng cookie (tránh 1 phiên, 2 thiết bị)."""
+    try:
+        config.BROWSER_UA_FILE.write_text(page.evaluate("navigator.userAgent"), encoding="utf-8")
+    except (PlaywrightError, OSError) as exc:
+        logger.warning("Không lưu được User-Agent của trình duyệt: %s", exc)
+
+
+
+def _launch_options(hidden: bool) -> dict:
+    """Tùy chọn mở trình duyệt giống người dùng thật nhất có thể.
+
+    - Edge cài sẵn của Windows (channel msedge) khi có: trình duyệt thương mại đủ codec video, GPU thật,
+      cập nhật tự động; không có Edge thì dùng Chromium của Playwright.
+    - Luôn chạy có cửa sổ (không headless): UA không chứa "HeadlessChrome"; quét thì cửa sổ nằm ngoài màn hình.
+    - Bỏ cờ tự động hóa (--enable-automation, AutomationControlled) để navigator.webdriver là false
+      và không hiện thanh "đang bị điều khiển bởi phần mềm tự động".
+    - Kích thước cửa sổ thật (no_viewport) thay cho viewport cố định 1280x720 của Playwright.
+    """
+    args = ["--disable-blink-features=AutomationControlled", f"--window-size={WINDOW_SIZE}"]
+    if hidden:
+        args += HIDDEN_WINDOW_ARGS
+    options: dict = {
+        "headless": False,
+        "locale": LOCALE,
+        "no_viewport": True,
+        "args": args,
+        "ignore_default_args": ["--enable-automation"],
+    }
+    if config.edge_path():
+        options["channel"] = "msedge"
+    return options
+
+
 @contextlib.contextmanager
-def _persistent_context(headless: bool) -> Iterator[BrowserContext]:
-    """Mở profile Playwright ở config.PROFILE_DIR, giữ phiên đăng nhập giữa các lần chạy."""
+def _persistent_context(hidden: bool) -> Iterator[BrowserContext]:
+    """Mở profile trình duyệt ở config.PROFILE_DIR, giữ phiên đăng nhập giữa các lần chạy.
+
+    Đăng nhập (hidden=False) và quét (hidden=True) dùng cùng trình duyệt, cùng profile, cùng dấu vân tay,
+    để Facebook thấy một thiết bị duy nhất.
+    """
     config.ensure_dirs()
     with sync_playwright() as pw:
-        ctx = pw.chromium.launch_persistent_context(str(config.PROFILE_DIR), headless=headless, locale=LOCALE)
+        ctx = pw.chromium.launch_persistent_context(str(config.PROFILE_DIR), **_launch_options(hidden))
         try:
             yield ctx
         finally:
@@ -116,7 +176,7 @@ def login_interactive(timeout_s: int = 600) -> bool:
     và trả True. Hết giờ hoặc người dùng đóng cửa sổ thì trả False.
     """
     deadline = time.monotonic() + timeout_s
-    with _persistent_context(headless=False) as ctx:
+    with _persistent_context(hidden=False) as ctx:
         page = _first_page(ctx)
         try:
             page.goto(FB_HOME, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
@@ -127,6 +187,7 @@ def login_interactive(timeout_s: int = 600) -> bool:
                 cookies = ctx.cookies(list(FB_COOKIE_URLS))
                 if has_login_cookies(cookies) and not _is_blocked_url(page.url):
                     write_netscape(cookies)
+                    _save_user_agent(page)
                     logger.info("Đã đăng nhập Facebook và lưu cookie.")
                     return True
             except PlaywrightError:
@@ -148,13 +209,14 @@ def import_cookies(path: Path | str) -> bool:
         if not imported:
             logger.warning("Tệp cookie không chứa cookie để nhập.")
             return False
-        with _persistent_context(headless=True) as ctx:
+        with _persistent_context(hidden=True) as ctx:
             ctx.add_cookies(imported)
             current = ctx.cookies(list(FB_COOKIE_URLS))
             if not has_login_cookies(current):
                 logger.warning("Cookie đã nhập thiếu c_user hoặc xs của Facebook.")
                 return False
             write_netscape(current)
+            _save_user_agent(_first_page(ctx))
     except (OSError, ValueError, PlaywrightError):
         logger.warning("Không nhập được cookie Facebook. Kiểm tra tệp cookie và trình duyệt.")
         return False
@@ -221,14 +283,14 @@ def _drain(pending: list[Response], collector: _Collector, tab_format: str) -> N
 class FacebookScanner:
     """Context manager: mở profile Playwright đã đăng nhập để kiểm tra và quét page."""
 
-    def __init__(self, headless: bool = True, settings: dict | None = None) -> None:
-        self.headless = headless
+    def __init__(self, hidden: bool = True, settings: dict | None = None) -> None:
+        self.hidden = hidden
         self.settings = settings if settings is not None else config.load_settings()
         self._stack = contextlib.ExitStack()
         self._page: PwPage | None = None
 
     def __enter__(self) -> FacebookScanner:
-        ctx = self._stack.enter_context(_persistent_context(self.headless))
+        ctx = self._stack.enter_context(_persistent_context(self.hidden))
         self._page = _first_page(ctx)
         return self
 
@@ -277,6 +339,7 @@ class FacebookScanner:
             return
         if has_login_cookies(cookies):
             write_netscape(cookies)
+            _save_user_agent(self._require_page())
         else:
             logger.warning("Thiếu c_user hoặc xs; không cập nhật tệp cookie.")
 
@@ -297,11 +360,16 @@ class FacebookScanner:
         return Page(url=page_url, name=name, followers=followers)
 
     def _scroll_once(self) -> None:
+        """Một vòng cuộn như người dùng: đưa chuột vào feed rồi lăn từng nấc tới gần cuối trang."""
         page = self._require_page()
         try:
             with page.expect_response(lambda resp: GRAPHQL_MARK in resp.url, timeout=RESPONSE_WAIT_MS):
-                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                page.mouse.wheel(0, random.randint(*WHEEL_PX))
+                page.mouse.move(random.randint(350, 950), random.randint(250, 700), steps=random.randint(4, 12))
+                for _ in range(WHEEL_MAX_STEPS):
+                    page.mouse.wheel(0, random.randint(*WHEEL_STEP_PX))
+                    page.wait_for_timeout(random.randint(*WHEEL_GAP_MS))
+                    if _near_bottom(page):
+                        break
         except PlaywrightTimeoutError:
             logger.debug("Không thấy phản hồi GraphQL sau khi cuộn.")
 

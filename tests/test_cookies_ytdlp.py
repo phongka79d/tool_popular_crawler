@@ -205,6 +205,8 @@ def test_import_cookies_adds_verifies_and_exports(tmp_path, monkeypatch, valid_l
     output = tmp_path / "saved.txt"
 
     class FakeContext:
+        pages: list = []
+
         def add_cookies(self, values):
             calls.append(("add", values))
 
@@ -213,9 +215,12 @@ def test_import_cookies_adds_verifies_and_exports(tmp_path, monkeypatch, valid_l
             return current
 
     @contextlib.contextmanager
-    def persistent_context(headless):
-        assert headless is True
+    def persistent_context(hidden):
+        assert hidden is True
         yield FakeContext()
+
+    monkeypatch.setattr(facebook, "_save_user_agent", lambda page: None)
+    monkeypatch.setattr(facebook, "_first_page", lambda ctx: None)
 
     monkeypatch.setattr(facebook, "_persistent_context", persistent_context)
     monkeypatch.setattr(facebook, "write_netscape", lambda values: cookies.write_netscape(values, output))
@@ -249,7 +254,7 @@ def test_scan_page_expect_response_timeout_stall_and_round_cap(
         def __init__(self):
             self.rounds = 0
             self.waiting = False
-            self.mouse = SimpleNamespace(wheel=self.wheel)
+            self.mouse = SimpleNamespace(wheel=self.wheel, move=lambda x, y, steps: None)
             self.listener = None
 
         def on(self, event, handler):
@@ -265,7 +270,7 @@ def test_scan_page_expect_response_timeout_stall_and_round_cap(
 
         @contextlib.contextmanager
         def expect_response(self, predicate, timeout):
-            assert timeout == 8000
+            assert timeout == facebook.RESPONSE_WAIT_MS
             assert predicate(SimpleNamespace(url="https://www.facebook.com/api/graphql/"))
             assert not predicate(SimpleNamespace(url="https://www.facebook.com/other"))
             actions.append("expect")
@@ -279,11 +284,13 @@ def test_scan_page_expect_response_timeout_stall_and_round_cap(
 
         def evaluate(self, script):
             assert self.waiting
-            assert script == "window.scrollTo(0, document.body.scrollHeight)"
-            actions.append("scroll")
+            return True  # đã tới gần cuối trang: mỗi vòng chỉ một nấc lăn
+
+        def wait_for_timeout(self, ms):
+            assert self.waiting
 
         def wheel(self, x, y):
-            assert self.waiting and x == 0 and 600 <= y <= 1200
+            assert self.waiting and x == 0 and y > 0
             actions.append("wheel")
             batch = batches[self.rounds]
             self.rounds += 1
@@ -309,7 +316,7 @@ def test_scan_page_expect_response_timeout_stall_and_round_cap(
     ])
     videos = scanner.scan_page("https://www.facebook.com/TestPage", 30, {"reel"}, 100)
     assert page.rounds == expected_rounds
-    assert actions == ["expect", "scroll", "wheel"] * expected_rounds
+    assert actions == ["expect", "wheel"] * expected_rounds
     assert page.listener is None
     assert [video["video_id"] for video in videos] == [
         video_id for batch in batches[:expected_rounds] for video_id in batch
@@ -380,15 +387,42 @@ def test_fetch_metadata_uses_watch_url_without_download(monkeypatch):
     }
 
 
-def test_fetch_metadata_passes_netscape_cookiefile(monkeypatch, tmp_path):
+@pytest.mark.parametrize("public", [True, False])
+def test_fetch_metadata_tries_anonymous_before_account(monkeypatch, tmp_path, public):
     cookie_path = tmp_path / "fb.txt"
     cookies.write_netscape([_c_user(), _xs()], cookie_path)
+    ua_path = tmp_path / "ua.txt"
+    ua_path.write_text("Mozilla/5.0 Edg/141\n", encoding="utf-8")
     monkeypatch.setattr(config, "COOKIE_FILE", cookie_path)
-    seen = _install_fake_ydl(monkeypatch, info={})
+    monkeypatch.setattr(config, "BROWSER_UA_FILE", ua_path)
+    attempts = []
 
-    ytdlp.fetch_metadata("https://www.facebook.com/reel/1")
+    class FakeYoutubeDL:
+        def __init__(self, opts):
+            self.opts = opts
 
-    assert seen["opts"]["cookiefile"] == str(cookie_path)
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+        def extract_info(self, url, download=False):
+            attempts.append(self.opts)
+            if "cookiefile" not in self.opts and not public:
+                raise ytdlp.YoutubeDLError("login required")
+            return {"view_count": 5}
+
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", FakeYoutubeDL)
+
+    assert ytdlp.fetch_metadata("https://www.facebook.com/reel/1")["view_count"] == 5
+    assert "cookiefile" not in attempts[0]
+    if public:
+        assert len(attempts) == 1  # video công khai: tài khoản không bị dùng
+    else:
+        assert len(attempts) == 2
+        assert attempts[1]["cookiefile"] == str(cookie_path)
+        assert attempts[1]["http_headers"] == {"User-Agent": "Mozilla/5.0 Edg/141"}
 
 
 def test_fetch_metadata_ignores_non_netscape_cookie_file(monkeypatch, tmp_path):

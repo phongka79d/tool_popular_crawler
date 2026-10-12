@@ -88,7 +88,7 @@ Ghim cứng phiên bản Jev (`jev-1.13`) thay vì `jev-latest`, để nhãn kh�
 
 Dùng Playwright mở trình duyệt với profile đã đăng nhập, vào từng page, cuộn tab Reels/Video và lấy chỉ số từ dữ liệu GraphQL mà Facebook trả về cho trình duyệt; đọc chữ trên giao diện chỉ là dự phòng (chi tiết ở mục 11.2). Không dùng Graph API vì không lấy được chỉ số video của page mình không quản lý.
 
-**Đăng nhập lần đầu:** tool mở Chromium hiển thị (headful), người dùng tự đăng nhập, tool kiểm tra đã thấy avatar thì lưu profile vào `profile/`. Lần sau chạy ẩn (headless) với profile đó. Nếu phát hiện trang checkpoint hoặc trang đăng nhập thì dừng và báo người dùng đăng nhập lại.
+**Đăng nhập lần đầu:** tool mở trình duyệt hiển thị (Edge có sẵn của Windows, không có thì Chromium), người dùng tự đăng nhập, tool thấy cookie c_user và xs thì lưu profile vào `profile/`. Lần sau quét bằng cùng trình duyệt và profile, có cửa sổ nhưng đặt ngoài màn hình (không dùng headless: headless shell lộ "HeadlessChrome" và khác đường render), bỏ cờ tự động hóa để `navigator.webdriver` là false. Nếu phát hiện trang checkpoint hoặc trang đăng nhập thì dừng và báo người dùng đăng nhập lại.
 
 **Mỗi page lấy:**
 

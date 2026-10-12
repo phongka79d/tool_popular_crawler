@@ -190,7 +190,7 @@ def run(
                 return None
             channels = config.load_lines("config/channels.txt")
             checkpoint()
-            with FacebookScanner(headless=True, settings=settings) as scanner:
+            with FacebookScanner(hidden=True, settings=settings) as scanner:
                 checkpoint()
                 scanner.check_login()
                 checkpoint()

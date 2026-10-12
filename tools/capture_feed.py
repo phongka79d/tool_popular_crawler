@@ -38,12 +38,12 @@ from playwright.sync_api import Page, Response, sync_playwright  # noqa: E402
 
 import config  # noqa: E402
 from collectors.cookies import has_login_cookies  # noqa: E402
+from collectors.facebook import _launch_options  # noqa: E402
 
 log = logging.getLogger("capture_feed")
 
 FB_ORIGIN = "https://www.facebook.com"
 GRAPHQL_MARKER = "/api/graphql/"
-LOCALE = "vi-VN"
 TABS = ("reels", "videos")
 LIVE_DIR = config.ROOT / "tests" / "fixtures" / "live"
 SCROLL_STEP_JS = "window.scrollBy(0, Math.max(800, window.innerHeight * 2))"
@@ -89,7 +89,8 @@ def capture(page_url: str, tab: str, scrolls: int, pause: float) -> Path:
         responses.append((response.url, body))
 
     with sync_playwright() as pw:
-        ctx = pw.chromium.launch_persistent_context(str(config.PROFILE_DIR), headless=False, locale=LOCALE)
+        # Cùng trình duyệt và tùy chọn với tool: profile/ chỉ nên được một loại trình duyệt dùng.
+        ctx = pw.chromium.launch_persistent_context(str(config.PROFILE_DIR), **_launch_options(hidden=False))
         try:
             page = ctx.pages[0] if ctx.pages else ctx.new_page()
             page.on("response", on_response)
