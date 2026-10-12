@@ -121,7 +121,7 @@ def check_vision(base_url: str, api_key: str, model: str) -> bool:
     ]}]
     try:
         answer, _, _ = _chat(make_client(base_url, api_key), model, messages, None, False,
-                             reasoning_effort({}))
+                             reasoning_effort({}), thinking=False)
     except (AuthError, QuotaError, NetworkError):
         raise
     except Exception as exc:
@@ -148,7 +148,8 @@ def describe_images(client: OpenAI, model: str, images: list[bytes], caption: st
             buffer = io.BytesIO()
             image.save(buffer, format="JPEG", quality=85)
         content.append(_image_part(buffer.getvalue(), "image/jpeg"))
-    text, tokens, _ = _chat(client, model, [{"role": "user", "content": content}], None, False, reasoning_effort)
+    text, tokens, _ = _chat(client, model, [{"role": "user", "content": content}], None, False, reasoning_effort,
+                            thinking=False)
     return text, tokens
 
 
@@ -258,6 +259,12 @@ def _is_rejection(exc: BaseException, param: str) -> bool:
     return status == 400 and param in str(exc).lower()
 
 
+# Model suy luận (deepseek, glm, qwen…) tự "nghĩ" rất dài cả khi reasoning_effort="low": đo trên
+# deepseek-v4-flash-vision-exp, đọc album 4 ảnh ra 6.501 token (43 s), tắt suy luận còn 915 token (21,5 s),
+# chữ đọc được như nhau. Việc chép chữ / tóm tắt không cần suy luận nên gửi thinking=disabled.
+THINKING_OFF = {"thinking": {"type": "disabled"}}
+
+
 def _chat(
     client: OpenAI,
     model: str,
@@ -265,26 +272,36 @@ def _chat(
     temperature: float | None,
     json_mode: bool,
     reasoning_effort: str | None = None,
+    thinking: bool = True,
 ) -> tuple[str, int, bool]:
     """Gọi chat completion, trả (chữ, tổng token, còn bật json_mode không).
 
-    Endpoint từ chối response_format hoặc reasoning_effort (400) thì gọi lại không kèm tham số đó.
+    thinking=False xin tắt suy luận (extra_body thinking=disabled); endpoint từ chối thì dùng reasoning_effort.
+    Endpoint từ chối response_format, thinking hoặc reasoning_effort (400) thì gọi lại không kèm tham số đó.
     """
     kwargs: dict[str, Any] = {"model": model, "messages": messages}
     if temperature is not None:
         kwargs["temperature"] = temperature
-    if reasoning_effort:
+    if not thinking:
+        kwargs["extra_body"] = THINKING_OFF
+    elif reasoning_effort:
         kwargs["reasoning_effort"] = reasoning_effort
 
     def create(**extra: Any) -> Any:
-        try:
-            return with_retry(lambda: client.chat.completions.create(**kwargs, **extra), service="llm")
-        except Exception as exc:
-            if "reasoning_effort" not in kwargs or not _is_rejection(exc, "reasoning_effort"):
-                raise
-            logger.info("Endpoint LLM không nhận reasoning_effort, gọi lại không kèm tham số này")
-            del kwargs["reasoning_effort"]
-            return with_retry(lambda: client.chat.completions.create(**kwargs, **extra), service="llm")
+        while True:
+            try:
+                return with_retry(lambda: client.chat.completions.create(**kwargs, **extra), service="llm")
+            except Exception as exc:
+                if "extra_body" in kwargs and _is_rejection(exc, "thinking"):
+                    logger.info("Endpoint LLM không nhận thinking, dùng reasoning_effort thay thế")
+                    del kwargs["extra_body"]
+                    if reasoning_effort:
+                        kwargs["reasoning_effort"] = reasoning_effort
+                elif "reasoning_effort" in kwargs and _is_rejection(exc, "reasoning_effort"):
+                    logger.info("Endpoint LLM không nhận reasoning_effort, gọi lại không kèm tham số này")
+                    del kwargs["reasoning_effort"]
+                else:
+                    raise
 
     if json_mode:
         try:
@@ -382,7 +399,8 @@ def write_commentary(
         {"role": "system", "content": COMMENTARY_SYSTEM_PROMPT},
         {"role": "user", "content": json.dumps(tables, ensure_ascii=False, indent=2)},
     ]
-    text, tokens, _ = _chat(client, model, messages, temperature=None, json_mode=False, reasoning_effort=reasoning_effort)
+    text, tokens, _ = _chat(client, model, messages, temperature=None, json_mode=False, reasoning_effort=reasoning_effort,
+                            thinking=False)
     return text, tokens
 
 

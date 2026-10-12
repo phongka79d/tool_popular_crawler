@@ -301,6 +301,17 @@ class TestWriteCommentary:
         assert llm_client.write_commentary(client, "m-1", {"by_topic": [], "by_hook": []}) == ("", 0)
         assert comp.calls == []
 
+    def test_commentary_asks_to_skip_thinking_and_falls_back_to_reasoning_effort(self):
+        rejected = FakeStatusError("Error code: 400 - Unrecognized request argument: thinking")
+        client, comp = fake_client(rejected, _reply("Nhận xét", total=7))
+
+        assert llm_client.write_commentary(client, "m-1", SUMMARY, "low") == ("Nhận xét", 7)
+
+        assert comp.calls[0]["extra_body"] == {"thinking": {"type": "disabled"}}
+        assert "reasoning_effort" not in comp.calls[0]
+        assert "extra_body" not in comp.calls[1]
+        assert comp.calls[1]["reasoning_effort"] == "low"
+
 
 class TestCheckKey:
     @staticmethod
