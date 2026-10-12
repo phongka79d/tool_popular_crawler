@@ -54,10 +54,11 @@ def main() -> None:
         sys.path.insert(0, app_dir)
     sys.argv = ["streamlit", "run", str(app_path), "--server.headless=true",
                 "--server.port", str(port), "--global.developmentMode=false",
-                "--server.address=127.0.0.1"]
+                "--server.address=127.0.0.1", "--client.toolbarMode=minimal"]
     flags = {"server.headless": True, "server.port": port,
              "server.address": "127.0.0.1", "global.developmentMode": False,
-             "browser.gatherUsageStats": False, "server.fileWatcherType": "none"}
+             "browser.gatherUsageStats": False, "server.fileWatcherType": "none",
+             "client.toolbarMode": "minimal"}
     bootstrap.load_config_options(flags)
     stopped = threading.Event()
     opener = threading.Thread(target=_open_when_ready, args=(port, stopped),

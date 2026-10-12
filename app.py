@@ -5,6 +5,7 @@ import copy
 import os
 import queue
 import subprocess
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -89,8 +90,18 @@ def ensure_browser() -> bool:
 
 
 def _scan_worker(params, settings: dict, events: queue.Queue, stop: threading.Event) -> None:
+    def ask_user(kind: str, message: str, options: list[tuple[str, str]]) -> str:
+        """Chạy trên thread worker: chờ người dùng chọn; Dừng thì trả về "pause"."""
+        question = {"kind": kind, "message": message, "options": options,
+                    "answer_event": threading.Event(), "answer": None}
+        events.put(("question", question))
+        while not question["answer_event"].wait(0.5):
+            if stop.is_set():
+                return "pause"
+        return question["answer"]
+
     try:
-        result = pipeline.run(params, settings, events.put, stop)
+        result = pipeline.run(params, settings, events.put, stop, ask_user=ask_user)
         events.put(("result", result))
     except Exception as exc:
         events.put(("failure", _error_message(exc)))
@@ -111,7 +122,7 @@ def _login_worker(events: queue.Queue) -> None:
 def _init_state() -> None:
     defaults = {"running": False, "logging_in": False, "scan_log": [],
                 "scan_errors": [], "progress": None, "scan_result": None,
-                "key_status": None, "login_message": None, "notice": None}
+                "key_status": None, "login_message": None, "notice": None, "question": None}
     for name, value in defaults.items():
         if name not in st.session_state:
             st.session_state[name] = value
@@ -172,6 +183,25 @@ def _reset_configuration() -> None:
     st.session_state.notice = "Đã đặt lại API key, cài đặt và danh sách kênh. Dữ liệu và phiên Facebook được giữ nguyên."
 
 
+def _import_cookie_file(upload) -> None:
+    fd, name = tempfile.mkstemp(dir=config.DATA_DIR, prefix="cookie_", suffix=Path(upload.name).suffix)
+    os.close(fd)
+    path = Path(name)
+    try:
+        path.write_bytes(upload.getvalue())
+        with st.spinner("Đang nạp cookie..."):
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                imported = executor.submit(facebook.import_cookies, path).result()
+        if imported:
+            st.success("Đã nạp cookie và lưu phiên Facebook.")
+        else:
+            st.error("Không tìm thấy cookie đăng nhập Facebook trong file. Hãy xuất cookie khi đã đăng nhập tài khoản phụ rồi thử lại.")
+    except Exception as exc:
+        st.error(_error_message(exc))
+    finally:
+        path.unlink(missing_ok=True)
+
+
 def _settings_tab(settings: dict) -> None:
     st.subheader("1. Kết nối dịch vụ")
     st.caption("Nhập key một lần. Chỉ lưu vào Windows Credential Manager sau khi kiểm tra thành công.")
@@ -218,6 +248,11 @@ def _settings_tab(settings: dict) -> None:
         worker.start()
         st.rerun()
     _login_status()
+    with st.expander("Không đăng nhập được? Nạp file cookie"):
+        st.caption("Đăng nhập tài khoản Facebook phụ trên trình duyệt, dùng tiện ích Cookie-Editor để xuất cookie của facebook.com ra file JSON rồi tải lên đây. Không chia sẻ file cookie cho người khác.")
+        uploaded = st.file_uploader("File cookie (.json hoặc .txt)", type=["json", "txt"], key="cookie_upload", disabled=locked)
+        if uploaded is not None and st.button("Nạp cookie", disabled=locked):
+            _import_cookie_file(uploaded)
     st.warning("Không chia sẻ thư mục profile/ và file data/fb_cookies.txt: chúng chứa phiên đăng nhập Facebook của bạn.")
     with st.expander("Đặt lại cấu hình"):
         st.caption("Xóa 3 API key, khôi phục settings.json mặc định và xóa danh sách kênh. Không xóa Excel, cache hay phiên Facebook.")
@@ -321,7 +356,7 @@ def _scan_tab(settings: dict) -> None:
                                       daemon=True, name="video-scan")
             st.session_state.update(running=True, scan_queue=events, stop_event=stop,
                                     scan_thread=worker, scan_log=[], scan_errors=[],
-                                    progress=None, scan_result=None)
+                                    progress=None, scan_result=None, question=None)
             worker.start()
             st.rerun()
     _scan_status()
@@ -341,8 +376,11 @@ def _render_scan_status() -> None:
                     st.session_state.scan_result = str(value) if value else None
                 elif kind == "failure":
                     st.session_state.scan_errors.append(value)
+                elif kind == "question":
+                    st.session_state.question = value
                 elif kind == "finished":
                     st.session_state.running = False
+                    st.session_state.question = None
                     finished = True
             else:
                 st.session_state.progress = event
@@ -363,9 +401,20 @@ def _render_scan_status() -> None:
     if st.session_state.running:
         if st.button("Dừng", disabled=st.session_state.stop_event.is_set(), key="stop_scan"):
             st.session_state.stop_event.set()
+            st.session_state.question = None
             st.rerun()
         if st.session_state.stop_event.is_set():
             st.info("Đã yêu cầu dừng. Đang hoàn tất bước hiện tại và lưu kết quả đã xử lý.")
+        question = st.session_state.question
+        if question is not None:
+            st.warning(question["message"])
+            for column, (option_id, label) in zip(st.columns(len(question["options"])), question["options"]):
+                with column:
+                    if st.button(label, key=f"answer_{question['kind']}_{option_id}"):
+                        question["answer"] = option_id
+                        question["answer_event"].set()
+                        st.session_state.question = None
+                        st.rerun()
     elif st.session_state.scan_result:
         st.success(f"Đã xuất {Path(st.session_state.scan_result).name}. Vào tab Kết quả để tải file.")
     elif st.session_state.scan_log and not st.session_state.scan_errors:
