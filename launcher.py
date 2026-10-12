@@ -46,6 +46,11 @@ def _open_when_ready(port: int, stopped: threading.Event) -> None:
 def main() -> None:
     from streamlit.web import bootstrap
 
+    # Thông báo tiếng Việt (vd. tiến độ tải Chromium) không được làm hỏng chương trình trên console mã cũ.
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None and hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
     app_path = resolve_app_path()
     port = find_free_port()
     # Frozen builds keep app.py in _MEIPASS; writable config/data stay beside the exe.

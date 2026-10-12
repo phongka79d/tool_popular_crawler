@@ -287,6 +287,22 @@ def check_key(api_key: str | None, model: str) -> None:
         client.close()
 
 
+def list_models(api_key: str | None) -> list[dict]:
+    """Models the key can use, from GET /v1/models: [{"name", "description", "release_date"}].
+
+    Also verifies the key. Raises ServiceError (AuthError, ...) on failure.
+    """
+    client = make_client(api_key, "")
+    try:
+        resp = with_retry(client.models.list, service="jev")
+    finally:
+        client.close()
+    return [
+        {"name": m.name, "description": m.description or "", "release_date": str(m.release_date or "")}
+        for m in resp.models
+    ]
+
+
 def _my_page_desc(settings: dict) -> str:
     page = settings["my_page"]
     return f"Page {page['name']}. Khách hàng của page: {page['audience']}."

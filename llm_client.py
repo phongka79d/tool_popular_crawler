@@ -70,6 +70,39 @@ def check_key(base_url: str, api_key: str, model: str) -> None:
     )
 
 
+def list_models(base_url: str, api_key: str) -> list[dict]:
+    """Model của endpoint qua GET {base_url}/models, sắp theo id.
+
+    Mỗi mục: {"id", "owned_by", "context_length", "price_in", "price_out"}; giá là USD / 1 triệu token,
+    None khi endpoint không trả giá (chỉ kiểu OpenRouter có trường pricing). Ném ServiceError nếu lỗi.
+    """
+    client = make_client(base_url, api_key)
+    page = with_retry(client.models.list, service="llm")
+    models = [_model_info(m) for m in page.data]
+    return sorted(models, key=lambda m: m["id"])
+
+
+def _model_info(model: Any) -> dict:
+    extra = model.model_extra or {}
+    pricing = extra.get("pricing") if isinstance(extra.get("pricing"), dict) else {}
+    return {
+        "id": model.id,
+        "owned_by": getattr(model, "owned_by", None) or "",
+        "context_length": extra.get("context_length"),
+        "price_in": _per_million(pricing.get("prompt")),
+        "price_out": _per_million(pricing.get("completion")),
+    }
+
+
+def _per_million(per_token: Any) -> float | None:
+    """Giá USD/token (số hoặc chuỗi) → USD / 1 triệu token; None nếu không đọc được hoặc âm."""
+    try:
+        value = float(per_token)
+    except (TypeError, ValueError):
+        return None
+    return round(value * 1_000_000, 4) if value >= 0 else None
+
+
 def parse_json_loose(text: str) -> dict | None:
     """Đọc object JSON từ chữ của LLM: bỏ khối ```json, rồi cắt từ '{' đầu tới '}' cuối.
 

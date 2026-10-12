@@ -285,6 +285,29 @@ def test_make_client_disables_sdk_retries(monkeypatch):
     assert seen["max_retries"] == 0
 
 
+def test_list_models_sorts_and_converts_per_token_price_to_per_million(monkeypatch):
+    from openai.types import Model
+
+    def model(mid, **extra):
+        return Model.model_validate({"id": mid, "object": "model", "created": 0, "owned_by": "x", **extra})
+
+    data = [
+        model("z-model", pricing={"prompt": "0.0000008", "completion": "0.0000016"}, context_length=131072),
+        model("a-model"),  # endpoint không công bố giá
+        model("bad-price", pricing={"prompt": "-1", "completion": "abc"}),
+    ]
+    client = SimpleNamespace(models=SimpleNamespace(list=lambda: SimpleNamespace(data=data)))
+    monkeypatch.setattr(llm_client, "make_client", lambda base_url, api_key: client)
+
+    models = llm_client.list_models("https://llm.test/v1", "sk")
+
+    assert [m["id"] for m in models] == ["a-model", "bad-price", "z-model"]
+    assert models[0]["price_in"] is None and models[0]["context_length"] is None
+    assert models[1]["price_in"] is None and models[1]["price_out"] is None
+    assert models[2] == {"id": "z-model", "owned_by": "x", "context_length": 131072,
+                         "price_in": 0.8, "price_out": 1.6}
+
+
 def test_shipped_ban_list_has_plan_words():
     words = load_lines("config/ban_words.txt")
     for word in ("khỏi hẳn", "100%", "tốt nhất", "cam kết", "đặc trị"):

@@ -25,6 +25,9 @@ from retry import with_retry
 log = logging.getLogger(__name__)
 
 DEEPGRAM_URL = "https://api.deepgram.com/v1/listen"
+DEEPGRAM_MODELS_URL = "https://api.deepgram.com/v1/models"
+DEEPGRAM_PROJECTS_URL = "https://api.deepgram.com/v1/projects"
+DEEPGRAM_LIST_TIMEOUT_S = 30
 DEEPGRAM_TIMEOUT_S = 300
 FFMPEG_TIMEOUT_S = 600
 SAMPLE_PATH = config.ROOT / "assets" / "sample_1s.mp3"
@@ -141,7 +144,7 @@ def transcribe_deepgram(path: Path | str, api_key: str, stt: dict, keyterms: lis
 def _load_whisper(model_size: str) -> Any:
     from faster_whisper import WhisperModel  # import muộn: chỉ cần khi bật dự phòng chạy máy
 
-    return WhisperModel(model_size, device="cpu", compute_type="int8")
+    return WhisperModel(model_size, device="cpu", compute_type="int8", download_root=str(config.MODELS_DIR))
 
 
 def transcribe_local(path: Path | str, model_size: str) -> dict:
@@ -161,10 +164,42 @@ def transcribe_local(path: Path | str, model_size: str) -> dict:
     return {"text": " ".join(texts), "duration": float(info.duration), "words": words}
 
 
-def check_key(api_key: str) -> None:
-    """Gọi thử Deepgram bằng file mẫu 1 giây. Sai key thì raise AuthError."""
-    stt = config.load_settings()["stt"]
+def check_key(api_key: str, stt: dict | None = None) -> None:
+    """Gọi thử Deepgram bằng file mẫu 1 giây với model/ngôn ngữ của `stt` (mặc định: settings). Sai key thì raise AuthError."""
+    stt = stt or config.load_settings()["stt"]
     transcribe_deepgram(SAMPLE_PATH, api_key, stt, [])
+
+
+def list_deepgram_models(api_key: str) -> list[dict]:
+    """Model chuyển thoại file ghi sẵn (batch) của Deepgram, gộp theo canonical_name, sắp theo tên.
+
+    Mỗi mục: {"name": canonical_name (giá trị gửi ở tham số model), "architecture",
+    "languages": [{"code", "label"}]}. Kiểm tra key trước (GET /v1/projects); sai key → AuthError.
+    Deepgram không trả giá qua API.
+    """
+    headers = {"Authorization": f"Token {api_key}"}
+
+    def _get(url: str) -> Any:
+        resp = requests.get(url, headers=headers, timeout=DEEPGRAM_LIST_TIMEOUT_S)
+        resp.raise_for_status()
+        return resp.json()
+
+    with_retry(lambda: _get(DEEPGRAM_PROJECTS_URL), service="deepgram")
+    payload = with_retry(lambda: _get(DEEPGRAM_MODELS_URL), service="deepgram")
+    names: dict[str, str] = payload.get("languages") or {}
+    merged: dict[str, dict] = {}
+    for m in payload.get("stt") or []:
+        if not m.get("batch") or not m.get("canonical_name"):
+            continue
+        entry = merged.setdefault(m["canonical_name"], {"name": m["canonical_name"],
+                                                       "architecture": m.get("architecture") or "",
+                                                       "codes": set()})
+        entry["codes"].update(m.get("languages") or [])
+    return [
+        {"name": e["name"], "architecture": e["architecture"],
+         "languages": [{"code": c, "label": names.get(c, c)} for c in sorted(e["codes"])]}
+        for e in sorted(merged.values(), key=lambda e: e["name"])
+    ]
 
 
 # --- hook ------------------------------------------------------------------

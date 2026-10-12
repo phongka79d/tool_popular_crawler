@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 import requests
 
+import config
 from collectors import transcript
 from errors import AuthError, QuotaError, ServiceError
 from models import Video
@@ -238,6 +239,52 @@ def test_check_key_raises_auth_error_on_401(monkeypatch):
         transcript.check_key("bad-key")
 
 
+def test_check_key_uses_given_stt_model_and_language(monkeypatch):
+    sent: dict[str, Any] = {}
+
+    def fake_post(url, params, **kwargs):
+        sent["params"] = dict(params)
+        return FakeResponse(200, {"results": {"channels": [{"alternatives": [{"transcript": "", "words": []}]}]},
+                                  "metadata": {"duration": 1.0}})
+
+    monkeypatch.setattr(transcript.requests, "post", fake_post)
+    transcript.check_key("good-key", {**STT, "model": "nova-2-general", "language": "en"})
+    assert sent["params"]["model"] == "nova-2-general"
+    assert sent["params"]["language"] == "en"
+
+
+def test_list_deepgram_models_keeps_batch_merges_languages_and_labels(monkeypatch):
+    payload = {
+        "stt": [
+            {"canonical_name": "nova-3-general", "architecture": "nova-3", "languages": ["vi", "en"], "batch": True},
+            {"canonical_name": "nova-3-general", "architecture": "nova-3", "languages": ["en", "fr"], "batch": True},
+            {"canonical_name": "live-only", "architecture": "x", "languages": ["vi"], "batch": False},
+            {"canonical_name": "base-general", "architecture": "base", "languages": ["en"], "batch": True},
+        ],
+        "languages": {"vi": "Vietnamese", "en": "English"},
+    }
+    urls: list[str] = []
+
+    def fake_get(url, headers, **kwargs):
+        urls.append(url)
+        assert headers["Authorization"] == "Token key-1"
+        return FakeResponse(200, payload if url.endswith("/models") else {"projects": []})
+
+    monkeypatch.setattr(transcript.requests, "get", fake_get)
+    models = transcript.list_deepgram_models("key-1")
+
+    assert urls[0] == transcript.DEEPGRAM_PROJECTS_URL  # key verified before listing
+    assert [m["name"] for m in models] == ["base-general", "nova-3-general"]
+    assert models[1]["languages"] == [
+        {"code": "en", "label": "English"}, {"code": "fr", "label": "fr"}, {"code": "vi", "label": "Vietnamese"},
+    ]
+
+
+def test_list_deepgram_models_bad_key_raises_auth_error(monkeypatch):
+    monkeypatch.setattr(transcript.requests, "get", lambda url, **kwargs: FakeResponse(401))
+    with pytest.raises(AuthError):
+        transcript.list_deepgram_models("bad")
+
 # --- extract_audio ----------------------------------------------------------
 
 def test_extract_audio_uses_contract_ffmpeg_flags(tmp_path, monkeypatch):
@@ -306,8 +353,8 @@ def test_transcribe_local_uses_cpu_int8_vi_word_timestamps(monkeypatch, fresh_wh
         duration = 4.2
 
     class FakeWhisperModel:
-        def __init__(self, size: str, device: str, compute_type: str) -> None:
-            created["init"] = (size, device, compute_type)
+        def __init__(self, size: str, device: str, compute_type: str, download_root: str) -> None:
+            created["init"] = (size, device, compute_type, download_root)
 
         def transcribe(self, path: str, language: str, word_timestamps: bool):
             created["call"] = (path, language, word_timestamps)
@@ -325,7 +372,7 @@ def test_transcribe_local_uses_cpu_int8_vi_word_timestamps(monkeypatch, fresh_wh
 
     result = transcript.transcribe_local(Path("a.mp3"), "small")
 
-    assert created["init"] == ("small", "cpu", "int8")
+    assert created["init"] == ("small", "cpu", "int8", str(config.MODELS_DIR))
     assert created["call"] == ("a.mp3", "vi", True)
     assert result == {
         "text": "Chủ nhà thuốc.",
