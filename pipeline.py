@@ -79,6 +79,7 @@ class Progress:
     step: int = 0  # số việc đã xong trong bước hiện tại (ví dụ số video đã phân tích)
     steps: int = 0  # tổng số việc của bước hiện tại; 0 khi không đếm trước được
     usage: dict | None = None  # ảnh chụp run_log["usage"]: token, số lần gọi, thời gian và tốc độ LLM
+    transient: bool = False  # cập nhật tạm (đếm ngược khi nghỉ): hiện ở khung tiến độ, không ghi vào diễn biến
 
 
 def _safe_message(exc: object, credentials: dict) -> str:
@@ -197,7 +198,7 @@ def run(
         "params": params_log,
         "pages": [],
         "usage": {"jev_tokens": 0, "llm_tokens": 0, "deepgram_minutes": 0.0, "llm_model": settings["llm"]["model"],
-                  "llm_calls": 0, "llm_output_tokens": 0, "llm_seconds": 0.0},
+                  "llm_calls": 0, "llm_output_tokens": 0, "llm_seconds": 0.0, "llm_cached": 0},
         "messages": [],
     }
     credentials = {name: keys.get_key(name) for name in ("jev", "deepgram", "llm")}
@@ -242,14 +243,14 @@ def run(
     scan_stop = ScanStop()
 
     def emit(stage: str, message: str, *, error: str | None = None, done: bool = False,
-             video: Video | None = None, step: int = 0, steps: int = 0) -> None:
+             video: Video | None = None, step: int = 0, steps: int = 0, transient: bool = False) -> None:
         url, index = page_url, page_index
         if video is not None:
             url, index = video.page_url, channels.index(video.page_url) + 1
-        if error is None:
+        if error is None and not transient:
             logger.info("%s", message)
         on_progress(Progress(stage, index, len(channels), url, message, done, error, step, steps,
-                             dict(run_log["usage"])))
+                             dict(run_log["usage"]), transient))
 
     def checkpoint() -> None:
         if abort.is_set():
@@ -376,6 +377,8 @@ def run(
             cached = db.get_llm(db.analysis_cache_key(video))
             if cached is not None:
                 video.llm = cached
+                with lock:
+                    run_log["usage"]["llm_cached"] += 1
                 return "dùng phân tích LLM đã lưu"
             if llm_unavailable:
                 return "không có gợi ý (LLM hết hạn mức)"
@@ -524,7 +527,8 @@ def run(
                             rows = scanner.scan_page(
                                 page_url, days=params.days, formats=params.formats,
                                 max_videos=settings["scan"]["max_videos_per_page"], stop_event=scan_stop,
-                                on_progress=lambda text: emit("scan", f"{where} · {text}"),
+                                on_progress=lambda text, transient=False: emit(
+                                    "scan", f"{where} · {text}", transient=transient),
                             )
                         except ServiceError as exc:
                             rows = getattr(exc, "partial_rows", [])
@@ -581,8 +585,10 @@ def run(
                     emit("filter", f"Đạt ngưỡng: {len(passed)}/{len(collected)} {item_label}.")
                     analyze_all(pool, page_passed)
                     if page_index < len(channels):
-                        emit("scan", "Nghỉ giữa hai kênh như người dùng thật, tránh bị Facebook chặn…")
-                        scanner.polite_page_pause(stop_event=scan_stop)
+                        rest = "Nghỉ giữa hai kênh như người dùng thật, tránh bị Facebook chặn"
+                        emit("scan", f"{rest}…")
+                        scanner.polite_page_pause(stop_event=scan_stop, on_tick=lambda left: emit(
+                            "scan", f"{rest} · còn {left} giây", transient=True))
                         checkpoint()
             checkpoint()
         except (LoginRequired, BrowserUnavailable) as exc:

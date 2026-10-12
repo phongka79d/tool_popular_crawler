@@ -995,8 +995,12 @@ def _usage_panel(usage: dict | None) -> None:
                      help="Đọc ảnh, viết phân tích, viết lại khi Jev loại hết gợi ý, nhận xét tổng hợp.")
     wait_col.metric("Thời gian chờ LLM (giây)", _format_number(round(usage.get("llm_seconds", 0.0), 1)),
                     help="Cộng thời gian chờ của mọi lần gọi; các mục chạy song song nên có thể lớn hơn thời gian quét.")
+    cached = usage.get("llm_cached", 0)
     st.caption(f"Model LLM: {usage.get('llm_model') or '—'} · Token Jev: {_int_text(usage.get('jev_tokens', 0))}"
-               f" · Deepgram: {_format_number(round(usage.get('deepgram_minutes', 0.0), 2))} phút")
+               f" · Deepgram: {_format_number(round(usage.get('deepgram_minutes', 0.0), 2))} phút"
+               + (f" · Dùng lại {cached} phân tích LLM đã lưu (không gọi LLM, không tốn token)" if cached else ""))
+    if speed is None:
+        st.caption("Tốc độ LLM hiện sau lần gọi LLM đầu tiên (khi có video/bài đạt ngưỡng cần phân tích mới).")
 
 
 def _render_running_scan() -> None:
@@ -1088,7 +1092,7 @@ def _drain_scan_queue() -> bool:
                     finished = True
             else:
                 stamp = datetime.now().strftime("%H:%M:%S")
-                if event.message:
+                if event.message and not event.transient:  # đếm ngược chỉ hiện ở khung tiến độ
                     marker = "⚠ " if event.error else ""
                     st.session_state.scan_log.append(f"{stamp}  {marker}{_redact(event.message)}")
                 if event.error:

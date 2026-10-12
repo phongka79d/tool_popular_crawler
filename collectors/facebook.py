@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import math
 import random
 import re
 import threading
@@ -18,7 +19,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 from playwright.sync_api import BrowserContext
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Page as PwPage
-from playwright.sync_api import Response
+from playwright.sync_api import Request
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
@@ -73,12 +74,26 @@ def _stopped(stop_event: threading.Event | None) -> bool:
     return stop_event is not None and stop_event.is_set()
 
 
-def _pause(seconds: float, stop_event: threading.Event | None = None) -> None:
-    """Nghỉ; nếu có stop_event thì thoát ngay khi stop_event được bật."""
-    if stop_event is None:
-        time.sleep(seconds)
-    else:
-        stop_event.wait(seconds)
+def _pause(seconds: float, stop_event: threading.Event | None = None,
+           on_tick: Callable[[int], None] | None = None) -> None:
+    """Nghỉ; nếu có stop_event thì thoát ngay khi stop_event được bật.
+
+    on_tick nhận số giây còn lại (làm tròn lên) mỗi giây, để giao diện hiện đếm ngược.
+    """
+    if on_tick is None:
+        if stop_event is None:
+            time.sleep(seconds)
+        else:
+            stop_event.wait(seconds)
+        return
+    end = time.monotonic() + seconds
+    while (remaining := end - time.monotonic()) > 0:
+        on_tick(math.ceil(remaining))
+        step = min(1.0, remaining)
+        if stop_event is None:
+            time.sleep(step)
+        elif stop_event.wait(step):
+            return
 
 
 def _human_pause(scan_cfg: dict, stop_event: threading.Event | None) -> None:
@@ -349,12 +364,19 @@ class _Collector:
                 for item in self._by_id.values() if item.get("posted_at") is not None][:self.limit]
 
 
-def _drain(pending: list[Response], collector: _Collector, tab_format: str) -> bool:
-    """Read queued bodies and retain valid rows, including batches carrying errors."""
+def _drain(pending: list[Request], collector: _Collector, tab_format: str) -> bool:
+    """Read finished GraphQL requests and retain valid rows, including batches carrying errors."""
     throttled = False
-    responses = list(pending)
+    requests = list(pending)
     pending.clear()
-    for resp in responses:
+    for request in requests:
+        try:
+            resp = request.response()
+        except PlaywrightError as exc:
+            logger.debug("Bỏ qua request GraphQL không có phản hồi: %s", exc)
+            continue
+        if resp is None:
+            continue
         if resp.status == 429 or 500 <= resp.status < 600:
             throttled = True
         if resp.status != 200:
@@ -496,9 +518,9 @@ class FacebookScanner:
         tab_url: str,
         tab_format: str,
         collector: _Collector,
-        pending: list[Response],
+        pending: list[Request],
         stop_event: threading.Event | None,
-        report: Callable[[str], None],
+        report: Callable[..., None],  # report(text, transient=False); transient = đếm ngược, không ghi nhật ký
     ) -> str:
         """Cuộn một tab tới khi có lý do dừng; trả lý do đó để báo tiến độ."""
         scan = self.settings["scan"]
@@ -526,7 +548,8 @@ class FacebookScanner:
                 message = f"Facebook đang giới hạn truy cập, nghỉ {seconds:g} giây rồi thử lại…"
                 logger.warning(message)
                 report(message)
-                _pause(seconds, stop_event)
+                _pause(seconds, stop_event, lambda left: report(
+                    f"Facebook đang giới hạn truy cập, thử lại sau {left} giây…", transient=True))
                 if _stopped(stop_event):
                     return "đã dừng theo yêu cầu"
             else:
@@ -559,7 +582,7 @@ class FacebookScanner:
         formats: set[str],
         max_videos: int,
         stop_event: threading.Event | None = None,
-        on_progress: Callable[[str], None] | None = None,
+        on_progress: Callable[..., None] | None = None,
     ) -> list[dict]:
         """Quét Reels/Video hoặc feed Bài đăng; trả dict từ graphql.flatten đã bỏ trùng.
 
@@ -572,17 +595,19 @@ class FacebookScanner:
         tabs = [(fmt, tab) for fmt, tab in _TABS if fmt in base_formats]
         if not tabs or max_videos <= 0:
             return []
-        report = on_progress or (lambda message: None)
+        report = on_progress or (lambda message, transient=False: None)
         page = self._require_page()
         collector = _Collector(set(formats), days, max_videos)
-        pending: list[Response] = []
+        # Chỉ đọc request đã tải xong: Response.text() của luồng GraphQL chưa đóng chờ mãi, không có timeout,
+        # làm quét đứng yên không báo lỗi.
+        pending: list[Request] = []
         self.scan_errors = []
 
-        def on_response(resp: Response) -> None:
-            if GRAPHQL_MARK in resp.url:
-                pending.append(resp)
+        def on_finished(request: Request) -> None:
+            if GRAPHQL_MARK in request.url:
+                pending.append(request)
 
-        page.on("response", on_response)
+        page.on("requestfinished", on_finished)
         try:
             for fmt, tab in tabs:
                 if collector.full() or _stopped(stop_event):
@@ -612,11 +637,12 @@ class FacebookScanner:
                 else:
                     report(f"Tab {label} xong: {found} {noun}, dừng vì {reason}")
         finally:
-            page.remove_listener("response", on_response)
+            page.remove_listener("requestfinished", on_finished)
             self._export_cookies()
         return collector.videos()
 
-    def polite_page_pause(self, stop_event: threading.Event | None = None) -> None:
-        """Nghỉ 30–60 giây giữa các page (PLAN §4). stop_event bật thì thoát ngay."""
+    def polite_page_pause(self, stop_event: threading.Event | None = None,
+                          on_tick: Callable[[int], None] | None = None) -> None:
+        """Nghỉ 30–60 giây giữa các page (PLAN §4). stop_event bật thì thoát ngay; on_tick nhận số giây còn lại."""
         scan = self.settings["scan"]
-        _pause(random.uniform(scan["page_delay_min_s"], scan["page_delay_max_s"]), stop_event)
+        _pause(random.uniform(scan["page_delay_min_s"], scan["page_delay_max_s"]), stop_event, on_tick)

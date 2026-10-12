@@ -239,6 +239,23 @@ def test_import_cookies_invalid_file_does_not_open_browser(tmp_path, monkeypatch
     assert facebook.import_cookies(tmp_path / "missing.txt") is False
 
 
+@pytest.mark.parametrize("stop_at, expected", [(None, [3, 2, 1]), (2.0, [3, 2])])
+def test_pause_ticks_remaining_seconds_and_stops_early(monkeypatch, stop_at, expected):
+    clock = [0.0]
+    monkeypatch.setattr(facebook.time, "monotonic", lambda: clock[0])
+
+    class Stop:
+        def wait(self, seconds):
+            clock[0] += seconds
+            return stop_at is not None and clock[0] >= stop_at
+
+    ticks = []
+    facebook._pause(2.5, Stop(), ticks.append)
+
+    assert ticks == expected
+
+
+
 @pytest.mark.parametrize("timeout", [True, False])
 @pytest.mark.parametrize(
     "batches, max_rounds, expected_rounds",
@@ -259,11 +276,11 @@ def test_scan_page_expect_response_timeout_stall_and_round_cap(
             self.listener = None
 
         def on(self, event, handler):
-            assert event == "response"
+            assert event == "requestfinished"
             self.listener = handler
 
         def remove_listener(self, event, handler):
-            assert event == "response" and handler is self.listener
+            assert event == "requestfinished" and handler is self.listener
             self.listener = None
 
         def content(self):
@@ -297,8 +314,8 @@ def test_scan_page_expect_response_timeout_stall_and_round_cap(
             self.rounds += 1
             if batch:
                 self.listener(SimpleNamespace(
-                    url="https://www.facebook.com/api/graphql/", status=200,
-                    text=lambda: json.dumps(batch),
+                    url="https://www.facebook.com/api/graphql/",
+                    response=lambda: SimpleNamespace(status=200, text=lambda: json.dumps(batch)),
                 ))
 
     timeout_enabled = timeout
@@ -383,7 +400,8 @@ def test_scan_page_posts_scrolls_past_old_pinned_post(monkeypatch):
         rounds.append(1)
         body = json.dumps(next(batches))
         pending_listener["handler"](SimpleNamespace(
-            status=200, url="https://www.facebook.com/api/graphql/", text=lambda: body,
+            url="https://www.facebook.com/api/graphql/",
+            response=lambda: SimpleNamespace(status=200, text=lambda: body),
         ))
 
     monkeypatch.setattr(scanner, "_scroll_once", scroll)
@@ -787,8 +805,8 @@ def _fake_scan(monkeypatch, responses, formats=None):
             raise response
         status, payload = response
         listener["handler"](SimpleNamespace(
-            status=status, url="https://www.facebook.com/api/graphql/",
-            text=lambda: json.dumps(payload),
+            url="https://www.facebook.com/api/graphql/",
+            response=lambda: SimpleNamespace(status=status, text=lambda: json.dumps(payload)),
         ))
 
     monkeypatch.setattr(scanner, "_scroll_once", scroll)
@@ -816,7 +834,7 @@ def test_throttles_back_off_and_raise_with_partial_rows(monkeypatch, throttle):
     row = {"video_id": "1", "format": "reel", "posted_at": 1_900_000_000}
     scanner, calls = _fake_scan(monkeypatch, [(200, {"rows": [row]}), throttle, throttle, throttle])
     pauses, progress = [], []
-    monkeypatch.setattr(facebook, "_pause", lambda seconds, event: pauses.append(seconds))
+    monkeypatch.setattr(facebook, "_pause", lambda seconds, event, on_tick=None: pauses.append(seconds))
     with pytest.raises(facebook.QuotaError) as caught:
         scanner.scan_page("https://www.facebook.com/Test", 30, {"reel"}, 100, on_progress=progress.append)
     assert pauses == [60, 120]
@@ -831,12 +849,12 @@ def test_throttle_retry_success_and_stop_during_backoff(monkeypatch):
     row = {"video_id": "1", "format": "reel", "posted_at": 1_900_000_000}
     scanner, calls = _fake_scan(monkeypatch, [(429, {}), (200, {"rows": [row]})])
     pauses = []
-    monkeypatch.setattr(facebook, "_pause", lambda seconds, event: pauses.append(seconds))
+    monkeypatch.setattr(facebook, "_pause", lambda seconds, event, on_tick=None: pauses.append(seconds))
     assert scanner.scan_page("https://www.facebook.com/Test", 30, {"reel"}, 1) == [row]
     assert pauses == [60] and len(calls) == 2
     stop = threading.Event()
     scanner, calls = _fake_scan(monkeypatch, [(200, {"rows": [row]}), (429, {})])
-    monkeypatch.setattr(facebook, "_pause", lambda seconds, event: event.set())
+    monkeypatch.setattr(facebook, "_pause", lambda seconds, event, on_tick=None: event.set())
     assert scanner.scan_page("https://www.facebook.com/Test", 30, {"reel"}, 100, stop_event=stop) == [row]
     assert len(calls) == 2
 

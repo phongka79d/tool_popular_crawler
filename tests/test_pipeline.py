@@ -86,8 +86,11 @@ def harness(monkeypatch, tmp_path):
                 state.scan_stop.set()
             return deepcopy(state.rows[url])
 
-        def polite_page_pause(self, stop_event=None):
+        def polite_page_pause(self, stop_event=None, on_tick=None):
             state.pauses.append(True)
+            if on_tick:
+                for left in (2, 1):
+                    on_tick(left)
             if state.pause_hook:
                 state.pause_hook(stop_event)
 
@@ -560,6 +563,22 @@ def test_first_page_analysis_overlaps_next_page_scan(harness, monkeypatch):
     assert events[0].message.startswith("Video 1:")
     assert events[0].steps == 1
     assert events[-1].step == events[-1].steps == 2
+
+
+def test_rest_between_channels_counts_down_without_flooding_the_log(harness, caplog):
+    h = harness
+    h.channels.append("second")
+    h.pages["second"] = Page("second", "Kênh thứ hai", 100)
+    h.rows["second"] = [dict(h.rows["large"][0], video_id="v2")]
+
+    with caplog.at_level("INFO", logger="pipeline"):
+        assert h.run() is not None
+
+    ticks = [p for p in h.progress if "còn" in p.message and "giây" in p.message]
+    assert [p.message.rsplit("· ", 1)[1] for p in ticks] == ["còn 2 giây", "còn 1 giây"]
+    assert all(p.transient for p in ticks)
+    assert not any("còn 2 giây" in record.getMessage() for record in caplog.records)
+
 
 
 @pytest.mark.parametrize("error", [
