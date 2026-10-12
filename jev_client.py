@@ -22,12 +22,11 @@ HOOK_FALLBACK_MAX = 200
 UNSURE_SUFFIX = " (chưa chắc)"
 YES_TEXT = "Có"
 NO_TEXT = "Không"
-LABELS_KIND = "labels"
+LABELS_KIND = "labels_v2"
 AUTH_MESSAGE = "API key [Jev] không hợp lệ. Vào Cài đặt để nhập lại."
 ZERO_USAGE = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
-# PLAN §7: reject a suggestion if giu_cong_thuc < 1, chep_nguyen > 0.5 or rui_ro > 0.5.
-MIN_FORMULA_KEEP = 1.0
+MIN_FORMULA_KEEP = 0.5
 MAX_COPY = 0.5
 MAX_RISK = 0.5
 
@@ -84,22 +83,27 @@ FORMULA_LEVELS = [
 
 
 def build_state(video: Video, my_page_desc: str) -> dict:
-    """State sent to Jev (PLAN §6): hook, caption and transcript are truncated."""
+    """Truncated source text; written posts never include transcript state."""
     caption = video.caption or ""
-    transcript = video.transcript or ""
-    return {
-        "hook": video.hook or caption[:HOOK_FALLBACK_MAX],
+    is_post = video.format == "post"
+    first_line = caption.splitlines()[0] if caption else ""
+    state = {
+        "hook": (first_line if is_post else video.hook or caption)[:HOOK_FALLBACK_MAX],
         "caption": caption[:CAPTION_MAX],
-        "transcript": transcript[:TRANSCRIPT_MAX],
         "my_page": my_page_desc,
     }
+    if not is_post:
+        state["transcript"] = (video.transcript or "")[:TRANSCRIPT_MAX]
+    return state
 
 
-def build_questions(taxonomy: dict) -> dict[str, Choice | Noul | Score]:
-    """All labelling questions for one Jev call: 4 Choices, 1 hook Score, 4 Noul, 4 Score extras."""
+def build_questions(taxonomy: dict, is_post: bool = False) -> dict[str, Choice | Noul | Score]:
+    """All content kinds use the same answer keys, with source-specific wording."""
+    source = "`caption`" if is_post else "`caption` và `transcript` (khi không có thoại, chỉ dựa vào `caption`)"
+    layout_source = "`caption`" if is_post else "`transcript` hoặc `caption` khi không có thoại"
     questions: dict[str, Choice | Noul | Score] = {
         "topic": Choice(
-            instructions="Chủ đề chính của `caption` và `transcript` thuộc nhóm nào?",
+            instructions=f"Chủ đề chính của {source} thuộc nhóm nào?",
             criteria=dict(taxonomy["topic"]),
         ),
         "hook_type": Choice(
@@ -107,11 +111,11 @@ def build_questions(taxonomy: dict) -> dict[str, Choice | Noul | Score]:
             criteria=dict(taxonomy["hook_type"]),
         ),
         "structure": Choice(
-            instructions="`transcript` được sắp xếp theo cấu trúc nào?",
+            instructions=f"{layout_source} được sắp xếp theo cấu trúc nào? Xét bố cục mở – thân – kết và trình tự các ý.",
             criteria=dict(taxonomy["structure"]),
         ),
         "cta": Choice(
-            instructions="Lời kêu gọi hành động trong `transcript` hoặc `caption` là gì? Chọn `khong_co` nếu không có CTA, hoặc `khac` nếu có CTA nhưng không thuộc các nhóm liệt kê.",
+            instructions=f"Lời kêu gọi hành động trong {source} là gì? Chọn `khong_co` nếu không có CTA, hoặc `khac` nếu có CTA nhưng không thuộc các nhóm liệt kê.",
             criteria=dict(taxonomy["cta"]),
         ),
         "hook_strength": Score(
@@ -119,19 +123,26 @@ def build_questions(taxonomy: dict) -> dict[str, Choice | Noul | Score]:
             criteria=list(HOOK_LEVELS),
         ),
         "relevant": Noul(
-            instructions="`caption` hoặc `transcript` có liên quan trực tiếp tới nghề dược hoặc kinh doanh nhà thuốc không?",
+            instructions=f"{source} có liên quan trực tiếp tới nghề dược hoặc kinh doanh nhà thuốc không?",
         ),
         "replicable": Noul(
             instructions="Page mô tả trong `my_page` có làm lại được ý tưởng này với nội dung của mình không?",
         ),
         "risk_absolute": Noul(
-            instructions="`caption` hoặc `transcript` có câu khẳng định tuyệt đối hoặc cam kết chữa khỏi bệnh không?",
+            instructions=f"{source} có câu khẳng định tuyệt đối hoặc cam kết chữa khỏi bệnh không?",
         ),
         "risk_compare": Noul(
-            instructions="`caption` hoặc `transcript` có so sánh, chê bai đối thủ hoặc thương hiệu cụ thể không?",
+            instructions=f"{source} có so sánh, chê bai đối thủ hoặc thương hiệu cụ thể không?",
         ),
     }
     for key, (instructions, levels) in EXTRA_SCORES.items():
+        if is_post:
+            instructions = instructions.replace("`caption` và `transcript`", "`caption`")
+            instructions = instructions.replace("`transcript` hoặc `caption`", "`caption`")
+            instructions = instructions.replace("`transcript`", "`caption`")
+            instructions = instructions.replace("video này", "bài viết này").replace("Người xem", "Người đọc")
+        else:
+            instructions += " Nếu không có thoại, chỉ dựa vào `caption`."
         questions[key] = Score(instructions=instructions, criteria=list(levels))
     return questions
 
@@ -146,7 +157,7 @@ def ask_labels(
         logger.info("Dùng lại nhãn Jev đã lưu của video %s", video.video_id)
         return cached, dict(ZERO_USAGE)
 
-    questions = build_questions(taxonomy)
+    questions = build_questions(taxonomy, is_post=video.format == "post")
     state = build_state(video, _my_page_desc(settings))
     response = with_retry(
         lambda: client.system_one(state=state, questions=questions, model=model),
@@ -184,6 +195,11 @@ def interpret_labels(answers_raw: dict, settings: dict, taxonomy: dict) -> dict:
     out["hook_strength"] = _to_level(float(answers_raw["hook_strength"]["score"]))
     for key in EXTRA_SCORES:
         out[key] = float(answers_raw[key]["score"])
+    viral_scores = [
+        min(1.0, max(0.0, float(answers_raw[key]["score"])))
+        for key in ("hook_strength", *EXTRA_SCORES)
+    ]
+    out["jev_viral"] = sum(viral_scores) / len(viral_scores)
     for key in ("hook_strength", *EXTRA_SCORES):
         conf = float(answers_raw[key]["confidence"])
         confidence[key] = conf
@@ -214,17 +230,20 @@ def check_suggestions(
         return [], {}, dict(ZERO_USAGE)
 
     model = settings["jev"]["model"]
+    is_post = video.format == "post"
+    original = "bài gốc" if is_post else "video gốc"
+    source = "`caption`" if is_post else "`transcript` (hoặc `caption` khi không có thoại)"
     questions: dict[str, Choice | Noul | Score] = {}
     for i in range(len(suggestions)):
         questions[f"giu_cong_thuc_{i}"] = Score(
             instructions=(
-                f"`goi_y[{i}].hook_moi` có cùng kiểu hook (`kieu_hook_goc`) "
-                "và cùng cấu trúc (`cau_truc_goc`) với video gốc không?"
+                f"`goi_y[{i}].hook_moi` và `goi_y[{i}].y_tuong` có giữ kiểu hook (`kieu_hook_goc`) "
+                f"hoặc cấu trúc (`cau_truc_goc`) của {original} không?"
             ),
             criteria=list(FORMULA_LEVELS),
         )
         questions[f"chep_nguyen_{i}"] = Noul(
-            instructions=f"`goi_y[{i}].y_tuong` có lặp lại gần nguyên văn câu chữ trong `transcript` không?",
+            instructions=f"`goi_y[{i}].hook_moi` hoặc `goi_y[{i}].y_tuong` có lặp lại gần nguyên văn câu chữ trong {source} không? Chỉ trùng chủ đề hoặc công thức không tính là chép.",
         )
         questions[f"rui_ro_{i}"] = Noul(
             instructions=(
@@ -236,12 +255,14 @@ def check_suggestions(
     state = {
         "kieu_hook_goc": _plain_label(video.jev["hook_type"]),
         "cau_truc_goc": _plain_label(video.jev["structure"]),
-        "transcript": (video.transcript or "")[:TRANSCRIPT_MAX],
+        "caption": (video.caption or "")[:CAPTION_MAX],
         "goi_y": [
             {"hook_moi": s.get("hook_moi", ""), "y_tuong": s.get("y_tuong", "")}
             for s in suggestions
         ],
     }
+    if not is_post:
+        state["transcript"] = (video.transcript or "")[:TRANSCRIPT_MAX]
     response = with_retry(
         lambda: client.system_one(state=state, questions=questions, model=model),
         service="jev",

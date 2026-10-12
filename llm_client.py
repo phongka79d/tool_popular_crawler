@@ -39,13 +39,32 @@ Trả về JSON đúng các khóa:
  "vi_tri_cta": "đầu, giữa hoặc cuối video, kèm cơ chế (mồi bình luận, inbox nhận tài liệu, lưu, chia sẻ); ghi 'không có CTA' nếu không kêu gọi",
  "goi_y_nhan_ban": [{"hook_moi": "", "y_tuong": ""}, ... đúng 3 mục]}"""
 
+POST_SYSTEM_PROMPT = """Bạn là biên tập viên content cho page B2B ngành dược (khách: chủ nhà thuốc, dược sĩ).
+Đầu vào là bài đăng chữ/ảnh: chỉ dùng caption và các nhãn Jev (chủ đề, kiểu hook, cấu trúc, CTA).
+Giữ nguyên nhãn. Viết tiếng Việt tự nhiên; không khẳng định tuyệt đối, so sánh đối thủ hoặc chép nguyên câu bài gốc.
+Không bịa nội dung, số liệu, lời chứng thực hay chi tiết trong ảnh không được mô tả trong caption.
+Thiếu dữ liệu cho khóa nào thì ghi "không có dữ liệu". Hook gốc là dòng đầu tiên của caption.
+Lý do viral chỉ là giả thuyết dựa trên cách viết, không phải kết luận nhân quả.
+Trả về JSON đúng các khóa:
+{"chu_de_bai": "<= 12 chữ",
+ "tom_tat": "2-3 câu",
+ "hook_goc": "dòng đầu tiên của caption",
+ "ly_do_viral": "1-2 câu, nêu là giả thuyết",
+ "goc_nhin": "1-2 câu theo khung 'Nhiều người nghĩ... đối lại Thực tế là...'",
+ "mau_hook_dien_cho_trong": "mẫu mở bài có chỗ trống [ ]",
+ "vi_tri_cta": "đầu, giữa hoặc cuối bài đăng, kèm cơ chế (bình luận, inbox, lưu, chia sẻ); ghi 'không có CTA' nếu không kêu gọi",
+ "goi_y_nhan_ban": [{"hook_moi": "", "y_tuong": ""}, ... đúng 3 mục]}
+Gợi ý là 3 ý tưởng bài đăng mới cho khách hàng của page, giữ kiểu hook hoặc cấu trúc bài gốc,
+khác câu chữ và tình huống; y_tuong nêu rõ bố cục bài viết, không yêu cầu quay hay thu âm."""
+
 RETRY_PROMPT = "Chỉ trả JSON đúng các khóa đã yêu cầu. Không thêm lời dẫn, không bọc trong khối mã."
 
 COMMENTARY_SYSTEM_PROMPT = """Bạn viết nhận xét cho báo cáo "công thức đang thắng" của page B2B ngành dược (khách: chủ nhà thuốc, dược sĩ).
 Đầu vào là hai bảng đếm đã tính sẵn dạng JSON: by_topic (theo nhóm chủ đề) và by_hook (theo kiểu hook).
-Mỗi dòng có label, count (số video), avg_views (view trung bình), avg_score (điểm công thức trung bình).
-Viết 5-7 dòng tiếng Việt về công thức đang thắng: nhóm nào có view và điểm cao, kiểu hook nào nên thử,
-và nêu rõ khi số video còn ít thì kết luận còn yếu. Chỉ dựa trên số trong bảng, không bịa thêm.
+Mỗi dòng có label, count (số nội dung), avg_views (lượt xem trung bình nếu có), avg_score (điểm công thức trung bình).
+Viết 5-7 dòng tiếng Việt về công thức đang thắng: nhóm nào có chỉ số và điểm cao, kiểu hook nào nên thử,
+và nêu rõ khi số nội dung còn ít thì kết luận còn yếu. Chỉ dựa trên số trong bảng, không bịa thêm.
+Chỉ số thiếu/null không có nghĩa là 0; không suy ra lượt xem cho bài đăng khi bảng không có dữ liệu.
 Mỗi dòng là một câu hoàn chỉnh, không đánh số, không gạch đầu dòng, không dùng emoji."""
 
 _TABLE_FIELDS = ("label", "count", "avg_views", "avg_score")
@@ -197,7 +216,7 @@ def write_analysis(client: OpenAI, model: str, video: Video, labels: dict, setti
     """
     temperature = settings["llm"]["temperature"]
     messages: list[dict[str, str]] = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": POST_SYSTEM_PROMPT if video.format == "post" else SYSTEM_PROMPT},
         {"role": "user", "content": _user_prompt(video, labels)},
     ]
     text, usage, json_mode = _chat(client, model, messages, temperature, json_mode=True)
@@ -220,10 +239,22 @@ def write_analysis(client: OpenAI, model: str, video: Video, labels: dict, setti
 
 
 def _user_prompt(video: Video, labels: dict) -> str:
+    if video.format == "post":
+        caption = video.caption or ""
+        hook = caption.splitlines()[0] if caption else "(không có)"
+        content = (
+            f"Bài đăng chữ/ảnh, chỉ phân tích caption:\n{caption or '(không có)'}\n\n"
+            f"Hook (dòng đầu caption):\n{hook}\n\n"
+            "Xác định vị trí CTA trong bài đăng; gợi ý là ý tưởng bài đăng mới.\n\n"
+        )
+    else:
+        content = (
+            f"Caption:\n{video.caption or '(không có)'}\n\n"
+            f"Transcript:\n{video.transcript or '(không có thoại, chỉ dựa vào caption)'}\n\n"
+            f"Hook (vài giây đầu):\n{video.hook or '(không có)'}\n\n"
+        )
     return (
-        f"Caption:\n{video.caption or '(không có)'}\n\n"
-        f"Transcript:\n{video.transcript or '(không có thoại, chỉ dựa vào caption)'}\n\n"
-        f"Hook (vài giây đầu):\n{video.hook or '(không có)'}\n\n"
+        content +
         "Nhãn Jev đã gắn (giữ nguyên, không đặt nhãn mới):\n"
         f"- Chủ đề: {_label(labels, 'topic')}\n"
         f"- Kiểu hook: {_label(labels, 'hook_type')}\n"

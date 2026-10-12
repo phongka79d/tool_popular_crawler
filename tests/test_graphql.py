@@ -150,18 +150,62 @@ def test_flatten_video_returns_exact_fields():
     assert gql.flatten(_story(_sample_stories(), "700000000000002")) == VIDEO
 
 
-@pytest.mark.parametrize("post_id", ["700000000000003", "700000000000004"])
-def test_flatten_drops_photo_post_and_share(post_id):
-    assert gql.flatten(_story(_sample_stories(), post_id)) is None
+def test_flatten_keeps_photo_post_and_share_with_own_message():
+    photo = gql.flatten(_story(_sample_stories(), "700000000000003"))
+    assert photo == {
+        "video_id": "700000000000003",
+        "url": "https://www.facebook.com/TramDuocMau/posts/pfbid0SyntheticPhotoPost",
+        "posted_at": 1790400000,
+        "caption": "Lịch khám sức khỏe đầu năm, mời quý khách đặt hẹn",
+        "views": None, "reactions": 40, "comments": None, "shares": 3,
+        "duration_s": None, "format": "post",
+    }
+    share = gql.flatten(_story(_sample_stories(), "700000000000004"))
+    assert share["format"] == "post"
+    assert share["caption"] == "Chia sẻ từ trang khác"
+
+
+def test_flatten_drops_pure_reshare_without_own_message():
+    story = _story(_sample_stories(), "700000000000004")
+    del story["comet_sections"]["content"]["story"]["message"]
+    assert gql.flatten(story) is None
+
+
+@pytest.mark.parametrize("media", [None, "Photo", "ExternalUrl"])
+def test_flatten_keeps_text_photo_and_link_posts(media):
+    story = _video_story(media=media)
+    story["message"] = {"text": "Nội dung của trang"}
+    if media is None:
+        story["attachments"] = []
+    record = gql.flatten(story)
+    assert record["format"] == "post"
+    assert record["caption"] == "Nội dung của trang"
+    assert record["url"] == "https://www.facebook.com/700000000000100"
+    assert record["views"] is None and record["duration_s"] is None
+    assert record["reactions"] is None and record["comments"] is None and record["shares"] is None
+
+
+@pytest.mark.parametrize("media", [None, "Photo"])
+def test_flatten_drops_post_without_text_but_keeps_captionless_video(media):
+    post = _video_story(media=media)
+    post.pop("message", None)
+    if media is None:
+        post["attachments"] = []
+    assert gql.flatten(post) is None
+    video = _video_story()
+    video.pop("message", None)
+    assert gql.flatten(video)["format"] in {"reel", "video"}
 
 
 def test_flatten_requires_post_id():
     assert gql.flatten({"__typename": "Story", "attachments": []}) is None
 
 
-def test_parse_graphql_response_returns_each_video_once():
+def test_parse_graphql_response_returns_each_post_or_video_once():
     videos = gql.parse_graphql_response(SAMPLE_TEXT)
-    assert [video["video_id"] for video in videos] == ["700000000000001", "700000000000002"]
+    assert [video["video_id"] for video in videos] == [
+        "700000000000001", "700000000000002", "700000000000003", "700000000000004",
+    ]
     assert videos[0]["views"] == 152300  # the stale duplicate (999) must not win
 
 
@@ -300,7 +344,14 @@ def test_reels_tab_story_takes_counters_from_deferred_fragments_by_node_id():
 
 
 def test_parse_initial_html_reads_only_data_sjs_blobs():
-    assert gql.parse_initial_html(PAGE_HTML) == [HTML_REEL, HTML_VIDEO]
+    assert gql.parse_initial_html(PAGE_HTML) == [HTML_REEL, {
+        "video_id": "700000000000012",
+        "url": "https://www.facebook.com/TramDuocMau/posts/pfbid0SyntheticPhotoHtml",
+        "posted_at": 1790150000,
+        "caption": "Thông báo lịch nghỉ lễ của nhà thuốc",
+        "views": None, "reactions": 21, "comments": None, "shares": 1,
+        "duration_s": None, "format": "post",
+    }, HTML_VIDEO]
 
 
 def test_parse_page_header_reads_page_node_from_initial_html():

@@ -6,7 +6,8 @@
   },
   "tabs": {
     "reel": "reels",
-    "video": "videos"
+    "video": "videos",
+    "post": "posts"
   },
   "login": {
     "blocked_path_prefixes": ["/checkpoint", "/login"]

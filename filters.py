@@ -1,68 +1,38 @@
-"""Lọc viral bằng code thuần (PLAN §5) và Điểm công thức (PLAN §6).
-
-Jev không tham gia bước này: mọi phép tính, so sánh ngưỡng và cộng điểm đều nằm ở đây.
-"""
+"""Lọc theo lượt xem hoặc tổng tương tác và tính Điểm công thức."""
 from __future__ import annotations
 
-import logging
 import statistics
 
 from models import Video
-
-log = logging.getLogger(__name__)
 
 MIN_VIDEOS_FOR_MEDIAN = 5
 NOTE_TOO_FEW_FOR_MEDIAN = f"Chưa đủ {MIN_VIDEOS_FOR_MEDIAN} video để tính trung vị"
 NOTE_ZERO_MEDIAN = "Trung vị view của page bằng 0, không tính được hệ số trung vị"
 _MEDIAN_NOTES = (NOTE_TOO_FEW_FOR_MEDIAN, NOTE_ZERO_MEDIAN)
 
-# Chỉ số có thể dùng làm điều kiện lọc (ngưỡng tối thiểu).
-RULE_METRICS = frozenset(
-    {"views", "ratio_follow", "ratio_median", "share_rate", "engagement", "shares", "comments", "reactions"}
-)
-
-PRESETS: dict[str, dict] = {
-    "viral_tuyet_doi": {"label": "Viral tuyệt đối", "rules": {"views": 50_000}},
-    "vuot_tep_follower": {"label": "Vượt tệp follower", "rules": {"ratio_follow": 5}},
-    "bung_no_manh": {"label": "Bùng nổ mạnh", "rules": {"ratio_follow": 10}},
-    "no_bat_thuong": {
-        "label": "Nổ bất thường của kênh (khuyên dùng)",
-        "rules": {"ratio_median": 3},
-    },
-    "dang_chia_se": {
-        "label": "Nội dung đáng chia sẻ",
-        "rules": {"share_rate": 0.01, "views": 10_000},
-    },
-    "tu_nhap": {"label": "Tự nhập", "rules": {}},
-}
 
 
 def compute_metrics(videos: list[Video]) -> None:
-    """Gán ratio_follow, ratio_median, engagement, share_rate cho từng video, tại chỗ.
-
-    Trung vị view được tính riêng cho từng page_url trong đợt quét. Cần ít nhất
-    MIN_VIDEOS_FOR_MEDIAN video có view; nếu không thì ratio_median = None và ghi chú vào video.
-    Mọi phép chia đều an toàn với None và 0: mẫu số bằng 0 hoặc thiếu thì kết quả là None.
-    """
-    groups: dict[str, list[Video]] = {}
+    """Tính chỉ số tại chỗ; trung vị riêng theo kênh và loại nội dung."""
+    groups: dict[tuple[str, bool], list[Video]] = {}
+    post_notes = ("Chưa đủ 5 bài đăng để tính trung vị",
+                  "Trung vị tương tác của page bằng 0, không tính được hệ số trung vị")
     for video in videos:
-        groups.setdefault(video.page_url, []).append(video)
-
-    for group in groups.values():
-        views = [v.views for v in group if v.views is not None]
-        if len(views) < MIN_VIDEOS_FOR_MEDIAN:
-            median: float | None = None
-            note: str | None = NOTE_TOO_FEW_FOR_MEDIAN
-        else:
-            median = statistics.median(views)
-            note = NOTE_ZERO_MEDIAN if median == 0 else None
-
-        for video in group:
+        known = [part for part in (video.reactions, video.comments, video.shares) if part is not None]
+        video.interactions = sum(known) if known else None
+        groups.setdefault((video.page_url, video.format == "post"), []).append(video)
+    for (_, is_post), group in groups.items():
+        values = [v.interactions if is_post else v.views for v in group]
+        known = [value for value in values if value is not None]
+        notes = post_notes if is_post else _MEDIAN_NOTES
+        median = statistics.median(known) if len(known) >= MIN_VIDEOS_FOR_MEDIAN else None
+        note = notes[0] if median is None else notes[1] if median == 0 else None
+        for video, value in zip(group, values):
             video.ratio_follow = _safe_div(video.views, video.page_followers)
-            video.ratio_median = _safe_div(video.views, median)
+            video.ratio_median = _safe_div(value, median)
             video.engagement = _engagement(video)
             video.share_rate = _safe_div(video.shares, video.views)
-            video.notes = [n for n in video.notes if n not in _MEDIAN_NOTES]
+            video.notes = [n for n in video.notes if n not in (*_MEDIAN_NOTES, *post_notes)]
             if note is not None:
                 video.notes.append(note)
 
@@ -80,39 +50,15 @@ def _engagement(video: Video) -> float | None:
     return _safe_div(sum(parts), video.views)
 
 
-def passes(video: Video, rules: dict) -> bool:
-    """True nếu video đạt TẤT CẢ ngưỡng trong rules (AND).
-
-    Chỉ số của video bằng None thì không đạt. Ngưỡng None nghĩa là không đặt điều kiện.
-    Chỉ số không có trong RULE_METRICS là lỗi lập trình nên báo ValueError.
-    """
-    for metric, minimum in rules.items():
-        if metric not in RULE_METRICS:
-            raise ValueError(f"Chỉ số lọc không hợp lệ: {metric}")
-        if minimum is None:
-            continue
-        value = getattr(video, metric)
-        if value is None or value < minimum:
-            return False
-    return True
+def passes(video: Video, min_views: int = 0, min_interactions: int = 0) -> bool:
+    """Ngưỡng bao gồm giá trị bằng; 0 tắt lọc, số liệu chưa biết không đạt."""
+    minimum = min_interactions if video.format == "post" else min_views
+    value = video.interactions if video.format == "post" else video.views
+    return minimum <= 0 or (value is not None and value >= minimum)
 
 
-def apply_filter(videos: list[Video], rules: dict) -> list[Video]:
-    """Giữ lại các video đạt rules, giữ nguyên thứ tự."""
-    return [video for video in videos if passes(video, rules)]
-
-
-def page_allowed(followers: int | None, min_followers: int) -> bool:
-    """Page có đủ quy mô để quét không (PLAN §5, bộ lọc quy mô page).
-
-    min_followers <= 0 thì tắt bộ lọc. Không đọc được số follower (None) thì cho quét và ghi cảnh báo.
-    """
-    if min_followers <= 0:
-        return True
-    if followers is None:
-        log.warning("Không đọc được số follower của page; vẫn đưa vào quét")
-        return True
-    return followers >= min_followers
+def apply_filter(videos: list[Video], min_views: int = 0, min_interactions: int = 0) -> list[Video]:
+    return [video for video in videos if passes(video, min_views, min_interactions)]
 
 
 def formula_score(
@@ -121,11 +67,12 @@ def formula_score(
     hook_strength: int | None,
     relevant_p: float | None,
     weights: dict,
+    jev_viral: float | None = None,
 ) -> float:
     """Điểm công thức 0–100 theo PLAN §6:
 
         diem = w_ratio·min(ratio_median/cap, 1) + w_replicable·replicable_p
-               + w_hook·(hook_strength/2) + w_relevant·relevant_p
+               + w_hook·(hook_strength/2) + w_relevant·relevant_p + w_jev·jev_viral
 
     weights là settings["score_weights"]. Đầu vào None tính bằng 0; xác suất và hook được kẹp về miền hợp lệ.
     """
@@ -143,6 +90,7 @@ def formula_score(
         + weights["replicable"] * replicable
         + weights["hook_strength"] * hook
         + weights["relevant"] * relevant
+        + weights.get("jev_viral", 0) * (_clamp01(jev_viral) if jev_viral is not None else 0.0)
     )
     return float(min(max(score, 0.0), 100.0))
 

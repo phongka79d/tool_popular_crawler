@@ -196,7 +196,7 @@ def _merge_story_fields(first: dict, later: dict) -> dict:
 
 
 def flatten(story: dict, paths: GraphqlPaths | None = None) -> dict | None:
-    """Flatten one Story node into a video record, or return None when it is not a video.
+    """Flatten one Story node into a video or non-video post record.
 
     Counts that the story does not carry are None (unknown), never 0.
     """
@@ -207,10 +207,24 @@ def flatten(story: dict, paths: GraphqlPaths | None = None) -> dict | None:
     if video_id is None:
         return None
     feedback = _merged(story, p.feedback)
-    if not _is_video(story, feedback, p):
+    caption = _first(story, p.message, _as_text)
+    is_video = _is_video(story, feedback, p)
+    if not caption and any(
+        node.get("attached_story") or node.get("shared_story")
+        or isinstance(node.get("target"), dict) and node["target"].get(_TYPENAME_KEY) == p.story_typename
+        for node in _walk_dicts(story)
+    ):
         return None
-    url = _first(story, p.permalink_url, _as_text) or p.fallback_url.format(video_id=video_id)
-    return _record(video_id, url, _first(story, p.creation_time, _as_int), _first(story, p.message, _as_text),
+    fallback = p.fallback_url.format(video_id=video_id) if is_video else f"https://www.facebook.com/{video_id}"
+    url = _first(story, p.permalink_url, _as_text) or fallback
+    if not is_video:
+        if not caption:
+            return None  # sự kiện, ảnh trống chữ: không có gì để phân tích
+        record = _record(video_id, url, _first(story, p.creation_time, _as_int), caption,
+                         None, feedback, None, p)
+        record["format"] = "post"
+        return record
+    return _record(video_id, url, _first(story, p.creation_time, _as_int), caption,
                    _first(feedback, p.views, _as_count), feedback,
                    _duration(story, p.duration_ms, p.duration_s), p)
 
@@ -263,13 +277,13 @@ def _record(video_id: str, url: str, posted_at: int | None, caption: str | None,
 
 
 def parse_graphql_response(text: str, paths: GraphqlPaths | None = None) -> list[dict]:
-    """Videos from one ``/api/graphql/`` response body, one record per video_id."""
+    """Posts and videos from one ``/api/graphql/`` response, one record per video_id."""
     p = paths if paths is not None else load_paths()
     return _videos_from(split_json_values(text), p)
 
 
 def parse_initial_html(html: str, paths: GraphqlPaths | None = None) -> list[dict]:
-    """Videos from the first page load: JSON inside ``<script data-sjs>`` blobs."""
+    """Posts and videos from the first page load's ``<script data-sjs>`` blobs."""
     p = paths if paths is not None else load_paths()
     return _videos_from(_sjs_values(html), p)
 

@@ -4,7 +4,9 @@ from __future__ import annotations
 import argparse
 import logging
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 # Số video phân tích cùng lúc. Mỗi video chủ yếu chờ mạng (Deepgram, Jev, LLM ~1 phút/lần gọi),
 # nên chạy song song rút ngắn thời gian gần bằng số luồng mà không tốn thêm CPU.
-ANALYZE_WORKERS = 3
+ANALYZE_WORKERS = 4
 _METRICS = ("views", "reactions", "comments", "shares", "posted_at", "duration_s")
 
 
@@ -35,9 +37,12 @@ _METRICS = ("views", "reactions", "comments", "shares", "posted_at", "duration_s
 class RunParams:
     days: int
     formats: set[str]
-    min_page_followers: int
-    rules: dict
-    preset: str
+    min_views: int = 0
+    min_interactions: int = 0
+
+
+def is_post_run(params: RunParams) -> bool:
+    return params.formats == {"post"}
 
 
 @dataclass
@@ -65,12 +70,10 @@ def _count_text(value: int | None) -> str:
     return f"{value:,}".replace(",", ".") if value is not None else "?"
 
 
-def check_all_keys(settings: dict) -> dict[str, str | None]:
-    """Kiểm tra lại cả ba dịch vụ trước khi mở Facebook; không lưu key.
-
-    Ba dịch vụ độc lập nên kiểm tra song song: chờ bằng dịch vụ chậm nhất, không phải tổng cả ba.
-    """
-    credentials = {name: keys.get_key(name) for name in ("jev", "deepgram", "llm")}
+def check_all_keys(settings: dict, *, require_deepgram: bool = True) -> dict[str, str | None]:
+    """Kiểm tra song song các dịch vụ cần cho loại quét."""
+    names = ("jev", "deepgram", "llm") if require_deepgram else ("jev", "llm")
+    credentials = {name: keys.get_key(name) for name in names}
     labels = {"jev": "Jev", "deepgram": "Deepgram", "llm": "LLM"}
 
     def check(name: str) -> str | None:
@@ -126,8 +129,9 @@ def run(
     """Chạy một lượt; lỗi dịch vụ hoặc Dừng vẫn xuất dữ liệu đã có.
 
     `ask_user` chờ lựa chọn khi LLM hết hạn mức; CLI mặc định tiếp tục không có gợi ý.
-    Bước phân tích chạy ANALYZE_WORKERS video cùng lúc; `on_progress` và `ask_user` có thể được gọi
-    từ các luồng đó.
+    Mỗi kênh được bổ sung số liệu và lọc riêng; video đạt ngưỡng bắt đầu phân tích ngay,
+    song song với nghỉ lịch sự và quét kênh tiếp theo. Tối đa ANALYZE_WORKERS video cùng lúc;
+    `on_progress` và `ask_user` có thể được gọi từ các luồng đó.
     """
     config.ensure_dirs()
     db.init_db()
@@ -143,6 +147,8 @@ def run(
         "messages": [],
     }
     credentials = {name: keys.get_key(name) for name in ("jev", "deepgram", "llm")}
+    post_run = is_post_run(params)
+    item_label = "bài đăng" if post_run else "video"
     collected: list[Video] = []
     passed: list[Video] = []
     page_logs: dict[str, dict] = {}
@@ -155,12 +161,31 @@ def run(
     jev = None
     llm = None
     analyzed_count = 0
+    submitted_count = 0
+    fatal: list[BaseException] = []
+    filtered_pages: set[str] = set()
     # Các luồng phân tích chỉ ghi run_log, page_logs và bộ đếm khi giữ `lock`.
     lock = threading.Lock()
     clients_lock = threading.Lock()
     quota_lock = threading.Lock()
     # Một video gặp lỗi phải dừng cả lượt (key sai, mất mạng, tạm dừng...): các video còn lại không bắt đầu.
     abort = threading.Event()
+
+    class ScanStop:
+        """Ghép Dừng của người dùng và lỗi phân tích mà không đổi stop_event."""
+        def is_set(self) -> bool:
+            return stop_event.is_set() or abort.is_set()
+
+        def wait(self, timeout: float | None = None) -> bool:
+            deadline = None if timeout is None else time.monotonic() + timeout
+            while not self.is_set():
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    return self.is_set()
+                abort.wait(0.1 if remaining is None else min(0.1, remaining))
+            return True
+
+    scan_stop = ScanStop()
 
     def emit(stage: str, message: str, *, error: str | None = None, done: bool = False,
              video: Video | None = None, step: int = 0, steps: int = 0) -> None:
@@ -172,7 +197,11 @@ def run(
         on_progress(Progress(stage, index, len(channels), url, message, done, error, step, steps))
 
     def checkpoint() -> None:
-        if stop_event.is_set() or abort.is_set():
+        if abort.is_set():
+            with lock:
+                if fatal:
+                    raise fatal[0]
+        if stop_event.is_set():
             raise _Stopped()
 
     def add_error(exc: object, video: Video | None = None) -> str:
@@ -222,26 +251,32 @@ def run(
 
     def analyze(number: int, video: Video, taxonomy: dict, ban_words: list[str], keyterms: list[str]) -> str:
         """Phân tích một video trên luồng phân tích; trả kết quả ngắn để báo tiến độ."""
-        total = len(passed)
 
         def say(text: str) -> None:
             with lock:  # giữ thứ tự sự kiện đúng với bộ đếm video đã xong
-                emit("analyze", f"Video {number}/{total}: {text}", video=video, step=analyzed_count, steps=total)
+                emit("analyze", f"{item_label.capitalize()} {number}: {text}", video=video,
+                     step=analyzed_count, steps=submitted_count)
 
         checkpoint()
-        views = f"{_count_text(video.views)} lượt xem" if video.views is not None else "chưa rõ lượt xem"
-        say(f"tải audio và chép lời ({views})…")
         try:
-            warnings: list[str] = []
-            minutes = transcript.get_transcript(
-                video, credentials["deepgram"], settings["stt"], keyterms, config.DATA_DIR / "tmp",
-                warnings,
-            )
-            add_usage("deepgram_minutes", float(minutes or 0))
-            for warning in warnings:
-                with lock:
-                    run_log["messages"].append(warning)
-                say(warning)
+            if post_run:
+                video.transcript = ""
+                video.transcript_status = ""
+                video.hook = next((line.strip() for line in video.caption.splitlines() if line.strip()), "")[:transcript.CAPTION_HOOK_CHARS].strip()
+                say("đọc caption bài đăng…")
+            else:
+                views = f"{_count_text(video.views)} lượt xem" if video.views is not None else "chưa rõ lượt xem"
+                say(f"tải audio và chép lời ({views})…")
+                warnings: list[str] = []
+                minutes = transcript.get_transcript(
+                    video, credentials["deepgram"], settings["stt"], keyterms, config.DATA_DIR / "tmp",
+                    warnings,
+                )
+                add_usage("deepgram_minutes", float(minutes or 0))
+                for warning in warnings:
+                    with lock:
+                        run_log["messages"].append(warning)
+                    say(warning)
             checkpoint()
             say("Jev gắn nhãn chủ đề, kiểu hook, cấu trúc…")
             raw, usage = jev_client.ask_labels(jev_instance(), video, taxonomy, settings)
@@ -249,7 +284,7 @@ def run(
             video.jev = jev_client.interpret_labels(raw, settings, taxonomy)
             video.score = filters.formula_score(
                 video.ratio_median, video.jev.get("replicable_p"), video.jev.get("hook_strength"),
-                video.jev.get("relevant_p"), settings["score_weights"],
+                video.jev.get("relevant_p"), settings["score_weights"], video.jev.get("jev_viral"),
             )
             with lock:
                 page_logs[video.page_url]["analyzed"] += 1
@@ -301,17 +336,14 @@ def run(
             video.notes.append(add_error(exc, video))
             return "lỗi, xem Nhật ký"
 
-    def analyze_all() -> None:
-        """Phân tích các video đạt ngưỡng, ANALYZE_WORKERS video cùng lúc; lỗi dừng lượt được ném lại."""
-        total = len(passed)
-        if not total:
+    def analyze_all(pool: ThreadPoolExecutor, page_passed: list[Video]) -> None:
+        """Đưa video đạt ngưỡng của từng kênh vào cùng một hàng đợi phân tích."""
+        nonlocal submitted_count
+        if not page_passed:
             return
         taxonomy = config.load_json("taxonomy.json")
         ban_words = config.load_lines("config/ban_words.txt")
-        keyterms = config.load_lines(settings["stt"].get("keyterms_file", "config/keyterms.txt"))
-        workers = max(1, min(ANALYZE_WORKERS, total))
-        fatal: list[BaseException] = []
-
+        keyterms = [] if post_run else config.load_lines(settings["stt"].get("keyterms_file", "config/keyterms.txt"))
         def task(number: int, video: Video) -> None:
             nonlocal analyzed_count
             try:
@@ -324,21 +356,32 @@ def run(
                 return
             with lock:
                 analyzed_count += 1
-                emit("analyze", f"Video {number}/{total}: xong, {result}.", video=video,
-                     step=analyzed_count, steps=total)
+                emit("analyze", f"{item_label.capitalize()} {number}: xong, {result}.", video=video,
+                     step=analyzed_count, steps=submitted_count)
 
-        emit("analyze", f"Phân tích {total} video, {workers} video cùng lúc…", steps=total)
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="phan-tich") as pool:
-            for number, video in enumerate(passed, 1):
-                pool.submit(task, number, video)
-        if fatal:
-            raise fatal[0]
+        for video in page_passed:
+            checkpoint()
+            with lock:
+                submitted_count += 1
+                number = submitted_count
+            pool.submit(task, number, video)
+
+    @contextmanager
+    def analysis_pool():
+        pool = ThreadPoolExecutor(max_workers=ANALYZE_WORKERS, thread_name_prefix="phan-tich")
+        try:
+            yield pool
+        finally:
+            pool.shutdown(wait=True)
+            # A worker may fail while scanning is already unwinding due to Dừng.
+            if fatal:
+                raise fatal[0]
 
     try:
         try:
             checkpoint()
-            emit("keys", "Đang kiểm tra 3 API key (Jev, Deepgram, LLM)…")
-            failures = check_all_keys(settings)
+            emit("keys", "Đang kiểm tra API key (Jev, LLM)…" if post_run else "Đang kiểm tra 3 API key (Jev, Deepgram, LLM)…")
+            failures = check_all_keys(settings, require_deepgram=not post_run)
             checkpoint()
             if any(failures.values()):
                 for reason in failures.values():
@@ -348,7 +391,7 @@ def run(
             channels = config.load_lines("config/channels.txt")
             checkpoint()
             emit("scan", f"API key dùng được. Mở trình duyệt quét (chạy ẩn) cho {len(channels)} kênh…")
-            with FacebookScanner(hidden=True, settings=settings) as scanner:
+            with analysis_pool() as pool, FacebookScanner(hidden=True, settings=settings) as scanner:
                 checkpoint()
                 scanner.check_login()
                 checkpoint()
@@ -370,6 +413,7 @@ def run(
                         emit("scan", f"{where}: bỏ qua. {problem}")
                         continue
                     emit("scan", f"{where}: mở trang, đọc tên và số người theo dõi…")
+                    page_items: list[Video] = []
                     try:
                         page = scanner.get_page_info(page_url)
                         checkpoint()
@@ -378,68 +422,63 @@ def run(
                         followers = (f"{_count_text(page.followers)} người theo dõi" if page.followers is not None
                                      else "chưa đọc được số người theo dõi")
                         emit("scan", f"{where}: {page.name or page_url} · {followers}")
-                        if not filters.page_allowed(page.followers, params.min_page_followers):
-                            entry["skipped_reason"] = "Dưới ngưỡng follower"
-                            emit("scan", f"{where}: bỏ qua vì dưới ngưỡng "
-                                         f"{_count_text(params.min_page_followers)} người theo dõi.")
-                        else:
-                            if page.followers is None:
-                                entry["errors"].append("Chưa xác định được follower của kênh")
-                            rows = scanner.scan_page(
-                                page_url, days=params.days, formats=params.formats,
-                                max_videos=settings["scan"]["max_videos_per_page"], stop_event=stop_event,
-                                on_progress=lambda text: emit("scan", f"{where} · {text}"),
-                            )
-                            for row in rows:
-                                # Preserve already collected rows even if Dừng was pressed during scrolling.
-                                values = dict(row)
-                                values.update(page_url=page_url, page_name=page.name, page_followers=page.followers)
-                                video = Video(**values)
-                                if video.video_id in seen:
-                                    continue
-                                seen.add(video.video_id)
-                                db.upsert_video(video)
-                                collected.append(video)
-                                entry["scanned"] += 1
-                            emit("scan", f"{where}: thu được {entry['scanned']} video trong {params.days} ngày.")
-                            if not entry["scanned"] and not page.name and page.followers is None:
-                                add_error("Không đọc được page: kiểm tra link đúng và page công khai")
-                            checkpoint()
-                    except (_Stopped, NetworkError, LoginRequired):
+                        if page.followers is None:
+                            entry["errors"].append("Chưa xác định được follower của kênh")
+                        rows = scanner.scan_page(
+                            page_url, days=params.days, formats=params.formats,
+                            max_videos=settings["scan"]["max_videos_per_page"], stop_event=scan_stop,
+                            on_progress=lambda text: emit("scan", f"{where} · {text}"),
+                        )
+                        for row in rows:
+                            # Preserve collected rows when stopped during scrolling.
+                            values = dict(row)
+                            values.update(page_url=page_url, page_name=page.name, page_followers=page.followers)
+                            video = Video(**values)
+                            if video.video_id in seen:
+                                continue
+                            seen.add(video.video_id)
+                            db.upsert_video(video)
+                            collected.append(video)
+                            page_items.append(video)
+                            entry["scanned"] += 1
+                        emit("scan", f"{where}: thu được {entry['scanned']} {item_label} trong {params.days} ngày.")
+                        if not entry["scanned"] and not page.name and page.followers is None:
+                            add_error("Không đọc được page: kiểm tra link đúng và page công khai")
+                        checkpoint()
+                    except (_Stopped, _Paused, ServiceError):
                         raise
                     except Exception as exc:
                         add_error(exc)
                     checkpoint()
+                    missing = [] if post_run else [video for video in page_items
+                               if not video.caption or any(getattr(video, metric) is None for metric in _METRICS)]
+                    for number, video in enumerate(missing, 1):
+                        checkpoint()
+                        emit("filter", f"Bổ sung số liệu còn thiếu (yt-dlp): video {number}/{len(missing)}…",
+                             step=number - 1, steps=len(missing))
+                        try:
+                            ytdlp.fill_missing(video)
+                        except Exception as exc:
+                            video.notes.append(add_error(exc))
+                        db.upsert_video(video)
+                        checkpoint()
+                    emit("filter", f"Tính chỉ số và lọc {len(page_items)} {item_label} theo ngưỡng…")
+                    filters.compute_metrics(page_items)
+                    page_passed = filters.apply_filter(page_items, params.min_views, params.min_interactions)
+                    passed.extend(page_passed)
+                    filtered_pages.add(page_url)
+                    entry["passed"] = len(page_passed)
+                    for video in page_items:
+                        for note in video.notes:
+                            if note not in entry["errors"]:
+                                entry["errors"].append(note)
+                    emit("filter", f"Đạt ngưỡng: {len(passed)}/{len(collected)} {item_label}.")
+                    analyze_all(pool, page_passed)
                     if page_index < len(channels):
                         emit("scan", "Nghỉ giữa hai kênh như người dùng thật, tránh bị Facebook chặn…")
-                        scanner.polite_page_pause(stop_event=stop_event)
+                        scanner.polite_page_pause(stop_event=scan_stop)
                         checkpoint()
             checkpoint()
-            missing = [video for video in collected
-                       if not video.caption or any(getattr(video, metric) is None for metric in _METRICS)]
-            for number, video in enumerate(missing, 1):
-                checkpoint()
-                page_url = video.page_url
-                page_index = channels.index(page_url) + 1
-                emit("filter", f"Bổ sung số liệu còn thiếu (yt-dlp): video {number}/{len(missing)}…",
-                     step=number - 1, steps=len(missing))
-                try:
-                    ytdlp.fill_missing(video)
-                except Exception as exc:
-                    video.notes.append(add_error(exc))
-                db.upsert_video(video)
-                checkpoint()
-            emit("filter", f"Tính chỉ số và lọc {len(collected)} video theo ngưỡng…")
-            filters.compute_metrics(collected)
-            passed = filters.apply_filter(collected, params.rules)
-            emit("filter", f"Đạt ngưỡng: {len(passed)}/{len(collected)} video.")
-            for video in collected:
-                for note in video.notes:
-                    if note not in page_logs[video.page_url]["errors"]:
-                        page_logs[video.page_url]["errors"].append(note)
-            for video in passed:
-                page_logs[video.page_url]["passed"] += 1
-            analyze_all()
         except (LoginRequired, BrowserUnavailable) as exc:
             add_error(exc)
             if not collected:
@@ -459,10 +498,13 @@ def run(
             add_error(exc)
             partial = True
 
-        # A stop or network failure can happen before the filtering stage.
-        if partial and not passed and collected:
-            filters.compute_metrics(collected)
-            passed = filters.apply_filter(collected, params.rules)
+        # Rows from a page interrupted before filtering still belong in the partial export.
+        if partial:
+            remaining = [video for video in collected if video.page_url not in filtered_pages]
+            filters.compute_metrics(remaining)
+            extra = filters.apply_filter(remaining, params.min_views, params.min_interactions)
+            passed_ids = {video.video_id for video in passed + extra}
+            passed = [video for video in collected if video.video_id in passed_ids]
             for entry in run_log["pages"]:
                 entry["passed"] = sum(video.page_url == entry["url"] for video in passed)
         if stop_event.is_set() and not collected:
@@ -489,7 +531,7 @@ def run(
             except Exception as exc:
                 add_error(exc)
         run_log["finished_at"] = datetime.now(timezone.utc).isoformat()
-        emit("export", f"Đang ghi file Excel ({len(passed)} video)…")
+        emit("export", f"Đang ghi file Excel ({len(passed)} {item_label})…")
         result = export_excel.export(passed, summary, run_log)
         emit("done", "Đã xuất kết quả một phần." if partial or stop_event.is_set() else "Đã xuất kết quả.", done=True)
         return result
@@ -505,20 +547,21 @@ def run(
 
 def main(argv: list[str] | None = None) -> int:
     applog.use_utf8_console()  # tiếng Việt không làm hỏng CLI trên console mã cũ (cp1252)
-    parser = argparse.ArgumentParser(description="Quét video Facebook và xuất công thức nội dung ra Excel.")
+    parser = argparse.ArgumentParser(description="Quét video hoặc bài đăng Facebook và xuất công thức nội dung ra Excel.")
     parser.add_argument("--days", type=int, default=14)
-    parser.add_argument("--preset", choices=list(filters.PRESETS), default="no_bat_thuong")
     parser.add_argument("--formats", default="reel,video")
-    parser.add_argument("--min-page-followers", type=int, default=None)
+    parser.add_argument("--min-views", type=int, default=None)
+    parser.add_argument("--min-interactions", type=int, default=None)
     args = parser.parse_args(argv)
     formats = {item.strip() for item in args.formats.split(",") if item.strip()}
-    if args.days <= 0 or not formats or not formats <= {"reel", "video"}:
-        parser.error("Số ngày phải lớn hơn 0; định dạng chỉ gồm reel,video.")
+    if args.days <= 0 or not formats or (formats != {"post"} and not formats <= {"reel", "video"}):
+        parser.error("Số ngày phải lớn hơn 0; định dạng gồm reel,video hoặc riêng post.")
     settings = config.load_settings()
-    minimum = args.min_page_followers if args.min_page_followers is not None else settings["scan"]["min_page_followers"]
-    if minimum < 0:
-        parser.error("Follower tối thiểu không được âm.")
-    params = RunParams(args.days, formats, minimum, dict(filters.PRESETS[args.preset]["rules"]), args.preset)
+    min_views = args.min_views if args.min_views is not None else settings["scan"].get("min_views", 10000)
+    min_interactions = args.min_interactions if args.min_interactions is not None else settings["scan"].get("min_interactions", 200)
+    if min_views < 0 or min_interactions < 0:
+        parser.error("Ngưỡng tối thiểu không được âm.")
+    params = RunParams(args.days, formats, min_views, min_interactions)
     stop = threading.Event()
     import signal
     previous = signal.signal(signal.SIGINT, lambda *_: stop.set())

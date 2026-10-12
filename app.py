@@ -23,7 +23,6 @@ from openpyxl import load_workbook
 import applog
 import config
 import export_excel
-import filters
 import jev_client
 import keys
 import llm_client
@@ -42,22 +41,16 @@ DEFAULT_SETTINGS = {
     "stt": {"provider": "deepgram", "model": "", "language": "vi",
             "keyterms_file": "config/keyterms.txt", "fallback": "local_whisper",
             "whisper_model": "small"},
-    "scan": {"min_page_followers": 100000, "delay_min_s": 3, "delay_max_s": 8,
+    "scan": {"min_views": 10000, "min_interactions": 200, "delay_min_s": 3, "delay_max_s": 8,
              "page_delay_min_s": 30, "page_delay_max_s": 60,
              "max_videos_per_page": 200, "max_scroll_rounds": 60, "stall_rounds": 4},
     "score_weights": {"ratio_median": 40, "ratio_median_cap": 5, "replicable": 25,
-                      "hook_strength": 20, "relevant": 15},
+                      "hook_strength": 20, "relevant": 15, "jev_viral": 20},
     "my_page": {"name": "Thế Thảo Pharma", "audience": "Chủ nhà thuốc, dược sĩ"},
-}
-METRICS = {
-    "views": "Lượt xem", "ratio_follow": "View / follower",
-    "ratio_median": "View / trung vị kênh", "share_rate": "Tỷ lệ chia sẻ",
-    "engagement": "Tỷ lệ tương tác", "shares": "Lượt chia sẻ",
-    "comments": "Bình luận", "reactions": "Cảm xúc",
 }
 
 SERVICE_ROLES = {
-    "jev": "Gắn nhãn chủ đề, kiểu hook và cấu trúc cho từng video.",
+    "jev": "Gắn nhãn chủ đề, kiểu hook và cấu trúc cho từng video hoặc bài đăng.",
     "deepgram": "Chuyển lời nói trong video thành chữ.",
     "llm": "Viết phân tích và gợi ý nhân bản. Dùng endpoint tương thích OpenAI.",
 }
@@ -66,7 +59,7 @@ KEY_HELP = {
     "deepgram": "Key lấy từ trang quản lý API key của Deepgram. Key chỉ được lưu sau khi kiểm tra thành công.",
     "llm": "API key của nhà cung cấp đã chọn. Key chỉ được lưu sau khi kiểm tra thành công.",
 }
-LLM_PRESETS = {
+LLM_PROVIDERS = {
     "OpenRouter": "https://openrouter.ai/api/v1",
     "OpenAI": "https://api.openai.com/v1",
     "Google Gemini": "https://generativelanguage.googleapis.com/v1beta/openai/",
@@ -364,15 +357,15 @@ def _render_selection(name: str, entry: dict, settings: dict, locked: bool, base
 
 def _llm_endpoint_input(settings: dict, locked: bool) -> str:
     saved_url = settings["llm"]["base_url"].strip()
-    presets = [*LLM_PRESETS, LLM_CUSTOM]
-    matched = next((label for label, url in LLM_PRESETS.items() if url.rstrip("/") == saved_url.rstrip("/")), None)
-    default = matched or (LLM_CUSTOM if saved_url else presets[0])
-    choice = st.selectbox("Nhà cung cấp", presets, index=presets.index(default), key="svc_llm_preset",
+    providers = [*LLM_PROVIDERS, LLM_CUSTOM]
+    matched = next((label for label, url in LLM_PROVIDERS.items() if url.rstrip("/") == saved_url.rstrip("/")), None)
+    default = matched or (LLM_CUSTOM if saved_url else providers[0])
+    choice = st.selectbox("Nhà cung cấp", providers, index=providers.index(default), key="svc_llm_provider",
                           disabled=locked,
                           help="Chọn nhà cung cấp có API tương thích OpenAI. Chọn Khác để nhập địa chỉ endpoint riêng.")
     if choice != LLM_CUSTOM:
-        st.caption(f"Endpoint: {LLM_PRESETS[choice]}")
-        return LLM_PRESETS[choice]
+        st.caption(f"Endpoint: {LLM_PROVIDERS[choice]}")
+        return LLM_PROVIDERS[choice]
     custom = st.text_input("Địa chỉ endpoint", value=saved_url if default == LLM_CUSTOM else "",
                            key="svc_llm_custom_url", disabled=locked, placeholder="https://.../v1",
                            help="Đường dẫn API của nhà cung cấp, thường kết thúc bằng /v1.")
@@ -539,7 +532,7 @@ class _Guide:
     @property
     def missing(self) -> list[str]:
         """Tên các dịch vụ AI chưa kết nối xong."""
-        return [SERVICE_LABELS[name] for name in SERVICE_LABELS if not self.configured[name]]
+        return [SERVICE_LABELS[name] for name in ("jev", "llm") if not self.configured[name]]
 
     @property
     def setup_done(self) -> bool:
@@ -566,14 +559,14 @@ def _next_step(guide: _Guide) -> tuple[str, str]:
     if guide.running:
         return "Đang quét. Theo dõi tiến độ ở tab Chạy quét.", PAGE_SCAN
     if guide.missing:
-        return f"Kết nối đủ 3 dịch vụ AI. Còn thiếu: {', '.join(guide.missing)}.", PAGE_SETTINGS
+        return f"Kết nối Jev và LLM để quét. Còn thiếu: {', '.join(guide.missing)}. Deepgram chỉ cần cho video.", PAGE_SETTINGS
     if not guide.setup_done:
         todo = [text for text, done in (("thêm kênh cần quét", guide.channel_count > 0),
                                         ("đăng nhập Facebook", guide.fb_ready)) if not done]
         return f"Hoàn tất bước 2: {' và '.join(todo)}.", PAGE_SETTINGS
     if guide.has_result:
         return "Đã có file Excel mới. Xem và tải về ở tab Kết quả.", PAGE_RESULTS
-    return "Mọi thứ đã sẵn sàng. Chọn bộ lọc rồi bấm Bắt đầu quét.", PAGE_SCAN
+    return "Mọi thứ đã sẵn sàng. Chọn loại quét và ngưỡng rồi bấm Bắt đầu quét.", PAGE_SCAN
 
 
 def _open_page(page: str) -> None:
@@ -598,11 +591,11 @@ def _render_next_step(page: str, guide: _Guide) -> None:
 
 
 def _render_locked(page: str, guide: _Guide) -> None:
-    """Chạy quét và Kết quả chỉ mở khi đã kết nối đủ dịch vụ AI."""
-    status = "  ·  ".join(f"{'✓' if guide.configured[name] else '✗'} {SERVICE_LABELS[name]}" for name in SERVICE_LABELS)
+    """Quét cần Jev và LLM; Deepgram chỉ cần cho video."""
+    status = "  ·  ".join(f"{'✓' if guide.configured[name] else '✗'} {SERVICE_LABELS[name]}" for name in ("jev", "llm"))
     with st.container(border=True):
         st.markdown(f"**🔒 {page} đang khóa**")
-        st.caption(f"Cần kết nối đủ 3 dịch vụ AI trước: {status}")
+        st.caption(f"Cần kết nối Jev và LLM trước: {status}. Deepgram chỉ cần khi quét video.")
         st.button("Mở Cài đặt", type="primary", on_click=_open_page, args=(PAGE_SETTINGS,))
 
 
@@ -701,90 +694,85 @@ def _render_login_status() -> None:
         st.error(st.session_state.login_message)
 
 
-def _refresh_keys(settings: dict) -> dict:
+def _refresh_keys(settings: dict, *, require_deepgram: bool = True) -> dict:
     try:
-        with st.spinner("Đang kiểm tra 3 API key..."):
-            result = pipeline.check_all_keys(settings)
-        result = {name: _redact(str(result[name])) if result[name] else None for name in SERVICE_LABELS}
+        with st.spinner("Đang kiểm tra API key..."):
+            result = pipeline.check_all_keys(settings, require_deepgram=require_deepgram)
+        result = {name: _redact(str(reason)) if reason else None for name, reason in result.items()}
         for name, reason in result.items():
             if reason:
                 logger.warning("Key %s: %s", SERVICE_LABELS[name], reason)
     except Exception as exc:
         message = _error_message(exc)
-        result = {name: message for name in SERVICE_LABELS}
+        result = {name: message for name in (SERVICE_LABELS if require_deepgram else ("jev", "llm"))}
     st.session_state.key_status = result
     return result
 
 
-def _key_status_panel(settings: dict, locked: bool) -> None:
+def _key_status_panel(settings: dict, locked: bool, *, require_deepgram: bool = True) -> None:
+    names = tuple(SERVICE_LABELS) if require_deepgram else ("jev", "llm")
     status = st.session_state.key_status
-    if status is None:
-        status = _refresh_keys(settings)
-    failed = [SERVICE_LABELS[name] for name in SERVICE_LABELS if status[name]]
+    if status is None or set(status) != set(names):
+        status = _refresh_keys(settings, require_deepgram=require_deepgram)
+    failed = [SERVICE_LABELS[name] for name in names if status[name]]
     with st.expander("Trạng thái API key", expanded=bool(failed)):
         if failed:
             st.error(f"Chưa thể chạy quét vì lỗi key ở: {', '.join(failed)}. Sửa trong mục Dịch vụ AI rồi kiểm tra lại.")
-        for column, name in zip(st.columns(3), SERVICE_LABELS):
+        for column, name in zip(st.columns(len(names)), names):
             with column:
                 reason = status[name]
                 st.markdown(f"{':orange[✗]' if reason else ':green[✓]'} **{SERVICE_LABELS[name]}**")
                 st.caption(reason or "Key hợp lệ")
         if st.button("Kiểm tra lại", icon=":material/refresh:", disabled=locked):
-            _refresh_keys(settings)
+            _refresh_keys(settings, require_deepgram=require_deepgram)
             st.rerun()
 
 
 def _scan_options(settings: dict, locked: bool) -> pipeline.RunParams:
     left, right = st.columns(2, gap="medium")
     with left, st.container(border=True):
-        st.markdown("**Video nào được quét?**")
+        st.markdown("**Nội dung nào được quét?**")
         days_choice = st.radio(
-            "Video đăng trong", ["7", "14", "30", "Tự nhập"], horizontal=True, disabled=locked,
+            "Nội dung đăng trong", ["7", "14", "30", "Tự nhập"], horizontal=True, disabled=locked,
             format_func=lambda choice: choice if choice == "Tự nhập" else f"{choice} ngày",
-            help="Chỉ lấy video đăng trong khoảng này, tính đến hôm nay.")
+            help="Chỉ lấy nội dung đăng trong khoảng này, tính đến hôm nay.")
         days = int(st.number_input("Số ngày", min_value=1, value=7, step=1, disabled=locked)) if days_choice == "Tự nhập" else int(days_choice)
-        format_choice = st.selectbox("Loại video", ["Reels", "Video", "Tất cả"], index=2, disabled=locked,
-                                     help="Reels là video dọc ngắn, Video là video thường. Tất cả là lấy cả hai loại.")
+        scan_kind = st.radio("Loại quét", ["Video", "Bài đăng"], horizontal=True, disabled=locked,
+                             help="Bài đăng lấy nội dung chữ/ảnh từ bảng tin chính; phân tích caption, không tải audio.")
+        formats = {"post"}
+        if scan_kind == "Video":
+            choice = st.selectbox("Loại video", ["Video", "Reel", "Cả hai"], index=2, disabled=locked,
+                                  help="Reel là video dọc ngắn; Cả hai lấy cả video thường và Reel.")
+            formats = {"video", "reel"} if choice == "Cả hai" else {"reel" if choice == "Reel" else "video"}
     with right, st.container(border=True):
-        st.markdown("**Lọc video nổi bật**")
-        min_followers = int(st.number_input(
-            "Follower tối thiểu của page", min_value=0, value=int(settings["scan"].get("min_page_followers", 100000)),
-            step=10000, key="min_followers", disabled=locked,
-            help="Page có ít follower hơn mức này sẽ bị bỏ qua. Đặt 0 để không giới hạn."))
-        preset_names = list(filters.PRESETS)
-        preset = st.selectbox("Cách lọc", preset_names, index=preset_names.index("no_bat_thuong"), disabled=locked,
-                              format_func=lambda name: filters.PRESETS[name]["label"],
-                              help="Cách xác định video nổi bật. Có thể giữ mặc định nếu chưa rõ.")
-    rules = dict(filters.PRESETS[preset]["rules"])
-    if preset == "tu_nhap":
-        with st.container(border=True):
-            st.markdown("**Ngưỡng tự nhập**")
-            st.caption("Các ngưỡng bật được kết hợp bằng AND. Đặt 0 để không lọc chỉ số đó; tỷ lệ 0,01 = 1%.")
-            columns = st.columns(2)
-            for index, (metric, label) in enumerate(METRICS.items()):
-                with columns[index % 2]:
-                    if metric in {"views", "shares", "comments", "reactions"}:
-                        value = st.number_input(label, min_value=0, value=0, step=1, key=f"metric_{metric}", disabled=locked)
-                    else:
-                        value = st.number_input(label, min_value=0.0, value=0.0, step=0.01, format="%.4f", key=f"metric_{metric}", disabled=locked)
-                    if value > 0:
-                        rules[metric] = value
-    formats = {"reel", "video"} if format_choice == "Tất cả" else {"reel" if format_choice == "Reels" else "video"}
-    return pipeline.RunParams(days=days, formats=formats, min_page_followers=min_followers, rules=rules, preset=preset)
+        if scan_kind == "Bài đăng":
+            minimum = int(st.number_input(
+                "Tương tác tối thiểu (cảm xúc + bình luận + chia sẻ)", min_value=0,
+                value=int(settings["scan"].get("min_interactions", 200)), step=10, key="scan_min_interactions", disabled=locked,
+                help="Giữ bài có tổng tương tác đạt hoặc vượt ngưỡng. Không biết số liệu thì không đạt; đặt 0 để không lọc."))
+            return pipeline.RunParams(days, formats, min_interactions=minimum)
+        minimum = int(st.number_input(
+            "Lượt xem tối thiểu", min_value=0, value=int(settings["scan"].get("min_views", 10000)),
+            step=1000, key="scan_min_views", disabled=locked,
+            help="Giữ video có lượt xem đạt hoặc vượt ngưỡng. Không biết lượt xem thì không đạt; đặt 0 để không lọc."))
+    return pipeline.RunParams(days, formats, min_views=minimum)
 
 
 def _start_scan(settings: dict, params: pipeline.RunParams) -> None:
-    if any(_refresh_keys(settings).values()):
+    if any(_refresh_keys(settings, require_deepgram=not pipeline.is_post_run(params)).values()):
         st.rerun()  # Panel Trạng thái API key sẽ hiện lỗi sau khi làm mới.
     if not config.load_lines("config/channels.txt"):
         _show_error("Danh sách kênh trống. Vào Cài đặt để nhập các kênh cần quét.")
         return
+    threshold = "min_interactions" if pipeline.is_post_run(params) else "min_views"
+    settings["scan"][threshold] = getattr(params, threshold)
+    config.save_settings(settings)
     events, stop = queue.Queue(), threading.Event()
     worker = threading.Thread(target=_scan_worker, args=(params, copy.deepcopy(settings), events, stop),
                               daemon=True, name="video-scan")
     st.session_state.update(running=True, scan_queue=events, stop_event=stop, scan_thread=worker,
                             scan_started=time.monotonic(), scan_log=[], scan_errors=[], progress=None,
-                            scan_result=None, question=None)
+                            scan_result=None, question=None, scan_item_label="bài đăng" if pipeline.is_post_run(params) else "video")
     worker.start()
     st.rerun()
 
@@ -792,8 +780,8 @@ def _start_scan(settings: dict, params: pipeline.RunParams) -> None:
 def _scan_page(settings: dict) -> None:
     _scan_status()
     locked = _busy()
-    _key_status_panel(settings, locked)
     params = _scan_options(settings, locked)
+    _key_status_panel(settings, locked, require_deepgram=not pipeline.is_post_run(params))
     if st.button("Bắt đầu quét", type="primary", width="stretch", disabled=locked, icon=":material/play_arrow:"):
         _start_scan(settings, params)
 
@@ -815,7 +803,8 @@ def _exported_video_count(path: Path) -> int | None:
     try:
         workbook = load_workbook(path, read_only=True)
         try:
-            return max(0, (workbook[export_excel.SHEET_DETAIL].max_row or 1) - 1)
+            title = export_excel.SHEET_POST_DETAIL if export_excel.SHEET_POST_DETAIL in workbook.sheetnames else export_excel.SHEET_DETAIL
+            return max(0, (workbook[title].max_row or 1) - 1)
         finally:
             workbook.close()
     except Exception:  # chỉ là thông tin phụ: file lỗi không được làm hỏng giao diện
@@ -831,7 +820,7 @@ def _download_button(path: Path) -> None:
         st.error("Không đọc được file Excel. Kiểm tra quyền truy cập thư mục output.")
 
 
-SCAN_STAGES = (("keys", "Kiểm tra key"), ("scan", "Quét kênh"), ("filter", "Lọc video"),
+SCAN_STAGES = (("keys", "Kiểm tra key"), ("scan", "Quét kênh"), ("filter", "Lọc nội dung"),
                ("analyze", "Phân tích"), ("export", "Xuất Excel"))
 TIMELINE_ROWS = 8
 LOG_MAX_RECORDS = 500
@@ -855,8 +844,9 @@ def _progress_bar(progress: pipeline.Progress) -> None:
     """Thanh tiến độ của bước hiện tại: số video khi đếm được, nếu không thì số kênh."""
     if progress.steps:
         fraction = progress.step / progress.steps
-        label = (f"Đã phân tích {progress.step}/{progress.steps} video" if progress.stage == "analyze"
-                 else f"{progress.step}/{progress.steps} video")
+        item = st.session_state.get("scan_item_label", "video")
+        label = (f"Đã phân tích {progress.step}/{progress.steps} {item}" if progress.stage == "analyze"
+                 else f"{progress.step}/{progress.steps} {item}")
     elif progress.page_total and progress.stage == "scan":
         fraction = (progress.page_index - 1) / progress.page_total
         label = f"Kênh {progress.page_index}/{progress.page_total}"
@@ -904,7 +894,8 @@ def _render_running_scan() -> None:
 def _render_scan_result(path: Path) -> None:
     count = _exported_video_count(path)
     with st.container(border=True):
-        st.markdown(f"**✅ Quét xong · {count} video**" if count is not None else "**✅ Quét xong**")
+        item = st.session_state.get("scan_item_label", "video")
+        st.markdown(f"**✅ Quét xong · {count} {item}**" if count is not None else "**✅ Quét xong**")
         st.caption(f"File: {path.name}")
         _download_button(path)
 
@@ -1062,7 +1053,7 @@ def main() -> None:
     if log_button.button("Nhật ký", icon=":material/receipt_long:", width="stretch",
                          help="Mọi thông báo và lỗi của ứng dụng (data/app.log)."):
         _log_dialog()
-    st.caption("Tìm video nổi bật trên các kênh Facebook để học công thức nội dung, rồi xuất kết quả ra Excel.")
+    st.caption("Tìm video hoặc bài đăng nổi bật trên các kênh Facebook để học công thức nội dung, rồi xuất kết quả ra Excel.")
     try:
         if st.session_state.pop("reset_requested", False):
             _reset_configuration()

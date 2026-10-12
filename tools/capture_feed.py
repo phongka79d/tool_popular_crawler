@@ -1,4 +1,4 @@
-"""Capture a Facebook page's Reels or Videos tab as offline fixtures for collectors/graphql.py.
+"""Capture a Facebook page's Reels, Videos or main posts feed as offline fixtures.
 
 Run from the repository root::
 
@@ -38,27 +38,23 @@ from playwright.sync_api import Page, Response, sync_playwright  # noqa: E402
 
 import config  # noqa: E402
 from collectors.cookies import has_login_cookies  # noqa: E402
-from collectors.facebook import _launch_options  # noqa: E402
+from collectors.facebook import _launch_options, tab_url as facebook_tab_url  # noqa: E402
 
 log = logging.getLogger("capture_feed")
 
 FB_ORIGIN = "https://www.facebook.com"
 GRAPHQL_MARKER = "/api/graphql/"
-TABS = ("reels", "videos")
+TABS = ("reels", "videos", "posts")
 LIVE_DIR = config.ROOT / "tests" / "fixtures" / "live"
 SCROLL_STEP_JS = "window.scrollBy(0, Math.max(800, window.innerHeight * 2))"
 
 
 def tab_url(page_url: str, tab: str) -> str:
-    """URL of the Reels or Videos tab for a vanity URL or a profile.php URL."""
-    url = _with_scheme(page_url.strip()).rstrip("/")
-    url = re.sub(r"/(reels|videos)$", "", url)
-    parts = urlsplit(url)
-    if parts.path.rstrip("/") == "/profile.php":
-        sk = "reels_tab" if tab == "reels" else "videos"
-        query = f"{parts.query}&sk={sk}" if parts.query else f"sk={sk}"
-        return urlunsplit((parts.scheme, parts.netloc, parts.path, query, ""))
-    return f"{url}/{tab}/"
+    """Use the scanner's URL routing, with posts opening the page's main feed."""
+    parts = urlsplit(_with_scheme(page_url.strip()))
+    path = re.sub(r"/(reels|videos|posts)/?$", "", parts.path)
+    source = urlunsplit((parts.scheme, parts.netloc, path, parts.query, ""))
+    return facebook_tab_url(source, tab)
 
 
 def page_slug(page_url: str) -> str:
@@ -155,9 +151,9 @@ def _write_capture(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Ghi lại phản hồi GraphQL của tab Reels hoặc Videos để làm fixture offline.")
+    parser = argparse.ArgumentParser(description="Ghi lại GraphQL của tab Reels, Videos hoặc feed Bài đăng để làm fixture offline.")
     parser.add_argument("page_url", help="URL trang Facebook, ví dụ https://www.facebook.com/TenTrang")
-    parser.add_argument("--tab", required=True, choices=TABS, help="Tab cần ghi: reels hoặc videos")
+    parser.add_argument("--tab", required=True, choices=TABS, help="Tab cần ghi: reels, videos hoặc posts (feed chính)")
     parser.add_argument("--scrolls", type=int, default=12, help="Số lần cuộn xuống (mặc định 12)")
     parser.add_argument("--pause", type=float, default=4.0, help="Thời gian chờ giữa các lần cuộn, tính bằng giây (mặc định 4.0)")
     args = parser.parse_args(argv)

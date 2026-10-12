@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 SEL: dict = config.load_json("selectors.json")
 _TABS: tuple[tuple[str, str], ...] = tuple(SEL["tabs"].items())
-_TAB_LABELS = {"reel": "Reels", "video": "Video"}
+_TAB_LABELS = {"reel": "Reels", "video": "Video", "post": "Bài đăng"}
 
 FB_HOME = "https://www.facebook.com/"
 FB_COOKIE_URLS = ("https://www.facebook.com/", "https://m.facebook.com/", "https://web.facebook.com/")
@@ -130,7 +130,7 @@ def page_url_problem(url: str) -> str | None:
 def tab_url(page_url: str, tab: str) -> str:
     """URL tab chuẩn www: vanity/pg dùng đường dẫn, profile/people giữ ID qua query.
 
-    `tab` là "reels" hoặc "videos"; bỏ tham số theo dõi và fragment của URL đầu vào.
+    `tab` là "reels", "videos" hoặc "posts" (feed chính); bỏ tracking và fragment.
     """
     parsed = urlsplit(page_url)
     path = parsed.path.strip("/")
@@ -142,8 +142,10 @@ def tab_url(page_url: str, tab: str) -> str:
     else:
         if len(parts) == 2 and parts[0] == "pg":
             path = parts[1]
-        return f"{FB_HOME}{path}/{tab}/"
-    query = urlencode({"id": profile_id, "sk": "reels_tab" if tab == "reels" else "videos"})
+        return f"{FB_HOME}{path}/" if tab == "posts" else f"{FB_HOME}{path}/{tab}/"
+    query = urlencode({"id": profile_id} if tab == "posts" else {
+        "id": profile_id, "sk": "reels_tab" if tab == "reels" else "videos",
+    })
     return f"{FB_HOME}profile.php?{query}"
 
 
@@ -273,29 +275,33 @@ def import_cookies(path: Path | str) -> bool:
 
 
 class _Collector:
-    """Gom video đúng định dạng và nằm trong số ngày quét; bỏ trùng theo video_id."""
+    """Gom bài đúng định dạng và nằm trong số ngày quét; bỏ trùng theo video_id."""
 
     def __init__(self, formats: set[str], days: int, max_videos: int) -> None:
         self._formats = formats
         self._days = days
         self.limit = max_videos
-        self.items_seen = 0  # mọi video đọc được, kể cả khác định dạng hoặc quá cũ
+        self.items_seen = 0  # feed Bài đăng chỉ đếm post; tab video đếm mọi record như trước
         self._by_id: dict[str, dict] = {}
         self._old_formats: set[str] = set()
+        self._old_post_ids: set[str] = set()
 
     def add(self, items: list[dict], tab_format: str) -> None:
         for item in items:
             video_id = item.get("video_id")
-            if video_id:
-                self.items_seen += 1
             fmt = item.get("format")
+            if video_id and ("post" not in self._formats or fmt == "post"):
+                self.items_seen += 1
             if not video_id or fmt not in self._formats:
                 continue
             posted_at = item.get("posted_at")
             if posted_at is not None and is_older_than(posted_at, self._days):
-                # Gặp video cũ hơn số ngày quét thì dừng cuộn tab đó (PLAN §4).
+                # Feed có thể ghim bài cũ ở đầu; cần ba bài cũ khác nhau mới dừng.
                 if fmt == tab_format:
-                    self._old_formats.add(tab_format)
+                    if fmt == "post":
+                        self._old_post_ids.add(video_id)
+                    if fmt != "post" or len(self._old_post_ids) >= 3:
+                        self._old_formats.add(tab_format)
                 continue
             existing = self._by_id.get(video_id)
             if existing is None:
@@ -446,6 +452,7 @@ class FacebookScanner:
         """Cuộn một tab tới khi có lý do dừng; trả lý do đó để báo tiến độ."""
         scan = self.settings["scan"]
         label = _TAB_LABELS.get(tab_format, tab_format)
+        noun = "bài đăng" if tab_format == "post" else "video"
         found_before = collector.count()
         seen_before = collector.items_seen
         self._open(tab_url)
@@ -458,20 +465,20 @@ class FacebookScanner:
             if _stopped(stop_event):
                 return "đã dừng theo yêu cầu"
             if collector.full():
-                return f"đã đủ {collector.limit} video"
+                return f"đã đủ {collector.limit} {noun}"
             before = collector.count()
             self._scroll_once()
             self._raise_if_blocked()
             _drain(pending, collector, tab_format)
-            report(f"Tab {label} · cuộn lần {round_no}: đã thấy {collector.count() - found_before} video")
+            report(f"Tab {label} · cuộn lần {round_no}: đã thấy {collector.count() - found_before} {noun}")
             if collector.done(tab_format):
-                return "đã tới video cũ hơn số ngày quét"
+                return f"đã tới {noun} cũ hơn số ngày quét"
             if collector.items_seen == seen_before:
                 # Tab trống hoặc page không xem được: không chờ thêm các vòng cuộn (mỗi vòng tới 20 giây).
-                return "tab không có video nào"
+                return f"tab không có {noun} nào"
             stall = 0 if collector.count() > before else stall + 1
             if stall >= int(scan["stall_rounds"]):
-                return f"không có video mới sau {stall} lần cuộn"
+                return f"không có {noun} mới sau {stall} lần cuộn"
             _human_pause(scan, stop_event)
         return f"đã cuộn tối đa {max_rounds} lần"
 
@@ -484,10 +491,10 @@ class FacebookScanner:
         stop_event: threading.Event | None = None,
         on_progress: Callable[[str], None] | None = None,
     ) -> list[dict]:
-        """Quét tab Reels và/hoặc Video của page, trả về các dict từ graphql.flatten (đã bỏ trùng).
+        """Quét Reels/Video hoặc feed Bài đăng; trả dict từ graphql.flatten đã bỏ trùng.
 
-        Chỉ giữ video đúng định dạng và không cũ hơn `days` ngày. Dừng khi hết cuộn mới (stall),
-        tab không có video nào, đạt số vòng tối đa, đủ max_videos, gặp video cũ, hoặc stop_event được bật.
+        Chỉ giữ bài đúng định dạng và không cũ hơn `days` ngày. Dừng khi hết bài mới (stall),
+        tab trống, đạt số vòng tối đa, đủ max_videos, gặp bài cũ, hoặc stop_event được bật.
         `on_progress` nhận từng bước (mở tab, mỗi vòng cuộn, lý do dừng) để hiện cho người dùng.
         """
         tabs = [(fmt, tab) for fmt, tab in _TABS if fmt in formats]
@@ -508,14 +515,15 @@ class FacebookScanner:
                 if collector.full() or _stopped(stop_event):
                     break
                 label = _TAB_LABELS.get(fmt, fmt)
+                noun = "bài đăng" if fmt == "post" else "video"
                 url = tab_url(page_url, tab)
                 logger.info("Quét tab %s của %s", tab, page_url)
                 report(f"Tab {label}: đang mở…")
                 found_before = collector.count()
                 reason = self._scan_tab(url, fmt, collector, pending, stop_event, report)
                 found = collector.count() - found_before
-                logger.info("Tab %s của %s: %d video, dừng vì %s", tab, page_url, found, reason)
-                report(f"Tab {label} xong: {found} video, dừng vì {reason}")
+                logger.info("Tab %s của %s: %d %s, dừng vì %s", tab, page_url, found, noun, reason)
+                report(f"Tab {label} xong: {found} {noun}, dừng vì {reason}")
         finally:
             page.remove_listener("response", on_response)
             self._export_cookies()

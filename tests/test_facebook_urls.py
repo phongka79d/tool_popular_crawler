@@ -60,3 +60,21 @@ def test_vanity_tab_url(page_url: str, tab: str) -> None:
 @pytest.mark.parametrize("page_url", PROFILE_URLS)
 def test_profile_tab_url(page_url: str, tab: str, sk: str) -> None:
     assert tab_url(page_url, tab) == f"https://www.facebook.com/profile.php?id=123456&sk={sk}"
+
+
+@pytest.mark.parametrize("page_url", VANITY_URLS)
+def test_vanity_posts_tab_opens_main_feed(page_url: str) -> None:
+    assert tab_url(page_url, "posts") == "https://www.facebook.com/PageX/"
+
+
+@pytest.mark.parametrize("page_url", PROFILE_URLS)
+def test_profile_posts_tab_opens_main_feed_without_sk(page_url: str) -> None:
+    assert tab_url(page_url, "posts") == "https://www.facebook.com/profile.php?id=123456"
+
+
+@pytest.mark.parametrize("page_url", VANITY_URLS + PROFILE_URLS)
+@pytest.mark.parametrize("tab", ["reels", "videos", "posts"])
+def test_capture_tool_uses_scanner_tab_urls(page_url: str, tab: str) -> None:
+    from tools.capture_feed import tab_url as capture_tab_url
+
+    assert capture_tab_url(page_url, tab) == tab_url(page_url, tab)

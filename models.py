@@ -20,7 +20,7 @@ class Video:
     page_name: str = ""
     page_followers: int | None = None
     posted_at: int | None = None      # unix seconds (UTC)
-    format: str = "video"             # "reel" | "video"
+    format: str = "video"             # "reel" | "video" | "post"
     duration_s: float | None = None
     views: int | None = None
     reactions: int | None = None
@@ -28,6 +28,7 @@ class Video:
     shares: int | None = None
     caption: str = ""
     # --- computed by filters.compute_metrics ---
+    interactions: int | None = None
     ratio_follow: float | None = None
     ratio_median: float | None = None
     engagement: float | None = None

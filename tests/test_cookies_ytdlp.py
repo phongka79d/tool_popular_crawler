@@ -324,6 +324,103 @@ def test_scan_page_expect_response_timeout_stall_and_round_cap(
     ]
 
 
+def test_scan_page_posts_uses_main_feed_and_ignores_videos(monkeypatch):
+    opened, progress = [], []
+    page = SimpleNamespace(
+        on=lambda *args: None, remove_listener=lambda *args: None,
+        content=lambda: "feed",
+    )
+    scanner = facebook.FacebookScanner(settings={"scan": {
+        "max_scroll_rounds": 1, "stall_rounds": 2,
+    }})
+    scanner._page = page
+    monkeypatch.setattr(scanner, "_open", opened.append)
+    monkeypatch.setattr(scanner, "_scroll_once", lambda: None)
+    monkeypatch.setattr(scanner, "_raise_if_blocked", lambda: None)
+    monkeypatch.setattr(scanner, "_export_cookies", lambda: None)
+    monkeypatch.setattr(facebook, "_human_pause", lambda *args: None)
+    post = {"video_id": "post-1", "format": "post", "caption": "Nội dung của trang"}
+    monkeypatch.setattr(facebook.graphql, "parse_initial_html", lambda html: [
+        {"video_id": "video-1", "format": "video"}, post,
+        {"video_id": "reel-1", "format": "reel"},
+    ])
+    assert scanner.scan_page(
+        "https://www.facebook.com/TestPage/?ref=share", 30, {"post"}, 100,
+        on_progress=progress.append,
+    ) == [post]
+    assert opened == ["https://www.facebook.com/TestPage/"]
+    assert any("Bài đăng" in message for message in progress)
+    assert all("video" not in message for message in progress)
+
+
+def test_scan_page_posts_scrolls_past_old_pinned_post(monkeypatch):
+    monkeypatch.setattr(facebook, "is_older_than", lambda timestamp, days: timestamp == 1)
+    pending_listener = {}
+    page = SimpleNamespace(
+        on=lambda event, handler: pending_listener.update(handler=handler),
+        remove_listener=lambda *args: None, content=lambda: "feed",
+    )
+    scanner = facebook.FacebookScanner(settings={"scan": {
+        "max_scroll_rounds": 10, "stall_rounds": 4,
+    }})
+    scanner._page = page
+    monkeypatch.setattr(scanner, "_open", lambda url: None)
+    monkeypatch.setattr(scanner, "_raise_if_blocked", lambda: None)
+    monkeypatch.setattr(scanner, "_export_cookies", lambda: None)
+    monkeypatch.setattr(facebook, "_human_pause", lambda *args: None)
+    pinned = {"video_id": "pinned", "format": "post", "posted_at": 1}
+    recent = {"video_id": "recent", "format": "post", "posted_at": 2}
+    monkeypatch.setattr(facebook.graphql, "parse_initial_html", lambda html: [pinned])
+    monkeypatch.setattr(facebook.graphql, "parse_graphql_response", json.loads)
+    batches = iter([
+        [recent],
+        [{"video_id": "old-2", "format": "post", "posted_at": 1}],
+        [{"video_id": "old-3", "format": "post", "posted_at": 1}],
+    ])
+    rounds = []
+
+    def scroll():
+        rounds.append(1)
+        body = json.dumps(next(batches))
+        pending_listener["handler"](SimpleNamespace(
+            status=200, url="https://www.facebook.com/api/graphql/", text=lambda: body,
+        ))
+
+    monkeypatch.setattr(scanner, "_scroll_once", scroll)
+    assert scanner.scan_page("https://www.facebook.com/TestPage", 30, {"post"}, 100) == [recent]
+    assert len(rounds) == 3
+
+
+def test_post_collector_ignores_single_old_pinned_post_and_duplicate_old_posts(monkeypatch):
+    monkeypatch.setattr(facebook, "is_older_than", lambda timestamp, days: timestamp == 1)
+    collector = facebook._Collector({"post"}, 30, 100)
+    old = {"video_id": "pinned", "format": "post", "posted_at": 1}
+    recent = {"video_id": "recent", "format": "post", "posted_at": 2}
+    collector.add([old], "post")
+    assert not collector.done("post")
+    collector.add([old, recent, {"video_id": "old-video", "format": "video", "posted_at": 1}], "post")
+    assert not collector.done("post")
+    assert collector.videos() == [recent]
+    assert collector.items_seen == 3
+    collector.add([{"video_id": "old-2", "format": "post", "posted_at": 1}], "post")
+    assert not collector.done("post")
+    collector.add([{"video_id": "old-3", "format": "post", "posted_at": 1}], "post")
+    assert collector.done("post")
+
+
+def test_video_collector_still_stops_at_first_old_video(monkeypatch):
+    monkeypatch.setattr(facebook, "is_older_than", lambda timestamp, days: True)
+    collector = facebook._Collector({"video"}, 30, 100)
+    collector.add([{"video_id": "old", "format": "video", "posted_at": 1}], "video")
+    assert collector.done("video")
+
+
+def test_post_collector_counts_only_posts():
+    collector = facebook._Collector({"post"}, 30, 100)
+    collector.add([{"video_id": "v", "format": "video"}, {"video_id": "r", "format": "reel"}], "post")
+    assert collector.items_seen == 0 and collector.count() == 0
+
+
 # ---------- yt-dlp helpers ----------
 
 def _install_fake_ydl(monkeypatch, info=None, on_download=None) -> dict:

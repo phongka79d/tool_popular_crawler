@@ -202,6 +202,21 @@ def test_extra_scores_kept_as_floats_and_codes_exposed(raw):
     assert out["cta_code"] == "binh_luan"
 
 
+def test_jev_viral_is_mean_of_raw_scores(raw):
+    values = [0.2, 0.4, 0.6, 0.8, 1.0]
+    for key, value in zip(("hook_strength", *jev_client.EXTRA_SCORES), values):
+        raw[key]["score"] = value
+    out = jev_client.interpret_labels(raw, SETTINGS, TAXONOMY)
+    assert out["jev_viral"] == pytest.approx(0.6)
+
+
+@pytest.mark.parametrize("value, expected", [(-0.2, 0.0), (2.0, 1.0)])
+def test_jev_viral_is_bounded_for_legacy_raw_scores(raw, value, expected):
+    for key in ("hook_strength", *jev_client.EXTRA_SCORES):
+        raw[key]["score"] = value
+    assert jev_client.interpret_labels(raw, SETTINGS, TAXONOMY)["jev_viral"] == expected
+
+
 # --- build_state / build_questions -------------------------------------------
 
 def test_build_state_truncates_caption_and_transcript():
@@ -228,6 +243,32 @@ def test_build_state_handles_missing_text():
 
 def test_build_questions_covers_every_label_question():
     assert set(jev_client.build_questions(TAXONOMY)) == LABEL_QIDS
+
+
+def test_post_state_uses_first_caption_line_without_transcript():
+    video = make_video(format="post", caption="Dòng mở bài\nNội dung bài", hook="Hook cũ", transcript="Thoại cũ")
+    state = jev_client.build_state(video, "Page X")
+    assert state["hook"] == "Dòng mở bài"
+    assert state["caption"] == video.caption
+    assert "transcript" not in state
+
+
+def test_post_questions_use_caption_and_keep_all_interpretable_keys(raw):
+    questions = jev_client.build_questions(TAXONOMY, is_post=True)
+    assert set(questions) == LABEL_QIDS
+    for question in questions.values():
+        assert "transcript" not in question.instructions
+    for key in ("topic", "structure", "cta", *jev_client.EXTRA_SCORES):
+        assert "`caption`" in questions[key].instructions
+    assert "mở – thân – kết" in questions["structure"].instructions
+    assert "jev_viral" in jev_client.interpret_labels(raw, SETTINGS, TAXONOMY)
+
+
+def test_video_structure_and_extra_questions_fall_back_to_caption():
+    questions = jev_client.build_questions(TAXONOMY)
+    for key in ("structure", *jev_client.EXTRA_SCORES):
+        assert "`caption`" in questions[key].instructions
+        assert "không có thoại" in questions[key].instructions
 
 
 def test_taxonomy_has_escape_options_and_labels_for_every_code():
@@ -297,7 +338,7 @@ def test_ask_labels_miss_calls_once_saves_and_returns_raw(fake_db, raw, monkeypa
     assert services == ["jev"]
     assert answers == raw
     assert usage == {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120}
-    assert fake_db.saved == [("vid1", "jev-1.13", "labels", raw, usage)]
+    assert fake_db.saved == [("vid1", "jev-1.13", jev_client.LABELS_KIND, raw, usage)]
 
 
 def test_ask_labels_none_usage_counts_as_zero(fake_db, raw):
@@ -307,7 +348,7 @@ def test_ask_labels_none_usage_counts_as_zero(fake_db, raw):
 
 
 def test_ask_labels_cache_hit_makes_no_call(fake_db, raw):
-    fake_db.rows[("vid1", "jev-1.13", "labels")] = raw
+    fake_db.rows[("vid1", "jev-1.13", jev_client.LABELS_KIND)] = raw
     client = FakeClient(sdk_response(raw))
     answers, usage = jev_client.ask_labels(client, make_video(), TAXONOMY, SETTINGS)
     assert client.calls == []
@@ -317,13 +358,13 @@ def test_ask_labels_cache_hit_makes_no_call(fake_db, raw):
 
 
 def test_ask_labels_cache_is_keyed_by_model(fake_db, raw):
-    fake_db.rows[("vid1", "jev-1.13", "labels")] = raw
+    fake_db.rows[("vid1", "jev-1.13", jev_client.LABELS_KIND)] = raw
     other = {**SETTINGS, "jev": {**SETTINGS["jev"], "model": "jev-2"}}
     client = FakeClient(sdk_response(raw))
     jev_client.ask_labels(client, make_video(), TAXONOMY, other)
     assert len(client.calls) == 1
     assert client.calls[0]["model"] == "jev-2"
-    assert fake_db.saved[0][1:3] == ("jev-2", "labels")
+    assert fake_db.saved[0][1:3] == ("jev-2", jev_client.LABELS_KIND)
 
 
 def test_ask_labels_missing_answer_raises_and_does_not_cache(fake_db, raw):
@@ -332,6 +373,23 @@ def test_ask_labels_missing_answer_raises_and_does_not_cache(fake_db, raw):
     with pytest.raises(ServiceError):
         jev_client.ask_labels(client, make_video(), TAXONOMY, SETTINGS)
     assert fake_db.saved == []
+
+
+def test_ask_labels_ignores_old_labels_cache(fake_db, raw):
+    fake_db.rows[("vid1", "jev-1.13", "labels")] = raw
+    client = FakeClient(sdk_response(raw))
+    jev_client.ask_labels(client, make_video(), TAXONOMY, SETTINGS)
+    assert len(client.calls) == 1
+    assert fake_db.saved[0][2] == "labels_v2"
+
+
+def test_ask_labels_post_uses_caption_only_and_interprets_every_answer(fake_db, raw):
+    client = FakeClient(sdk_response(raw))
+    answers, _ = jev_client.ask_labels(client, make_video(format="post"), TAXONOMY, SETTINGS)
+    call = client.calls[0]
+    assert "transcript" not in call["state"]
+    assert set(call["questions"]) == set(answers)
+    assert "jev_viral" in jev_client.interpret_labels(answers, SETTINGS, TAXONOMY)
 
 
 # --- check_suggestions ---------------------------------------------------------
@@ -355,7 +413,8 @@ def suggestion_video() -> Video:
     ("giu", "chep", "rui", "kept"),
     [
         (1.0, 0.5, 0.5, True),
-        (0.99, 0.0, 0.0, False),
+        (0.5, 0.0, 0.0, True),
+        (0.49, 0.0, 0.0, False),
         (2.0, 0.51, 0.0, False),
         (2.0, 0.0, 0.51, False),
         (2.0, 0.2, 0.3, True),
@@ -407,6 +466,31 @@ def test_check_suggestions_truncates_transcript_in_state():
     client = FakeClient(sdk_response(suggestion_raw(2.0, 0.0, 0.0)))
     jev_client.check_suggestions(client, video, [SUGGESTION], SETTINGS)
     assert len(client.calls[0]["state"]["transcript"]) == 3000
+
+
+def test_post_suggestion_check_uses_caption_and_original_post_wording():
+    video = suggestion_video()
+    video.format = "post"
+    video.caption = "Mở bài\nNội dung gốc"
+    client = FakeClient(sdk_response(suggestion_raw(0.5, 0.0, 0.0)))
+    kept, _, _ = jev_client.check_suggestions(client, video, [SUGGESTION], SETTINGS)
+    assert kept == [SUGGESTION]
+    call = client.calls[0]
+    assert call["state"]["caption"] == video.caption
+    assert "transcript" not in call["state"]
+    assert "bài gốc" in call["questions"]["giu_cong_thuc_0"].instructions
+    assert "`caption`" in call["questions"]["chep_nguyen_0"].instructions
+    assert all("transcript" not in q.instructions for q in call["questions"].values())
+
+
+def test_video_suggestion_check_includes_caption_and_compares_transcript():
+    video = suggestion_video()
+    client = FakeClient(sdk_response(suggestion_raw(0.5, 0.0, 0.0)))
+    jev_client.check_suggestions(client, video, [SUGGESTION], SETTINGS)
+    call = client.calls[0]
+    assert call["state"]["caption"] == video.caption
+    assert call["state"]["transcript"] == video.transcript
+    assert "`transcript`" in call["questions"]["chep_nguyen_0"].instructions
 
 
 def test_check_suggestions_empty_makes_no_call():

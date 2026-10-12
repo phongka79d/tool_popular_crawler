@@ -23,14 +23,15 @@ def harness(monkeypatch, tmp_path):
         jev_calls=[], analysis_calls=[], suggestion_calls=[], commentary_calls=[],
         relevant=0.9, jev_error=None, llm_error=None, login_error=None,
         scan_stop=None, reject_suggestions=False, transcript_calls=[],
+        scan_hook=None, pause_hook=None,
     )
     settings = {
         "jev": {"model": "jev-test", "yes_threshold": 0.5, "min_confidence": 0.6},
         "llm": {"base_url": "https://llm.test/v1", "model": "llm-test", "temperature": 0.4},
         "stt": {"keyterms_file": "config/keyterms.txt"},
-        "scan": {"max_videos_per_page": 200, "min_page_followers": 100_000},
+        "scan": {"max_videos_per_page": 200, "min_views": 10000, "min_interactions": 200},
         "score_weights": {"ratio_median": 40, "ratio_median_cap": 5,
-                          "replicable": 25, "hook_strength": 20, "relevant": 15},
+                          "replicable": 25, "hook_strength": 20, "relevant": 15, "jev_viral": 20},
         "my_page": {"name": "Page dược", "audience": "Nhà thuốc"},
     }
     monkeypatch.setattr(pipeline.config, "ensure_dirs", lambda: None)
@@ -77,12 +78,16 @@ def harness(monkeypatch, tmp_path):
 
         def scan_page(self, url, **kwargs):
             state.scans.append(url)
+            if state.scan_hook:
+                state.scan_hook(url, kwargs["stop_event"])
             if state.scan_stop:
                 state.scan_stop.set()
             return deepcopy(state.rows[url])
 
         def polite_page_pause(self, stop_event=None):
             state.pauses.append(True)
+            if state.pause_hook:
+                state.pause_hook(stop_event)
 
     monkeypatch.setattr(pipeline, "FacebookScanner", Scanner)
 
@@ -140,7 +145,7 @@ def harness(monkeypatch, tmp_path):
         return tmp_path / "result.xlsx"
 
     monkeypatch.setattr(pipeline.export_excel, "export", export)
-    state.params = pipeline.RunParams(14, {"reel", "video"}, 100_000, {"views": 50_000}, "viral_tuyet_doi")
+    state.params = pipeline.RunParams(14, {"reel", "video"}, min_views=50_000)
     state.settings = settings
     state.run = lambda stop=None, ask_user=None: pipeline.run(
         state.params, settings, state.progress.append, stop or Event(), ask_user
@@ -148,16 +153,32 @@ def harness(monkeypatch, tmp_path):
     return state
 
 
-def test_below_threshold_page_is_skipped_and_recorded(harness):
+def test_small_page_is_scanned_without_follower_gate(harness):
     h = harness
     h.channels.insert(0, "small")
-    h.pages["small"] = Page("small", "Kênh nhỏ", 99_999)
+    h.pages["small"] = Page("small", "Kênh nhỏ", 1)
+    h.rows["small"] = [dict(h.rows["large"][0], video_id="small-v1")]
     assert h.run() is not None
-    assert h.scans == ["large"]
-    skipped = h.exports[0][2]["pages"][0]
-    assert skipped["skipped_reason"] == "Dưới ngưỡng follower"
-    assert skipped["scanned"] == 0
+    assert h.scans == ["small", "large"]
+    assert h.exports[0][2]["pages"][0]["skipped_reason"] is None
     assert h.pauses == [True]
+
+
+def test_post_run_skips_metadata_transcript_and_deepgram(harness, monkeypatch):
+    h = harness
+    h.params = pipeline.RunParams(14, {"post"}, min_interactions=160)
+    h.rows["large"][0].update(format="post", views=None, caption="\n  Hook bài đăng  \nNội dung")
+    monkeypatch.setattr(pipeline.keys, "get_key", lambda name: None if name == "deepgram" else "fake-key")
+    monkeypatch.setattr(pipeline.transcript, "check_key", lambda *args: pytest.fail("post checked Deepgram"))
+    monkeypatch.setattr(pipeline.ytdlp, "fill_missing", lambda *args: pytest.fail("post fetched metadata"))
+    assert h.run() is not None
+    assert h.transcript_calls == []
+    post = h.exports[0][0][0]
+    assert post.interactions == 160
+    assert post.hook == "Hook bài đăng"
+    assert post.transcript == ""
+    assert h.exports[0][2]["usage"]["deepgram_minutes"] == 0
+    assert any("bài đăng" in progress.message.lower() for progress in h.progress)
 
 
 def test_group_link_is_skipped_without_opening_or_pausing(harness, monkeypatch):
@@ -309,10 +330,11 @@ def test_usage_counts_analysis_check_commentary_and_transcript(harness):
 def test_cli_builds_requested_params(harness, monkeypatch):
     seen = []
     monkeypatch.setattr(pipeline, "run", lambda params, settings, progress, stop: seen.append(params) or Path("result.xlsx"))
-    assert pipeline.main(["--days", "14", "--preset", "no_bat_thuong", "--formats", "reel,video"]) == 0
+    assert pipeline.main(["--days", "14", "--formats", "post", "--min-views", "100", "--min-interactions", "250"]) == 0
     assert seen[0].days == 14
-    assert seen[0].formats == {"reel", "video"}
-    assert seen[0].preset == "no_bat_thuong"
+    assert seen[0].formats == {"post"}
+    assert seen[0].min_views == 100
+    assert seen[0].min_interactions == 250
 
 
 def test_missing_views_are_filled_and_persisted_before_filtering(harness, monkeypatch):
@@ -471,3 +493,88 @@ def test_parallel_analysis_asks_llm_quota_once_and_keeps_export_order(harness, m
     assert sorted(h.analysis_calls) == ["v1", "v2", "v3"]
     assert [video.video_id for video in h.exports[0][0]] == ["v1", "v2", "v3"]
     assert h.exports[0][2]["pages"][0]["analyzed"] == 3
+
+
+def test_first_page_analysis_overlaps_next_page_scan(harness, monkeypatch):
+    h = harness
+    h.channels.append("second")
+    h.pages["second"] = Page("second", "Kênh thứ hai", 100)
+    h.rows["second"] = [dict(h.rows["large"][0], video_id="v2")]
+    started, second_scanned = Event(), Event()
+    ordering = []
+    original_analysis = pipeline.llm_client.write_analysis
+
+    def analysis(client, model, video, *args):
+        ordering.append(f"analyze:{video.video_id}")
+        if video.video_id == "v1":
+            started.set()
+            assert second_scanned.wait(5)
+        return original_analysis(client, model, video, *args)
+
+    def scan(url, stop):
+        ordering.append(f"scan:{url}")
+        if url == "second":
+            assert started.is_set()
+            second_scanned.set()
+
+    h.scan_hook = scan
+    h.pause_hook = lambda stop: started.wait(5)
+    monkeypatch.setattr(pipeline.llm_client, "write_analysis", analysis)
+    assert h.run() is not None
+    assert ordering == ["scan:large", "analyze:v1", "scan:second", "analyze:v2"]
+    assert [video.video_id for video in h.exports[0][0]] == ["v1", "v2"]
+    assert [page["passed"] for page in h.exports[0][2]["pages"]] == [1, 1]
+    assert [page["analyzed"] for page in h.exports[0][2]["pages"]] == [1, 1]
+    events = [p for p in h.progress if p.stage == "analyze"]
+    assert events[0].message.startswith("Video 1:")
+    assert events[0].steps == 1
+    assert events[-1].step == events[-1].steps == 2
+
+
+@pytest.mark.parametrize("error", [
+    AuthError("jev", "Key Jev không hợp lệ."),
+    NetworkError("jev", "Không kết nối được tới Jev."),
+    QuotaError("llm", "LLM hết hạn mức."),
+])
+def test_fatal_analysis_interrupts_pause_before_later_pages(harness, error):
+    h = harness
+    for url in ("second", "third"):
+        h.channels.append(url)
+        h.pages[url] = Page(url, url, 100)
+        h.rows[url] = [dict(h.rows["large"][0], video_id=url)]
+    if isinstance(error, QuotaError):
+        h.llm_error = error
+    else:
+        h.jev_error = error
+    interrupted = []
+
+    def pause(stop):
+        interrupted.append(stop.wait(5))
+
+    h.pause_hook = pause
+    user_stop = Event()
+    assert h.run(user_stop, ask_user=lambda *args: "pause") is not None
+    assert h.scans == ["large"]
+    assert not user_stop.is_set()
+    assert all(interrupted)
+    assert [video.video_id for video in h.exports[0][0]] == ["v1"]
+    assert h.commentary_calls == []
+    assert h.progress[-1].message == "Đã xuất kết quả một phần."
+
+
+def test_stop_during_second_page_exports_rows_not_yet_filtered(harness):
+    h = harness
+    h.channels.append("second")
+    h.pages["second"] = Page("second", "Kênh thứ hai", 100)
+    h.rows["second"] = [dict(h.rows["large"][0], video_id="v2")]
+    stop = Event()
+
+    def scan(url, combined_stop):
+        if url == "second":
+            stop.set()
+
+    h.scan_hook = scan
+    assert h.run(stop) is not None
+    assert [video.video_id for video in h.exports[0][0]] == ["v1", "v2"]
+    assert [page["passed"] for page in h.exports[0][2]["pages"]] == [1, 1]
+    assert "v2" not in h.jev_calls

@@ -74,7 +74,7 @@ Mẫu `settings.json`:
   "llm": {"base_url": "https://.../v1", "model": ""},
   "stt": {"provider": "deepgram", "model": "nova-3", "language": "vi",
           "keyterms_file": "config/keyterms.txt", "fallback": "local_whisper"},
-  "scan": {"min_page_followers": 100000, "delay_min_s": 3, "delay_max_s": 8,
+  "scan": {"min_views": 10000, "min_interactions": 200, "delay_min_s": 3, "delay_max_s": 8,
            "max_videos_per_page": 200},
   "my_page": {"name": "Thế Thảo Pharma", "audience": "Chủ nhà thuốc, dược sĩ"}
 }
@@ -142,31 +142,16 @@ def transcribe_deepgram(path, stt, keyterms):
 
 Toàn bộ phép tính và so sánh ngày làm bằng code. Tài liệu của Jev nói rõ model này không đáng tin với số học, đếm và so sánh ngày, nên không đưa bước này cho Jev.
 
-Các chỉ số tính cho mỗi video:
+Người dùng chọn **Loại quét**: Video (Video / Reel / Cả hai) hoặc Bài đăng chữ/ảnh trên bảng tin chính của page. Không lọc quy mô page.
 
-- `ratio_follow = view / follower_page`
-- `ratio_median = view / trung_vị_view_các_video_của_page_trong_đợt_quét`
-- `engagement = (cảm_xúc + bình_luận + chia_sẻ) / view`
-- `share_rate = chia_sẻ / view`
+- Video: giữ khi `views >= min_views` (mặc định 10.000).
+- Bài đăng: giữ khi `interactions >= min_interactions` (mặc định 200).
+- `interactions` là tổng các số cảm xúc, bình luận, chia sẻ đã biết; nếu cả ba chưa biết thì để trống.
+- Ngưỡng 0 tắt lọc. Khi bật ngưỡng, giá trị chưa biết không đạt; giá trị đúng bằng ngưỡng được giữ.
+- `ratio_follow = view / follower_page`, `engagement = (cảm_xúc + bình_luận + chia_sẻ) / view`, `share_rate = chia_sẻ / view` vẫn là chỉ số tham khảo của video.
+- `ratio_median` so với trung vị riêng của kênh: lượt xem cho video, tổng tương tác cho bài đăng; cần ít nhất 5 giá trị đã biết và trung vị dương.
 
-Người dùng chọn 1 preset hoặc tự nhập ngưỡng. Nhiều điều kiện được kết hợp bằng AND:
-
-**Bộ lọc quy mô page (chạy trước bộ lọc video):** chỉ xét page có từ 100.000 follower trở lên. Tool đọc số follower ngay khi vào page. Page dưới ngưỡng thì bỏ qua luôn, không cuộn video, nên quét nhanh hơn và ít thao tác trên Facebook hơn. Mức này đổi được ở tab Chạy quét (`min_page_followers`); đặt 0 để tắt.
-
-**Bộ lọc video:**
-
-| Preset | Điều kiện | Dùng khi |
-| --- | --- | --- |
-| Viral tuyệt đối | view ≥ 50.000 | Quét kênh nhỏ, muốn lấy rộng |
-| Vượt tệp follower | ratio\_follow ≥ 5 | Tìm video lan ra ngoài tệp |
-| Bùng nổ mạnh | ratio\_follow ≥ 10 | Chỉ lấy video nổ thật sự |
-| Nổ bất thường của kênh (khuyên dùng) | ratio\_median ≥ 3 | So kênh với chính nó, kênh lớn kênh nhỏ đều công bằng |
-| Nội dung đáng chia sẻ | share\_rate ≥ 1% và view ≥ 10.000 | Tìm nội dung hữu ích, dễ nhân bản cho B2B |
-| Tự nhập | Người dùng nhập từng ngưỡng | Thử nghiệm |
-
-Kết quả bước này là danh sách video "đạt ngưỡng". Chỉ danh sách này mới đi tiếp sang chuyển thoại, Jev và LLM, nhờ vậy tiết kiệm thời gian và chi phí API.
-
-Cần ít nhất 5 video của page trong đợt quét thì mới tính `ratio_median`. Ít hơn thì để trống cột này và ghi chú trong log.
+Chỉ nội dung đạt ngưỡng mới đi tiếp sang Jev và LLM. Video được chuyển thoại; bài đăng chỉ phân tích caption, lấy dòng không rỗng đầu tiên làm hook (tối đa 200 ký tự), không gọi yt-dlp/audio/Deepgram.
 
 ## 6. Tích hợp Jev
 
@@ -290,21 +275,21 @@ Gợi ý có `giu_cong_thuc < 1`, hoặc `chep_nguyen > 0,5`, hoặc `rui_ro > 0
 
 Tên file: `output/cong-thuc_YYYY-MM-DD_HHmm.xlsx`. Sheet 1 sắp xếp theo Điểm công thức giảm dần, có bật bộ lọc ở dòng tiêu đề và cố định cột STT, Kênh.
 
-**Sheet 1 – Chi tiết video**
+**Sheet 1 – Chi tiết video** (hoặc **Chi tiết bài đăng** khi quét bài chữ/ảnh)
 
 | Nhóm | Cột | Nguồn |
 | --- | --- | --- |
 | Định danh | STT, Kênh, Follower kênh, Ngày đăng, Định dạng, Thời lượng (giây), Link bài | Thu thập |
-| Chỉ số | View, Cảm xúc, Bình luận, Chia sẻ, View/Follower, Hệ số so trung vị kênh, Tỷ lệ tương tác, Tỷ lệ share | Thu thập + code |
+| Chỉ số | View, Cảm xúc, Bình luận, Chia sẻ, Tổng tương tác, View/Follower, Hệ số so trung vị kênh, Tỷ lệ tương tác, Tỷ lệ share | Thu thập + code |
 | Nội dung | Chủ đề bài, Tóm tắt, Caption, Nội dung thoại, Hook gốc | LLM + thu thập |
 | Công thức | Nhóm chủ đề, Kiểu hook, Độ mạnh hook, Cấu trúc, CTA | Jev |
-| Đánh giá | Liên quan ngành (%), Làm lại được (%), Điểm công thức (0–100), Cờ rủi ro | Jev + code |
+| Đánh giá | Liên quan ngành (%), Làm lại được (%), Điểm công thức (0–100), Điểm Jev (0–100), Cờ rủi ro | Jev + code |
 | Nhân bản | Lý do viral, Gợi ý 1, Gợi ý 2, Gợi ý 3 | LLM (đã qua Jev kiểm tra) |
 | Khác | Ghi chú (nhãn chưa chắc, lỗi lấy thoại) | Code |
 
-**Sheet 2 – Tổng hợp công thức:** 2 bảng đếm (Nhóm chủ đề × số video, view trung bình, điểm trung bình; Kiểu hook × các chỉ số tương tự) và đoạn nhận xét do LLM viết.
+**Sheet 2 – Tổng hợp công thức:** 2 bảng đếm theo Nhóm chủ đề và Kiểu hook; nhãn số lượng là Số video hoặc Số bài theo loại quét, kèm view trung bình, điểm trung bình và đoạn nhận xét do LLM viết.
 
-**Sheet 3 – Nhật ký:** thời gian chạy, tham số đã chọn, số video đã quét/đạt ngưỡng/đã phân tích theo từng kênh, lỗi theo kênh, page bị bỏ qua vì dưới ngưỡng follower, lượng token Jev và LLM, số phút Deepgram đã dùng (lấy từ trường `usage` mà Jev trả về).
+**Sheet 3 – Nhật ký:** thời gian chạy, loại quét và ngưỡng đã chọn, số nội dung đã quét/đạt ngưỡng/đã phân tích theo từng kênh, lỗi theo kênh, lượng token Jev và LLM, số phút Deepgram đã dùng.
 
 Định dạng: cột chữ dài bật wrap text và rộng 60; số có dấu phân cách hàng nghìn; tỷ lệ hiển thị %; dòng có Cờ rủi ro tô nền vàng nhạt.
 
@@ -312,8 +297,8 @@ Tên file: `output/cong-thuc_YYYY-MM-DD_HHmm.xlsx`. Sheet 1 sắp xếp theo Đi
 
 Giao diện là trang web chạy cục bộ (Streamlit), tự mở trên trình duyệt khi bấm file chạy. Có 3 tab:
 
-1. **Cài đặt** (bắt buộc ở lần mở đầu tiên): nếu còn thiếu key, tool mở thẳng màn hình này và chưa cho dùng tab khác. Có ô nhập API key Jev, API key Deepgram, và endpoint + key + model LLM; mỗi loại có nút "Kiểm tra và lưu". Cùng tab này có ô nhập danh sách kênh và nút "Đăng nhập Facebook".
-2. **Chạy quét:** số ngày (7/14/30/tự nhập), định dạng (Reels, Video, Tất cả), follower tối thiểu của page (mặc định 100.000), preset ngưỡng video hoặc tự nhập, nút Chạy. Đầu tab có 3 đèn trạng thái key (Jev, Deepgram, LLM). Có thanh tiến trình theo từng kênh và nút Dừng.
+1. **Cài đặt:** kết nối Jev và endpoint + key + model LLM; video cần thêm Deepgram. Mỗi loại có nút "Kiểm tra và lưu". Cùng tab này có ô nhập danh sách kênh và nút "Đăng nhập Facebook".
+2. **Chạy quét:** số ngày (7/14/30/tự nhập), Loại quét (Video / Bài đăng), loại video (Video / Reel / Cả hai), một ngưỡng lượt xem hoặc tổng tương tác, nút Chạy. Ngưỡng được nhớ sau khi bắt đầu quét. Bài đăng chỉ cần Jev và LLM; video cần thêm Deepgram. Có thanh tiến trình theo từng kênh và nút Dừng.
 3. **Kết quả:** danh sách file Excel đã xuất, nút mở thư mục.
 
 **Đóng gói cho Windows:**
@@ -349,7 +334,7 @@ Kèm theo file `HUONG-DAN.pdf` 1 trang có ảnh chụp 3 tab giao diện.
 
 Dự kiến khoảng 4 tuần cho 1 người làm. Mỗi giai đoạn chạy được thật thì mới sang giai đoạn sau.
 
-1. **Tuần 1 – Thu thập + lọc:** đăng nhập, quét 3 kênh mẫu, lọc theo preset, xuất Excel chỉ có số liệu và caption.
+1. **Tuần 1 – Thu thập + lọc:** đăng nhập, quét 3 kênh mẫu, lọc theo lượt xem hoặc tổng tương tác, xuất Excel chỉ có số liệu và caption.
 2. **Tuần 2 – Jev:** soạn `taxonomy.json` cùng đội content, ráp bộ câu hỏi, tính điểm công thức, test đảo thứ tự option trên 30 video.
 3. **Tuần 3 – Thoại + LLM:** chuyển thoại, prompt LLM, vòng Jev kiểm tra gợi ý, Sheet 2 tổng hợp.
 4. **Tuần 4 – Giao diện + đóng gói:** Streamlit 3 tab, build exe, viết hướng dẫn, cho 2 người không biết code thử cài.
@@ -357,10 +342,10 @@ Dự kiến khoảng 4 tuần cho 1 người làm. Mỗi giai đoạn chạy đ�
 **Checklist nghiệm thu:**
 
 - [ ] Cài trên máy mới từ file ZIP trong dưới 10 phút, không phải gõ lệnh
-- [ ] Lần mở đầu tiên bắt nhập đủ 3 loại key; lần sau không phải nhập lại
+- [ ] Quét bài đăng chỉ cần Jev và LLM; quét video cần thêm Deepgram, lần sau không phải nhập lại key
 - [ ] Nhập sai một key thì tool báo đúng key nào lỗi và không cho chạy
 - [ ] Đăng nhập Facebook 1 lần, các lần sau chạy không phải đăng nhập lại
-- [ ] Page dưới 100.000 follower bị bỏ qua và được ghi trong Sheet 3
+- [ ] Page ít follower vẫn được quét; nội dung đúng bằng ngưỡng lượt xem/tương tác được giữ
 - [ ] Quét 10 kênh × 30 ngày không bị checkpoint, kênh lỗi không làm dừng cả lượt
 - [ ] Số view/chia sẻ trong Excel khớp với Facebook trên 20 video lấy ngẫu nhiên (sai lệch dưới 5%)
 - [ ] Nhãn Jev đúng ít nhất 80% trên 30 video do đội content gắn tay

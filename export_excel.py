@@ -22,6 +22,7 @@ from normalize import to_vn_datetime
 log = logging.getLogger(__name__)
 
 SHEET_DETAIL = "Chi tiết video"
+SHEET_POST_DETAIL = "Chi tiết bài đăng"
 SHEET_SUMMARY = "Tổng hợp công thức"
 SHEET_LOG = "Nhật ký"
 
@@ -42,11 +43,10 @@ _UNCERTAIN_NAMES = {
 _PARAM_LABELS = {
     "days": "Số ngày quét",
     "formats": "Định dạng",
-    "min_page_followers": "Follower tối thiểu của page",
-    "rules": "Ngưỡng lọc video",
-    "preset": "Preset",
+    "min_views": "Lượt xem tối thiểu",
+    "min_interactions": "Tương tác tối thiểu",
 }
-_FORMAT_LABELS = {"reel": "Reel", "video": "Video"}
+_FORMAT_LABELS = {"reel": "Reel", "video": "Video", "post": "Bài đăng"}
 
 FMT_INT = "#,##0"
 FMT_DEC1 = "#,##0.0"
@@ -162,6 +162,7 @@ COLUMNS: tuple[_Column, ...] = (
     _Column("Cảm xúc", lambda v, _: v.reactions, FMT_INT),
     _Column("Bình luận", lambda v, _: v.comments, FMT_INT),
     _Column("Chia sẻ", lambda v, _: v.shares, FMT_INT),
+    _Column("Tổng tương tác", lambda v, _: v.interactions, FMT_INT),
     _Column("View/Follower", lambda v, _: v.ratio_follow, FMT_PCT1, width=16),
     _Column("Hệ số so trung vị kênh", lambda v, _: v.ratio_median, FMT_PCT1, width=18),
     _Column("Tỷ lệ tương tác", lambda v, _: v.engagement, FMT_PCT1, width=16),
@@ -185,6 +186,7 @@ COLUMNS: tuple[_Column, ...] = (
     _Column("Liên quan ngành (%)", lambda v, _: _jev(v, "relevant_p"), FMT_PCT0, width=14),
     _Column("Làm lại được (%)", lambda v, _: _jev(v, "replicable_p"), FMT_PCT0, width=14),
     _Column("Điểm công thức (0–100)", lambda v, _: v.score, FMT_DEC1, width=14),
+    _Column("Điểm Jev (0–100)", lambda v, _: v.jev["jev_viral"] * 100 if v.jev.get("jev_viral") is not None else None, FMT_DEC1, width=14),
     _Column("Cờ rủi ro", lambda v, _: _risk_flags(v), width=26),
     # Nhân bản
     _Column("Lý do viral", lambda v, _: _llm(v, "ly_do_viral"), long=True),
@@ -215,12 +217,13 @@ def export(
 
     wb = Workbook()
     detail = wb.active
-    detail.title = SHEET_DETAIL
+    post_run = set((run_log.get("params") or {}).get("formats") or []) == {"post"}
+    detail.title = SHEET_POST_DETAIL if post_run else SHEET_DETAIL
     _write_details(detail, videos)
-    _write_summary(wb.create_sheet(SHEET_SUMMARY), summary or {})
+    _write_summary(wb.create_sheet(SHEET_SUMMARY), summary or {}, post_run=post_run)
     _write_run_log(wb.create_sheet(SHEET_LOG), run_log or {})
     wb.save(path)
-    log.info("Đã xuất Excel: %s (%d video)", path.name, len(videos))
+    log.info("Đã xuất Excel: %s (%d %s)", path.name, len(videos), "bài đăng" if post_run else "video")
     return path
 
 
@@ -371,10 +374,10 @@ def _group_values(rows: list[dict] | None) -> list[list[Any]]:
     ]
 
 
-def _write_summary(ws: Worksheet, summary: dict) -> None:
+def _write_summary(ws: Worksheet, summary: dict, *, post_run: bool = False) -> None:
     for letter, width in zip("ABCD", (34, 14, 18, 24)):
         ws.column_dimensions[letter].width = width
-    headers = ["Số video", "View trung bình", "Điểm công thức trung bình"]
+    headers = ["Số bài" if post_run else "Số video", "View trung bình", "Điểm công thức trung bình"]
     fmts = [None, FMT_INT, FMT_INT, FMT_DEC1]
     row = _write_table(
         ws, 1, "Bảng 1 – Theo nhóm chủ đề", ["Nhóm chủ đề", *headers],

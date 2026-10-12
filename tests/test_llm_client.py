@@ -173,6 +173,38 @@ class TestWriteAnalysis:
         user = comp.calls[0]["messages"][1]["content"]
         assert "chỉ dựa vào caption" in user
 
+    def test_post_prompt_is_caption_only_and_requests_new_post_ideas(self):
+        post = Video(
+            video_id="post-1", url="u", page_url="p", format="post",
+            caption="Dòng mở bài\nNội dung caption", transcript="Thoại không được dùng", hook="Hook cũ",
+        )
+        client, comp = fake_client(_reply(json.dumps(VALID)))
+
+        llm_client.write_analysis(client, "m-1", post, LABELS, SETTINGS)
+
+        assert len(comp.calls) == 1
+        system, user = comp.calls[0]["messages"]
+        prompt = system["content"] + user["content"]
+        assert "bài đăng" in prompt.lower()
+        assert "transcript" not in prompt.lower()
+        assert "Thoại không được dùng" not in prompt
+        assert "Hook cũ" not in prompt
+        assert "Hook (dòng đầu caption):\nDòng mở bài" in user["content"]
+        assert "vị trí CTA trong bài đăng" in user["content"]
+        assert "ý tưởng bài đăng mới" in prompt
+        for label in LABELS.values():
+            assert label in user["content"]
+
+    def test_post_without_caption_does_not_use_stale_hook_or_transcript(self):
+        post = Video(
+            video_id="post-empty", url="u", page_url="p", format="post",
+            caption="", transcript="Thoại cũ", hook="Hook cũ",
+        )
+        prompt = llm_client._user_prompt(post, LABELS)
+        assert "Hook (dòng đầu caption):\n(không có)" in prompt
+        assert "Thoại cũ" not in prompt
+        assert "Hook cũ" not in prompt
+
 
 class TestFilterBanned:
     BAN = ["khỏi hẳn", "cam kết", "100%"]
@@ -236,6 +268,12 @@ class TestWriteCommentary:
             {"label": "Kiến thức bệnh", "count": 4, "avg_views": 1234.5, "avg_score": 62.0}
         ]
         assert payload["by_hook"] == [{"label": "Câu hỏi", "count": 2, "avg_views": 900, "avg_score": 40.5}]
+
+    def test_commentary_wording_is_neutral_and_does_not_invent_missing_views(self):
+        prompt = llm_client.COMMENTARY_SYSTEM_PROMPT
+        assert "số nội dung" in prompt
+        assert "số video" not in prompt
+        assert "thiếu/null không có nghĩa là 0" in prompt
 
     def test_no_rows_means_no_call(self):
         client, comp = fake_client()

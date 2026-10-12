@@ -15,12 +15,12 @@ NOW = datetime(2026, 10, 12, 9, 5)
 
 HEADERS = [
     "STT", "Kênh", "Follower kênh", "Ngày đăng", "Định dạng", "Thời lượng (giây)", "Link bài",
-    "View", "Cảm xúc", "Bình luận", "Chia sẻ", "View/Follower", "Hệ số so trung vị kênh",
+    "View", "Cảm xúc", "Bình luận", "Chia sẻ", "Tổng tương tác", "View/Follower", "Hệ số so trung vị kênh",
     "Tỷ lệ tương tác", "Tỷ lệ share",
     "Chủ đề bài", "Tóm tắt", "Caption", "Nội dung thoại", "Hook gốc",
     "Góc nhìn", "Mẫu hook điền chỗ trống", "Vị trí CTA",
     "Nhóm chủ đề", "Kiểu hook", "Độ mạnh hook", "Cấu trúc", "CTA",
-    "Liên quan ngành (%)", "Làm lại được (%)", "Điểm công thức (0–100)", "Cờ rủi ro",
+    "Liên quan ngành (%)", "Làm lại được (%)", "Điểm công thức (0–100)", "Điểm Jev (0–100)", "Cờ rủi ro",
     "Lý do viral", "Gợi ý 1", "Gợi ý 2", "Gợi ý 3",
     "Ghi chú",
 ]
@@ -44,15 +44,14 @@ RUN_LOG = {
     "params": {
         "days": 14,
         "formats": {"video", "reel"},
-        "min_page_followers": 100_000,
-        "rules": {"ratio_median": 3},
-        "preset": "no_bat_thuong",
+        "min_views": 10000,
+        "min_interactions": 0,
     },
     "pages": [
         {"url": "https://fb/p1", "name": "Kênh A", "followers": 200_000, "scanned": 40,
          "passed": 3, "analyzed": 3, "skipped_reason": None, "errors": []},
         {"url": "https://fb/p2", "name": "Kênh C", "followers": 5_000, "scanned": 0,
-         "passed": 0, "analyzed": 0, "skipped_reason": "Follower 5.000 dưới ngưỡng 100.000",
+         "passed": 0, "analyzed": 0, "skipped_reason": "Link không hợp lệ",
          "errors": []},
         {"url": "https://fb/p3", "name": "", "followers": None, "scanned": 2,
          "passed": 0, "analyzed": 0, "skipped_reason": None,
@@ -182,12 +181,27 @@ def test_existing_file_is_never_overwritten(tmp_path: Path) -> None:
     assert first.exists() and second.exists()
 
 
+def test_post_export_labels_and_detail_title(tmp_path):
+    post = Video("p1", "https://facebook.test/p1", "page", format="post", interactions=250, jev={"jev_viral": 0.75})
+    path = xl.export([post], {}, {"params": {"formats": ["post"], "min_interactions": 200}}, out_dir=tmp_path, now=NOW)
+    workbook = load_workbook(path)
+    try:
+        assert workbook.sheetnames[0] == "Chi tiết bài đăng"
+        detail = workbook["Chi tiết bài đăng"]
+        assert detail.cell(2, _col("Định dạng")).value == "Bài đăng"
+        assert detail.cell(2, _col("Tổng tương tác")).value == 250
+        assert detail.cell(2, _col("Điểm Jev (0–100)")).value == 75
+        assert workbook["Tổng hợp công thức"].cell(2, 2).value == "Số bài"
+    finally:
+        workbook.close()
+
+
 def test_sheet_names_in_order(wb) -> None:
     assert wb.sheetnames == ["Chi tiết video", "Tổng hợp công thức", "Nhật ký"]
 
 
 def test_detail_header_order_matches_plan(detail) -> None:
-    assert detail.max_column == len(HEADERS) == 37
+    assert detail.max_column == len(HEADERS) == 39
     assert [detail.cell(1, c).value for c in range(1, len(HEADERS) + 1)] == HEADERS
 
 
@@ -204,7 +218,7 @@ def test_rows_sorted_by_score_desc_with_missing_score_last(detail) -> None:
 
 def test_freeze_panes_and_autofilter(detail) -> None:
     assert detail.freeze_panes == "C2"
-    assert detail.auto_filter.ref == "A1:AK5"
+    assert detail.auto_filter.ref == "A1:AM5"
 
 
 def test_risky_row_has_light_yellow_fill(detail) -> None:
@@ -340,11 +354,11 @@ def test_run_log_sheet_contents(wb) -> None:
     assert ws.cell(_find_row(ws, "Kết thúc"), 2).value == "2026-10-12 09:04:00"
     assert isinstance(ws.cell(_find_row(ws, "Bắt đầu"), 2).value, str)
 
-    assert ws.cell(_find_row(ws, "Follower tối thiểu của page"), 2).value == 100_000
-    assert ws.cell(_find_row(ws, "Preset"), 2).value == "no_bat_thuong"
+    assert ws.cell(_find_row(ws, "Lượt xem tối thiểu"), 2).value == 10000
+    assert ws.cell(_find_row(ws, "Tương tác tối thiểu"), 2).value == 0
 
     skipped = _find_row(ws, "Kênh C")
-    assert ws.cell(skipped, 7).value == "Follower 5.000 dưới ngưỡng 100.000"
+    assert ws.cell(skipped, 7).value == "Link không hợp lệ"
     failed = _find_row(ws, "https://fb/p3")
     assert ws.cell(failed, 8).value == "Không kết nối được tới Facebook"
 

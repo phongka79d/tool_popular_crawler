@@ -191,7 +191,7 @@ def test_llm_cache_roundtrip(path: Path) -> None:
 
 
 def test_run_log_roundtrip(path: Path) -> None:
-    params = {"days": 14, "formats": {"video", "reel"}, "preset": "no_bat_thuong"}
+    params = {"days": 14, "formats": {"video", "reel"}, "min_views": 10000, "min_interactions": 0}
     run_id = db.start_run(params, path=path)
     assert isinstance(run_id, int)
 
@@ -203,7 +203,8 @@ def test_run_log_roundtrip(path: Path) -> None:
     assert json.loads(row["params_json"]) == {
         "days": 14,
         "formats": ["reel", "video"],  # sets are stored as sorted lists
-        "preset": "no_bat_thuong",
+        "min_views": 10000,
+        "min_interactions": 0,
     }
     assert json.loads(row["log_json"])["usage"] == {"jev_tokens": 10}
 
