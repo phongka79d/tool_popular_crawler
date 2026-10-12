@@ -313,7 +313,7 @@ def test_scan_page_expect_response_timeout_stall_and_round_cap(
     monkeypatch.setattr(facebook, "_human_pause", lambda *args: None)
     monkeypatch.setattr(facebook.graphql, "parse_initial_html", lambda html: [])
     monkeypatch.setattr(facebook.graphql, "parse_graphql_response", lambda body: [
-        {"video_id": video_id, "format": "reel"} for video_id in json.loads(body)
+        {"video_id": video_id, "format": "reel", "posted_at": 1_900_000_000} for video_id in json.loads(body)
     ])
     videos = scanner.scan_page("https://www.facebook.com/TestPage", 30, {"reel"}, 100)
     assert page.rounds == expected_rounds
@@ -339,7 +339,7 @@ def test_scan_page_posts_uses_main_feed_and_ignores_videos(monkeypatch):
     monkeypatch.setattr(scanner, "_raise_if_blocked", lambda: None)
     monkeypatch.setattr(scanner, "_export_cookies", lambda: None)
     monkeypatch.setattr(facebook, "_human_pause", lambda *args: None)
-    post = {"video_id": "post-1", "format": "post", "caption": "Nội dung của trang"}
+    post = {"video_id": "post-1", "format": "post", "caption": "Nội dung của trang", "posted_at": 1_900_000_000}
     monkeypatch.setattr(facebook.graphql, "parse_initial_html", lambda html: [
         {"video_id": "video-1", "format": "video"}, post,
         {"video_id": "reel-1", "format": "reel"},
@@ -424,21 +424,22 @@ def test_post_collector_counts_only_posts():
 def test_reel_seen_on_reels_and_videos_tabs_is_one_record_with_merged_counts():
     collector = facebook._Collector({"video", "reel"}, 30, 100)
     from_reels_tab = {"video_id": "post-1540", "format": "reel", "url": "https://www.facebook.com/reel/1832/",
-                      "views": 454000, "comments": 12, "shares": None}
+                      "views": 454000, "comments": 12, "shares": None, "posted_at": 1_900_000_000,
+                      "_approx_counts": {"views"}}
     from_videos_tab = {"video_id": "1832", "format": "reel", "url": "https://www.facebook.com/reel/1832/",
-                       "views": 454108, "comments": None, "shares": 7}
-    other = {"video_id": "9", "format": "video", "url": "https://www.facebook.com/Page/videos/9/"}
+                       "views": 454108, "comments": None, "shares": 7, "posted_at": 1_900_000_000}
+    other = {"video_id": "9", "format": "video", "url": "https://www.facebook.com/Page/videos/9/", "posted_at": 1_900_000_000}
     collector.add([from_reels_tab], "reel")
     collector.add([from_videos_tab, other], "video")
     rows = collector.videos()
     assert [row["video_id"] for row in rows] == ["post-1540", "9"]
-    assert (rows[0]["views"], rows[0]["comments"], rows[0]["shares"]) == (454000, 12, 7)
+    assert (rows[0]["views"], rows[0]["comments"], rows[0]["shares"]) == (454108, 12, 7)
 
 
 def test_posts_without_media_id_in_link_dedupe_by_post_id():
     collector = facebook._Collector({"post"}, 30, 100)
-    collector.add([{"video_id": "a", "format": "post", "url": "https://www.facebook.com/photo/?fbid=1&set=a.2"},
-                   {"video_id": "b", "format": "post", "url": "https://www.facebook.com/P/posts/pfbid0x"}], "post")
+    collector.add([{"video_id": "a", "format": "post", "posted_at": 1_900_000_000, "url": "https://www.facebook.com/photo/?fbid=1&set=a.2"},
+                   {"video_id": "b", "format": "post", "posted_at": 1_900_000_000, "url": "https://www.facebook.com/P/posts/pfbid0x"}], "post")
     assert collector.count() == 2
 
 
@@ -450,7 +451,7 @@ def test_posts_without_media_id_in_link_dedupe_by_post_id():
 ])
 def test_collector_filters_live_kinds(kinds, expected):
     collector = facebook._Collector(kinds, 30, 100)
-    rows = [{"video_id": kind, "format": kind.removesuffix("_live"), "is_live": kind.endswith("_live")}
+    rows = [{"video_id": kind, "format": kind.removesuffix("_live"), "is_live": kind.endswith("_live"), "posted_at": 1_900_000_000}
             for kind in ("video", "reel", "video_live", "reel_live")]
     collector.add(rows, "video")
     assert {row["video_id"] for row in collector.videos()} == expected
@@ -747,3 +748,104 @@ def test_live_kinds_select_each_base_tab_once(monkeypatch, kinds, bases):
     assert scanner.scan_page("https://www.facebook.com/Page", 30, kinds, 100) == []
     assert set(calls) == bases
     assert len(calls) == len(bases)
+
+
+def test_unknown_dates_are_held_for_merge_then_excluded(caplog):
+    collector = facebook._Collector({"reel"}, 30, 1)
+    row = {"video_id": "1", "format": "reel", "posted_at": None}
+    collector.add([row], "reel")
+    assert not collector.full()
+    with caplog.at_level("DEBUG"):
+        assert collector.videos() == []
+    assert "ngày đăng" in caplog.text
+    collector.add([{**row, "posted_at": 1_900_000_000}], "reel")
+    assert collector.full()
+    assert collector.videos()[0]["posted_at"] == 1_900_000_000
+
+
+def _fake_scan(monkeypatch, responses, formats=None):
+    listener = {}
+    page = SimpleNamespace(
+        on=lambda event, handler: listener.update(handler=handler),
+        remove_listener=lambda *args: listener.clear(), content=lambda: "",
+    )
+    scanner = facebook.FacebookScanner(settings={"scan": {"max_scroll_rounds": 3, "stall_rounds": 2}})
+    scanner._page = page
+    monkeypatch.setattr(scanner, "_open", lambda url: None)
+    monkeypatch.setattr(scanner, "_raise_if_blocked", lambda: None)
+    monkeypatch.setattr(scanner, "_export_cookies", lambda: None)
+    monkeypatch.setattr(facebook, "_human_pause", lambda *args: None)
+    monkeypatch.setattr(facebook.graphql, "parse_initial_html", lambda html: [])
+    monkeypatch.setattr(facebook.graphql, "parse_graphql_response", lambda body: json.loads(body).get("rows", []))
+    batches = iter(responses)
+    calls = []
+
+    def scroll():
+        calls.append(1)
+        response = next(batches)
+        if isinstance(response, Exception):
+            raise response
+        status, payload = response
+        listener["handler"](SimpleNamespace(
+            status=status, url="https://www.facebook.com/api/graphql/",
+            text=lambda: json.dumps(payload),
+        ))
+
+    monkeypatch.setattr(scanner, "_scroll_once", scroll)
+    return scanner, calls
+
+
+def test_tab_failure_retains_batch_and_scans_next_tab(monkeypatch):
+    row = {"video_id": "1", "format": "reel", "posted_at": 1_900_000_000}
+    second = {"video_id": "2", "format": "video", "posted_at": 1_900_000_000}
+    scanner, calls = _fake_scan(monkeypatch, [
+        (200, {"rows": [row]}), RuntimeError("page disconnected"),
+        (200, {"rows": [second]}), (200, {}), (200, {}),
+    ])
+    assert scanner.scan_page("https://www.facebook.com/Test", 30, {"reel", "video"}, 100) == [row, second]
+    assert len(calls) == 5
+    assert any("page disconnected" in error for error in scanner.scan_errors)
+
+
+@pytest.mark.parametrize("throttle", [
+    (429, {}), (503, {}), (200, {"errors": [{"code": 1675004}]}),
+    (200, {"errors": [{"message": "You are temporarily blocked"}]}),
+    (200, {"errors": [{"message": "Rate limit exceeded", "extensions": {"code": 4}}]}),
+])
+def test_throttles_back_off_and_raise_with_partial_rows(monkeypatch, throttle):
+    row = {"video_id": "1", "format": "reel", "posted_at": 1_900_000_000}
+    scanner, calls = _fake_scan(monkeypatch, [(200, {"rows": [row]}), throttle, throttle, throttle])
+    pauses, progress = [], []
+    monkeypatch.setattr(facebook, "_pause", lambda seconds, event: pauses.append(seconds))
+    with pytest.raises(facebook.QuotaError) as caught:
+        scanner.scan_page("https://www.facebook.com/Test", 30, {"reel"}, 100, on_progress=progress.append)
+    assert pauses == [60, 120]
+    assert caught.value.partial_rows == [row]
+    assert "Facebook đang giới hạn truy cập" in str(caught.value)
+    assert len(calls) == 4
+    assert any("60" in note for note in progress)
+
+
+def test_throttle_retry_success_and_stop_during_backoff(monkeypatch):
+    import threading
+    row = {"video_id": "1", "format": "reel", "posted_at": 1_900_000_000}
+    scanner, calls = _fake_scan(monkeypatch, [(429, {}), (200, {"rows": [row]})])
+    pauses = []
+    monkeypatch.setattr(facebook, "_pause", lambda seconds, event: pauses.append(seconds))
+    assert scanner.scan_page("https://www.facebook.com/Test", 30, {"reel"}, 1) == [row]
+    assert pauses == [60] and len(calls) == 2
+    stop = threading.Event()
+    scanner, calls = _fake_scan(monkeypatch, [(200, {"rows": [row]}), (429, {})])
+    monkeypatch.setattr(facebook, "_pause", lambda seconds, event: event.set())
+    assert scanner.scan_page("https://www.facebook.com/Test", 30, {"reel"}, 100, stop_event=stop) == [row]
+    assert len(calls) == 2
+
+
+def test_login_failure_carries_collected_rows(monkeypatch):
+    row = {"video_id": "1", "format": "reel", "posted_at": 1_900_000_000}
+    scanner, calls = _fake_scan(monkeypatch, [
+        (200, {"rows": [row]}), facebook.LoginRequired("facebook", facebook.LOGIN_REQUIRED_MSG),
+    ])
+    with pytest.raises(facebook.LoginRequired) as caught:
+        scanner.scan_page("https://www.facebook.com/Test", 30, {"reel"}, 100)
+    assert caught.value.partial_rows == [row]

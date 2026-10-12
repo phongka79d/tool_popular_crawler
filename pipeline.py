@@ -42,6 +42,8 @@ class RunParams:
     formats: set[str]
     min_views: int = 0
     min_interactions: int = 0
+    min_ratio_follow: float = 0
+    match_all: bool = True
 
 
 def is_post_run(params: RunParams) -> bool:
@@ -470,11 +472,17 @@ def run(
                         emit("scan", f"{where}: {page.name or page_url} · {followers}")
                         if page.followers is None:
                             entry["errors"].append("Chưa xác định được follower của kênh")
-                        rows = scanner.scan_page(
-                            page_url, days=params.days, formats=params.formats,
-                            max_videos=settings["scan"]["max_videos_per_page"], stop_event=scan_stop,
-                            on_progress=lambda text: emit("scan", f"{where} · {text}"),
-                        )
+                        scan_failure = None
+                        try:
+                            rows = scanner.scan_page(
+                                page_url, days=params.days, formats=params.formats,
+                                max_videos=settings["scan"]["max_videos_per_page"], stop_event=scan_stop,
+                                on_progress=lambda text: emit("scan", f"{where} · {text}"),
+                            )
+                        except ServiceError as exc:
+                            rows = getattr(exc, "partial_rows", [])
+                            scan_failure = exc
+                        entry["errors"].extend(getattr(scanner, "scan_errors", []))
                         for row in rows:
                             # Preserve collected rows when stopped during scrolling.
                             values = dict(row)
@@ -490,6 +498,8 @@ def run(
                             page_items.append(video)
                             entry["scanned"] += 1
                         emit("scan", f"{where}: thu được {entry['scanned']} {item_label} trong {params.days} ngày.")
+                        if scan_failure is not None:
+                            raise scan_failure
                         if not entry["scanned"] and not page.name and page.followers is None:
                             add_error("Không đọc được page: kiểm tra link đúng và page công khai")
                         checkpoint()
@@ -512,7 +522,8 @@ def run(
                         checkpoint()
                     emit("filter", f"Tính chỉ số và lọc {len(page_items)} {item_label} theo ngưỡng…")
                     filters.compute_metrics(page_items)
-                    page_passed = filters.apply_filter(page_items, params.min_views, params.min_interactions)
+                    page_passed = filters.apply_filter(page_items, params.min_views, params.min_interactions,
+                                                       params.min_ratio_follow, params.match_all)
                     passed.extend(page_passed)
                     filtered_pages.add(page_url)
                     entry["passed"] = len(page_passed)
@@ -550,7 +561,8 @@ def run(
         if partial:
             remaining = [video for video in collected if video.page_url not in filtered_pages]
             filters.compute_metrics(remaining)
-            extra = filters.apply_filter(remaining, params.min_views, params.min_interactions)
+            extra = filters.apply_filter(remaining, params.min_views, params.min_interactions,
+                                         params.min_ratio_follow, params.match_all)
             passed_ids = {video.video_id for video in passed + extra}
             passed = [video for video in collected if video.video_id in passed_ids]
             for entry in run_log["pages"]:
@@ -602,6 +614,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="video,reel,video_live,reel_live hoặc riêng post")
     parser.add_argument("--min-views", type=int, default=None)
     parser.add_argument("--min-interactions", type=int, default=None)
+    parser.add_argument("--min-ratio", type=float, default=None,
+                        help="Lượt xem tối thiểu so với follower (×); 0 tắt")
+    parser.add_argument("--any", action="store_true",
+                        help="Giữ video đạt một trong các điều kiện (mặc định: đạt tất cả)")
     args = parser.parse_args(argv)
     formats = {item.strip() for item in args.formats.split(",") if item.strip()}
     if args.days <= 0 or not formats or (formats != {"post"} and not formats <= VIDEO_KINDS):
@@ -609,9 +625,11 @@ def main(argv: list[str] | None = None) -> int:
     settings = config.load_settings()
     min_views = args.min_views if args.min_views is not None else settings["scan"].get("min_views", 10000)
     min_interactions = args.min_interactions if args.min_interactions is not None else settings["scan"].get("min_interactions", 200)
-    if min_views < 0 or min_interactions < 0:
+    min_ratio = args.min_ratio if args.min_ratio is not None else settings["scan"].get("min_ratio_follow", 0)
+    if min_views < 0 or min_interactions < 0 or min_ratio < 0:
         parser.error("Ngưỡng tối thiểu không được âm.")
-    params = RunParams(args.days, formats, min_views, min_interactions)
+    match_all = False if args.any else settings["scan"].get("match_all", True)
+    params = RunParams(args.days, formats, min_views, min_interactions, min_ratio, match_all)
     stop = threading.Event()
     import signal
     previous = signal.signal(signal.SIGINT, lambda *_: stop.set())

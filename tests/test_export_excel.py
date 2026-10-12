@@ -35,6 +35,9 @@ SUMMARY = {
     "by_hook": [
         {"label": "Câu hỏi", "count": 2, "avg_views": 70_000, "avg_score": 62.5},
     ],
+    "by_structure": [
+        {"label": "Liệt kê mẹo", "count": 2, "avg_views": 95_000, "avg_score": 80.0},
+    ],
     "commentary": "Công thức câu hỏi đang thắng.",
 }
 
@@ -196,6 +199,19 @@ def test_post_export_labels_and_detail_title(tmp_path):
         workbook.close()
 
 
+def test_run_log_shows_ratio_and_combination(tmp_path):
+    video = Video("v1", "https://facebook.test/v1", "page", views=50_000, page_followers=1_000)
+    params = {"formats": ["video"], "min_views": 50_000, "min_ratio_follow": 5, "match_all": False}
+    path = xl.export([video], {}, {"params": params}, out_dir=tmp_path, now=NOW)
+    workbook = load_workbook(path)
+    try:
+        cells = [cell for sheet in workbook for row in sheet.iter_rows(values_only=True) for cell in row if cell is not None]
+    finally:
+        workbook.close()
+    assert "Lượt xem tối thiểu so với follower (×)" in cells and 5 in cells
+    assert "Đạt một trong hai" in cells
+
+
 def test_sheet_names_in_order(wb) -> None:
     assert wb.sheetnames == ["Chi tiết video", "Tổng hợp công thức", "Nhật ký"]
 
@@ -329,7 +345,7 @@ def test_empty_export_still_writes_three_sheets(tmp_path: Path) -> None:
 
 def test_summary_sheet_tables_and_commentary(wb) -> None:
     ws = wb["Tổng hợp công thức"]
-    topic_title = _find_row(ws, "Bảng 1 – Theo nhóm chủ đề")
+    topic_title = _find_row(ws, "Bảng 1 – Theo nhóm chủ đề (điểm giảm dần)")
     assert [ws.cell(topic_title + 1, c).value for c in range(1, 5)] == [
         "Nhóm chủ đề", "Số video", "View trung bình", "Điểm công thức trung bình",
     ]
@@ -342,8 +358,15 @@ def test_summary_sheet_tables_and_commentary(wb) -> None:
         "Pháp lý GPP", 1, None, 90.0,
     ]
 
-    hook_title = _find_row(ws, "Bảng 2 – Theo kiểu hook")
+    hook_title = _find_row(ws, "Bảng 2 – Theo kiểu hook (điểm giảm dần)")
     assert ws.cell(hook_title + 2, 1).value == "Câu hỏi"
+    structure_title = _find_row(ws, "Bảng 3 – Theo cấu trúc (điểm giảm dần)")
+    assert [ws.cell(structure_title + 2, c).value for c in range(1, 5)] == [
+        "Liệt kê mẹo", 2, 95_000, 80.0,
+    ]
+    assert ws.cell(structure_title + 2, 4).number_format == "#,##0.0"
+    assert ws.cell(structure_title + 2, 1).fill.fgColor == ws.cell(hook_title + 2, 1).fill.fgColor
+    assert ws.cell(structure_title + 2, 1).fill.patternType == "solid"
 
     note = _find_row(ws, "Nhận xét")
     assert ws.cell(note + 1, 1).value == "Công thức câu hỏi đang thắng."
@@ -377,9 +400,9 @@ def test_run_log_sheet_contents(wb) -> None:
 def test_build_summary_tables_groups_and_averages() -> None:
     videos = [
         Video(video_id="1", url="", page_url="", views=100, score=60.0,
-              jev={"topic": "Kiến thức bệnh (chưa chắc)", "hook_type": "Câu hỏi"}),
+              jev={"topic": "Kiến thức bệnh (chưa chắc)", "hook_type": "Câu hỏi", "structure": "Liệt kê (chưa chắc)"}),
         Video(video_id="2", url="", page_url="", views=None, score=80.0,
-              jev={"topic": "Kiến thức bệnh", "hook_type": "Câu hỏi"}),
+              jev={"topic": "Kiến thức bệnh", "hook_type": "Câu hỏi", "structure": "Liệt kê"}),
         Video(video_id="3", url="", page_url="", views=50, score=None, jev={}),
     ]
     tables = xl.build_summary_tables(videos)
@@ -392,13 +415,29 @@ def test_build_summary_tables_groups_and_averages() -> None:
             {"label": "Câu hỏi", "count": 2, "avg_views": 100.0, "avg_score": 70.0},
             {"label": "Chưa gắn nhãn", "count": 1, "avg_views": 50.0, "avg_score": None},
         ],
+        "by_structure": [
+            {"label": "Liệt kê", "count": 2, "avg_views": 100.0, "avg_score": 70.0},
+            {"label": "Chưa gắn nhãn", "count": 1, "avg_views": 50.0, "avg_score": None},
+        ],
         "commentary": "",
     }
 
 
 def test_build_summary_tables_empty() -> None:
-    assert xl.build_summary_tables([]) == {"by_topic": [], "by_hook": [], "commentary": ""}
+    assert xl.build_summary_tables([]) == {"by_topic": [], "by_hook": [], "by_structure": [], "commentary": ""}
 
+
+@pytest.mark.parametrize("field,table", [("topic", "by_topic"), ("hook_type", "by_hook"), ("structure", "by_structure")])
+def test_summary_ranks_score_then_count_with_missing_last(field, table):
+    videos = [
+        Video(str(i), "", "", score=score, jev={field: label})
+        for i, (label, score) in enumerate([
+            ("Popular", 20), ("Popular", 20), ("Popular", 20),
+            ("Best", 90), ("Best", 90), ("Tie", 90), ("Missing", None), ("Zero", 0),
+        ])
+    ]
+    rows = xl.build_summary_tables(videos)[table]
+    assert [row["label"] for row in rows] == ["Best", "Tie", "Popular", "Zero", "Missing"]
 
 def test_live_labels_in_details_and_log_params(tmp_path):
     videos = [Video(kind, kind, "page", format=kind.removesuffix("_live"), is_live=kind.endswith("_live"))

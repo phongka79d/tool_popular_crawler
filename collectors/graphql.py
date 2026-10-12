@@ -5,7 +5,7 @@ Pure functions, no browser. Every JSON path is data in ``config/graphql_paths.js
 
 Behaviour fixed in code, not config:
 - A Story node (``__typename`` == story typename with a post_id) is collected once per
-  post_id; duplicates fill missing fields without overwriting non-empty values.
+  post_id; duplicates fill missing fields. Flattened counters prefer exact over rounded values.
   A collected story is not searched further: its nested stories belong to another page.
 - Deferred fragments (``@defer`` payloads such as the Reels tab counters) carry no typename,
   only the Story's GraphQL node ``id``; a dict with that id fills the Story the same way.
@@ -13,6 +13,8 @@ Behaviour fixed in code, not config:
 - A count that is absent stays None (unknown), never 0, so the caller can fill it from yt-dlp.
 - The Videos tab sends channel tiles (renderer typenames in ``channel_video``) whose video node
   is not a Story; each tile becomes one record, merged by video_id with any Story record.
+- ``_approx_counts`` tracks display/reduced counters privately until the Facebook collector
+  strips it from returned rows; captions and other non-counter fields remain first-wins.
 """
 
 from __future__ import annotations
@@ -244,7 +246,7 @@ def flatten(story: dict, paths: GraphqlPaths | None = None) -> dict | None:
         record["image_urls"] = urls
         return record
     return _record(video_id, url, _first(story, p.creation_time, _as_int), caption,
-                   _first(feedback, p.views, _as_count), feedback,
+                   _count(feedback, p.views), feedback,
                    _duration(story, p.duration_ms, p.duration_s), p,
                    _is_live(story, p.broadcast_status, p.is_live_streaming))
 
@@ -260,9 +262,9 @@ def flatten_channel_video(video: dict, paths: GraphqlPaths | None = None) -> dic
         return None
     feedback = _merged(video, c.feedback)
     url = _first(video, c.permalink_url, _as_text) or p.fallback_url.format(video_id=video_id)
-    views = _first(video, c.views, _as_count)
-    if views is None:
-        views = _first(feedback, p.views, _as_count)
+    views = _count(video, c.views)
+    if views[0] is None:
+        views = _count(feedback, p.views)
     return _record(video_id, url, _first(video, c.creation_time, _as_int), _first(video, c.message, _as_text),
                    views, feedback, _duration(video, c.duration_ms, c.duration_s), p,
                    _is_live(video, c.broadcast_status, c.is_live_streaming))
@@ -287,21 +289,65 @@ def _is_live(node: dict, status_paths: Alternatives, streaming_paths: Alternativ
     )
 
 
-def _record(video_id: str, url: str, posted_at: int | None, caption: str | None, views: int | None,
-            feedback: dict, duration_s: float | None, p: GraphqlPaths, is_live: bool = False) -> dict:
-    return {
+def _record(video_id: str, url: str, posted_at: int | None, caption: str | None,
+            views: tuple[int | None, bool] | None, feedback: dict, duration_s: float | None,
+            p: GraphqlPaths, is_live: bool = False) -> dict:
+    counts = {"views": views or (None, False), "reactions": _reaction_count(feedback, p.reactions),
+              "comments": _count(feedback, p.comments), "shares": _count(feedback, p.shares)}
+    record = {
         "video_id": video_id,
         "url": url,
         "posted_at": posted_at,
         "caption": caption or "",
-        "views": views,
-        "reactions": _reactions(feedback, p.reactions),
-        "comments": _first(feedback, p.comments, _as_count),
-        "shares": _first(feedback, p.shares, _as_count),
+        **{field: value for field, (value, approximate) in counts.items()},
         "duration_s": duration_s,
         "format": "reel" if p.reel_url_marker in url else "video",
         "is_live": is_live,
     }
+    approximate = {field for field, (value, approximate) in counts.items() if approximate}
+    if approximate:
+        record["_approx_counts"] = approximate
+    return record
+
+
+def merge_record(existing: dict, later: dict) -> None:
+    """Fill blanks, but replace rounded counters with exact values."""
+    approximate = set(existing.get("_approx_counts", ()))
+    incoming = set(later.get("_approx_counts", ()))
+    for field, value in later.items():
+        if field == "_approx_counts":
+            continue
+        if field == "is_live":
+            existing[field] = existing.get(field, False) or value
+        elif value not in (None, "") and (
+            existing.get(field) in (None, "")
+            or field in approximate and field not in incoming
+        ):
+            existing[field] = value
+            approximate.discard(field)
+            if field in incoming:
+                approximate.add(field)
+    if approximate:
+        existing["_approx_counts"] = approximate
+    else:
+        existing.pop("_approx_counts", None)
+
+
+def _count(node: dict, alternatives: Alternatives) -> tuple[int | None, bool]:
+    """Prefer exact alternatives; reduced/i18n fields are approximate even if numeric."""
+    fallback = (None, False)
+    for path in alternatives:
+        for raw in _all_values(node, [path]):
+            value = _as_count(raw)
+            if value is None:
+                continue
+            approximate = any("reduced" in str(key) or "i18n" in str(key) for key in path)
+            approximate |= isinstance(raw, str) and bool(re.search(r"[A-Za-zÀ-ỹ]", raw))
+            if not approximate:
+                return value, False
+            if fallback[0] is None:
+                fallback = value, True
+    return fallback
 
 
 def parse_graphql_response(text: str, paths: GraphqlPaths | None = None) -> list[dict]:
@@ -358,12 +404,7 @@ def _videos_from(values: list, p: GraphqlPaths) -> list[dict]:
                 by_id[record["video_id"]] = record
                 videos.append(record)
                 continue
-            for key, value in record.items():
-                if key == "is_live":
-                    existing[key] = existing.get(key, False) or value
-                    continue
-                if existing.get(key) in (None, "") and value not in (None, ""):
-                    existing[key] = value
+            merge_record(existing, record)
     log.debug("GraphQL: %d story, %d tile, %d video", len(stories), tiles, len(videos))
     return videos
 
@@ -435,26 +476,31 @@ def _is_video(story: dict, feedback: dict, p: GraphqlPaths) -> bool:
     return any(_values(feedback, path) for path in p.video_markers)
 
 
-def _reactions(feedback: dict, r: ReactionPaths) -> int | None:
-    total = _first(feedback, r.total, _as_count)
-    if total is not None:
+def _reaction_count(feedback: dict, r: ReactionPaths) -> tuple[int | None, bool]:
+    total = _count(feedback, r.total)
+    if total[0] is not None and not total[1]:
         return total
     edges = _first(feedback, r.edges, _as_list)
     if edges:
-        by_kind: dict[str, int] = {}
+        by_kind: dict[str, tuple[int, bool]] = {}
         for edge in edges:
             if not isinstance(edge, dict):
                 continue
             kind = _reaction_kind(edge, r)
-            count = _first(edge, r.edge_count, _as_count)
+            count, approximate = _count(edge, r.edge_count)
             if kind is not None and count is not None:
-                by_kind[kind] = count
+                by_kind[kind] = count, approximate
         if by_kind:
-            return sum(by_kind.values())
+            combined = sum(value for value, approximate in by_kind.values()), any(
+                approximate for value, approximate in by_kind.values())
+            if not combined[1] or total[0] is None:
+                return combined
+    if total[0] is not None:
+        return total
     approx = _first(feedback, r.approx, _as_count)
     if approx is not None:
-        return approx
-    return 0 if edges == [] else None
+        return approx, True
+    return (0 if edges == [] else None), False
 
 
 def _reaction_kind(edge: dict, r: ReactionPaths) -> str | None:

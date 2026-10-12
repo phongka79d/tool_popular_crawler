@@ -68,6 +68,7 @@ HTML_VIDEO = {
     "duration_s": 73.0,
     "format": "video",
     "is_live": False,
+    "_approx_counts": {"shares"},
 }
 
 
@@ -346,6 +347,7 @@ def test_reels_tab_story_takes_counters_from_deferred_fragments_by_node_id():
         "duration_s": 31.5,
         "format": "reel",
         "is_live": False,
+        "_approx_counts": {"views", "shares"},
     }]
 
 
@@ -474,3 +476,47 @@ def test_tile_live_evidence_enriches_existing_story():
     records = gql.parse_graphql_response(json.dumps([story, tile]))
     assert len(records) == 1
     assert records[0]["is_live"] is True
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_exact_counters_replace_reduced_counters_across_batches(reverse):
+    from collectors.facebook import _Collector
+    story = _video_story(url="https://www.facebook.com/reel/123", feedback={
+        "play_count_reduced": "454K", "i18n_reaction_count": "1K",
+        "total_comment_count": "2K", "share_count_reduced": 3000,
+    })
+    tile = _channel_tile("123", "https://www.facebook.com/reel/123")
+    video = tile["node"]["channel_tab_thumbnail_renderer"]["video"]
+    video["play_count"] = 454108
+    video["feedback"] = {"reaction_count": {"count": 1008},
+                         "total_comment_count": 2011, "share_count": {"count": 3007}}
+    batches = [gql.parse_graphql_response(json.dumps(story)), gql.parse_graphql_response(json.dumps(tile))]
+    collector = _Collector({"reel"}, 10000, 100)
+    for batch in reversed(batches) if reverse else batches:
+        collector.add(batch, "reel")
+    row, = collector.videos()
+    assert tuple(row[field] for field in ("views", "reactions", "comments", "shares")) == (454108, 1008, 2011, 3007)
+    assert "_approx_counts" not in row
+
+
+def test_counter_alternatives_choose_exact_over_earlier_display_value():
+    record = gql.flatten(_video_story(feedback={"video_view_count": "454K", "play_count": 454108}))
+    assert record["views"] == 454108
+    assert "views" not in record.get("_approx_counts", ())
+
+
+def test_story_tile_merge_prefers_exact_counters():
+    story = _video_story(post_id="123", feedback={"play_count_reduced": "454K"})
+    tile = _channel_tile("123", "https://www.facebook.com/reel/123")
+    records = gql.parse_graphql_response(json.dumps([story, tile]))
+    assert len(records) == 1
+    assert records[0]["views"] == 1512408
+    assert "views" not in records[0].get("_approx_counts", ())
+
+
+def test_display_reaction_edges_are_marked_approximate():
+    record = gql.flatten(_video_story(feedback={
+        "top_reactions": {"edges": [{"reaction_count": "1K", "node": {"id": "1635855486666999"}}]},
+    }))
+    assert record["reactions"] == 1000
+    assert "reactions" in record["_approx_counts"]

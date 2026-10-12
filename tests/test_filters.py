@@ -131,6 +131,34 @@ def test_apply_filter_preserves_order():
     assert [v.video_id for v in apply_filter(videos, min_views=50_000)] == ["a", "c"]
 
 
+@pytest.mark.parametrize("views,followers,match_all,expected", [
+    (60_000, 10_000, True, True),     # cả hai đạt
+    (60_000, 20_000, True, False),    # ratio 3 < 5
+    (60_000, 20_000, False, True),    # OR: views đạt
+    (10_000, 1_000, True, False),     # views thấp
+    (10_000, 1_000, False, True),     # OR: ratio 10 đạt
+    (10_000, 3_000, False, False),    # cả hai trượt
+    (60_000, None, True, False),      # follower chưa biết: ratio trượt
+    (60_000, None, False, True),      # OR: views vẫn đạt
+    (None, 1_000, False, False),      # views chưa biết trượt cả hai
+])
+def test_views_and_ratio_conditions(views, followers, match_all, expected):
+    video = make_video(views=views, page_followers=followers)
+    assert passes(video, min_views=50_000, min_ratio_follow=5, match_all=match_all) is expected
+
+
+def test_ratio_threshold_inclusive_and_alone():
+    assert passes(make_video(views=5_000, page_followers=1_000), min_ratio_follow=5)
+    assert not passes(make_video(views=4_999, page_followers=1_000), min_ratio_follow=5)
+    assert passes(make_video(views=1, page_followers=None), match_all=False)  # không điều kiện nào bật
+
+
+def test_post_ignores_ratio():
+    post = make_video(format="post", views=None, page_followers=None, interactions=250)
+    assert passes(post, min_interactions=200, min_ratio_follow=10)
+    assert not passes(make_video(format="post", interactions=10), min_interactions=200, min_ratio_follow=10, match_all=False)
+
+
 @pytest.mark.parametrize("parts,total", [((10, 20, 30), 60), ((10, None, 5), 15), ((None, None, None), None), ((0, None, None), 0)])
 def test_interactions_sum_known_components(parts, total):
     video = make_video(format="post", reactions=parts[0], comments=parts[1], shares=parts[2])

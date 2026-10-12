@@ -16,6 +16,7 @@ from pathlib import Path
 
 import config
 import keys
+from collectors.cookies import read_netscape
 
 LOG_FILE = config.DATA_DIR / "app.log"
 PREVIOUS_LOG_FILE = config.DATA_DIR / "app.prev.log"
@@ -30,7 +31,7 @@ _configured = False
 
 _SECRET_NAMES = ("jev", "deepgram", "llm")
 _SECRET_REFRESH_S = 10.0
-_MIN_SECRET_LEN = 8
+_MIN_SECRET_LEN = 4
 _secret_cache: tuple[float, tuple[str, ...]] = (float("-inf"), ())
 _extra_secrets: set[str] = set()
 _refreshing = threading.local()
@@ -54,6 +55,11 @@ def _secrets() -> tuple[str, ...]:
                     values.append(keys.get_key(name))
                 except Exception:  # noqa: BLE001 - kho bảo mật lỗi không được làm hỏng việc ghi log
                     pass
+            try:
+                values.extend(cookie["value"] for cookie in read_netscape(config.COOKIE_FILE)
+                              if cookie["name"] in ("c_user", "xs"))
+            except (OSError, ValueError):
+                pass  # chưa đăng nhập hoặc tệp cookie chưa đọc được
             stored = tuple(v for v in values if v and len(v) >= _MIN_SECRET_LEN)
             _secret_cache = (now, stored)
         finally:
@@ -63,7 +69,7 @@ def _secrets() -> tuple[str, ...]:
 
 def redact(text: str) -> str:
     """Thay mọi API key đã biết bằng dạng che (••••abcd) trước khi ghi ra file hoặc hiện lên."""
-    for secret in _secrets():
+    for secret in sorted(set(_secrets()), key=len, reverse=True):
         if secret in text:
             text = text.replace(secret, keys.mask(secret))
     return text

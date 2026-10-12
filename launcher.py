@@ -1,12 +1,13 @@
 """Điểm vào Windows: chạy Streamlit cục bộ và mở giao diện trong cửa sổ ứng dụng riêng.
 
 Ưu tiên Microsoft Edge chế độ app (có sẵn trên Windows 10/11, không thêm thư viện): cửa sổ riêng,
-không thanh địa chỉ. Không có Edge thì mở trình duyệt mặc định. Đóng cửa sổ (hoặc tab) thì ứng dụng
+không thanh địa chỉ. Không có Edge thì chuẩn bị và mở Chromium. Đóng cửa sổ (hoặc tab) thì ứng dụng
 tự tắt sau ít giây, không để tiến trình chạy ngầm.
 """
 from __future__ import annotations
 
-import signal
+import logging
+import os
 import socket
 import subprocess
 import sys
@@ -14,12 +15,45 @@ import threading
 import time
 import webbrowser
 from pathlib import Path
+from dataclasses import dataclass, replace
 
 import applog
 
 # Không còn cửa sổ nào kết nối trong khoảng này thì tắt. Đủ dài để tải lại trang (F5) không làm tắt app.
 IDLE_EXIT_SECONDS = 15
 POLL_SECONDS = 1.0
+STARTUP_EXIT_SECONDS = 120
+PROCESS_HANDOFF_SECONDS = 5
+
+
+@dataclass(frozen=True)
+class WatchdogState:
+    opened_at: float
+    seen_session: bool = False
+    idle_since: float | None = None
+    owned_process: bool = False
+
+
+def watchdog_decision(state: WatchdogState, now: float, sessions: int | None,
+                      process_alive: bool | None) -> tuple[WatchdogState, bool]:
+    """Pure timeline step; a short-lived browser starter may have handed off."""
+    owned = state.owned_process or (
+        process_alive is True and now - state.opened_at >= PROCESS_HANDOFF_SECONDS)
+    seen = state.seen_session or (sessions is not None and sessions > 0)
+    closed = (owned and process_alive is False) or (seen and sessions == 0)
+    idle = (state.idle_since if state.idle_since is not None else now) if closed else None
+    updated = replace(state, seen_session=seen, owned_process=owned, idle_since=idle)
+    return updated, (
+        (idle is not None and now - idle >= IDLE_EXIT_SECONDS)
+        or (not seen and now - state.opened_at >= STARTUP_EXIT_SECONDS)
+    )
+
+
+@dataclass
+class BrowserWindow:
+    ready: threading.Event
+    process: subprocess.Popen | None = None
+    opened_at: float | None = None
 
 
 def find_free_port(start: int = 8501) -> int:
@@ -64,42 +98,82 @@ def _active_sessions() -> int | None:
     return count() if callable(count) else None
 
 
-def _exit_when_window_closed(stopped: threading.Event) -> None:
-    """Sau khi giao diện đã mở, tắt server khi không còn cửa sổ nào kết nối trong IDLE_EXIT_SECONDS."""
-    seen = False
-    idle_since: float | None = None
+def _shutdown(stopped: threading.Event) -> None:
+    """Stop the runtime, then bound shutdown even without a Windows console."""
+    from streamlit.runtime import Runtime
+
+    applog.log.info("Đã đóng cửa sổ ứng dụng, đang tắt Video Công Thức...")
+    try:
+        if Runtime.exists():
+            Runtime.instance().stop()
+    except Exception:
+        applog.log.exception("Không dừng được Streamlit")
+    # Runtime.stop alone does not stop uvicorn. A worker-thread SIGINT on Windows
+    # can remain pending while the main thread waits inside the asyncio loop.
+    if not stopped.wait(1):
+        logging.shutdown()
+        for stream in (sys.stdout, sys.stderr):
+            if stream is not None:
+                try:
+                    stream.flush()
+                except (OSError, ValueError):
+                    pass
+        os._exit(0)
+
+
+def _exit_when_window_closed(stopped: threading.Event, window: BrowserWindow) -> None:
+    state = None
+    failed_count = False
     while not stopped.wait(POLL_SECONDS):
-        sessions = _active_sessions()
-        if sessions is None:
-            if seen:
-                return  # API nội bộ không còn: giữ hành vi cũ, không tự tắt
-            continue
-        if sessions > 0:
-            seen, idle_since = True, None
-        elif seen:
-            idle_since = idle_since or time.monotonic()
-            if time.monotonic() - idle_since >= IDLE_EXIT_SECONDS:
-                print("Đã đóng cửa sổ ứng dụng, đang tắt Video Công Thức...", flush=True)
-                # Như bấm Ctrl+C: đi qua bộ xử lý tín hiệu của Streamlit để dừng cả web server.
-                # Runtime.stop() một mình không dừng được uvicorn.
-                signal.raise_signal(signal.SIGINT)
-                return
+        if not window.ready.is_set():
+            continue  # Chromium may still be downloading on first launch.
+        if state is None:
+            state = WatchdogState(window.opened_at)
+        try:
+            sessions = _active_sessions()
+        except Exception:
+            if not failed_count:
+                applog.log.exception("Không đọc được số phiên Streamlit")
+                failed_count = True
+            sessions = None
+        alive = window.process.poll() is None if window.process is not None else None
+        state, should_exit = watchdog_decision(state, time.monotonic(), sessions, alive)
+        if should_exit:
+            _shutdown(stopped)
+            return
 
 
-def _open_window(port: int, stopped: threading.Event) -> None:
-    if not _wait_for_port(port, stopped):
-        return
-    url = f"http://127.0.0.1:{port}"
-    import config  # main() đã thêm thư mục app vào sys.path
+def open_browser(url: str) -> subprocess.Popen | None:
+    """Prefer Edge, then installed Chromium; default browser is the last resort."""
+    import config
+    from browser_setup import ensure_chromium
 
     edge = config.edge_path()
+    if edge:
+        try:
+            return subprocess.Popen([edge, f"--app={url}", "--window-size=1280,900"])
+        except OSError:
+            applog.log.exception("Không mở được Edge; thử Chromium")
     try:
-        if edge is None:
-            raise OSError("không có Edge")
-        # Profile Edge mặc định của người dùng: không hiện màn hình chào/đồng bộ như profile mới.
-        subprocess.Popen([edge, f"--app={url}", "--window-size=1280,900"])
-    except OSError:
-        webbrowser.open(url)
+        chromium = ensure_chromium()
+        return subprocess.Popen([str(chromium), f"--app={url}", "--window-size=1280,900"])
+    except Exception:
+        applog.log.exception("Không mở được Chromium; mở trình duyệt mặc định")
+        if not webbrowser.open(url):
+            applog.log.error("Không mở được trình duyệt mặc định")
+        return None
+
+
+def _open_window(port: int, stopped: threading.Event, window: BrowserWindow) -> None:
+    if not _wait_for_port(port, stopped):
+        applog.log.error("Máy chủ không khởi động trong 60 giây")
+        _shutdown(stopped)
+        return
+    try:
+        window.process = open_browser(f"http://127.0.0.1:{port}")
+    finally:
+        window.opened_at = time.monotonic()
+        window.ready.set()
 
 
 def _show_fatal_error(exc: BaseException) -> None:
@@ -138,10 +212,14 @@ def _serve() -> None:
              "server.address": "127.0.0.1", "global.developmentMode": False,
              "browser.gatherUsageStats": False, "server.fileWatcherType": "none",
              "client.toolbarMode": "minimal", "logger.messageFormat": applog.LOG_FORMAT}
+    # A force-killed browser cannot send a websocket close frame. Detect a
+    # broken local connection promptly instead of waiting default ping timeouts.
+    flags["server.websocketPingInterval"] = 1
     bootstrap.load_config_options(flags)
     stopped = threading.Event()
-    helpers = [threading.Thread(target=_open_window, args=(port, stopped), daemon=True, name="open-app-window"),
-               threading.Thread(target=_exit_when_window_closed, args=(stopped,), daemon=True,
+    window = BrowserWindow(threading.Event())
+    helpers = [threading.Thread(target=_open_window, args=(port, stopped, window), daemon=True, name="open-app-window"),
+               threading.Thread(target=_exit_when_window_closed, args=(stopped, window), daemon=True,
                                 name="exit-when-closed")]
     for thread in helpers:
         thread.start()

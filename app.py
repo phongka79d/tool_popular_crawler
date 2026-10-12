@@ -41,7 +41,8 @@ DEFAULT_SETTINGS = {
     "stt": {"provider": "deepgram", "model": "", "language": "vi",
             "keyterms_file": "config/keyterms.txt", "fallback": "local_whisper",
             "whisper_model": "small"},
-    "scan": {"video_kinds": ["video", "reel"], "min_views": 10000, "min_interactions": 200, "delay_min_s": 3, "delay_max_s": 8,
+    "scan": {"video_kinds": ["video", "reel"], "min_views": 10000, "min_ratio_follow": 0, "match_all": True,
+             "min_interactions": 200, "delay_min_s": 3, "delay_max_s": 8,
              "page_delay_min_s": 30, "page_delay_max_s": 60,
              "max_videos_per_page": 200, "max_scroll_rounds": 60, "stall_rounds": 4},
     "score_weights": {"ratio_median": 40, "ratio_median_cap": 5, "replicable": 25,
@@ -102,40 +103,10 @@ def _show_error(message: str, exc: BaseException | None = None) -> None:
 
 
 def _install_chromium() -> None:
-    from playwright._impl._driver import compute_driver_executable, get_driver_env
-    from playwright.sync_api import sync_playwright
+    import browser_setup
 
-    if config.edge_path():
-        return  # quét bằng Edge có sẵn của Windows (collectors.facebook): không cần tải trình duyệt
-    with sync_playwright() as playwright:
-        executable = Path(playwright.chromium.executable_path)
-    if _browsers_installed(executable):
-        return  # đã tải ở lần mở trước: không tải lại
-    driver = compute_driver_executable()
-    command = list(driver) if isinstance(driver, tuple) else [str(driver)]
-    env = get_driver_env()
-    if getattr(sys, "frozen", False):
-        # Giống playwright/_impl/_transport.py: bản đóng gói tìm Chromium trong chính thư mục ứng dụng.
-        env.setdefault("PLAYWRIGHT_BROWSERS_PATH", "0")
-    print("Đang tải Chromium lần đầu (~150 MB), vui lòng chờ...", flush=True)
-    # Không mở cửa sổ console; tiến độ và lỗi tải ghi vào nhật ký (data/app.log khi chạy bản đóng gói).
-    # --no-shell: tool luôn chạy trình duyệt có cửa sổ, không dùng Headless Shell.
-    sys.stdout.flush()
-    result = subprocess.run([*command, "install", "chromium", "--no-shell"], env=env,
-                            stdout=sys.stdout, stderr=subprocess.STDOUT,
-                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    if result.returncode or not _browsers_installed(executable):
-        logger.error("Tải Chromium thất bại (mã %s); thiếu %s", result.returncode, executable)
-        raise RuntimeError("Không thể tải Chromium. Kiểm tra mạng và dung lượng ổ đĩa rồi thử lại.")
-
-
-def _browsers_installed(chromium_exe: Path) -> bool:
-    """Chromium đã tải xong.
-
-    Playwright chỉ ghi INSTALLATION_COMPLETE khi giải nén xong, nên lần tải bị ngắt giữa chừng sẽ được tải tiếp.
-    """
-    chromium_dir = chromium_exe.parents[1]  # .../chromium-<rev>/chrome-win64/chrome.exe
-    return chromium_exe.is_file() and (chromium_dir / "INSTALLATION_COMPLETE").is_file()
+    if not config.edge_path():
+        browser_setup.ensure_chromium()
 
 
 @st.cache_resource(show_spinner=False)
@@ -436,10 +407,10 @@ def _save_service(name: str, candidate: str, settings: dict, selection: dict) ->
     try:
         with st.spinner("Đang kiểm tra model đã chọn..."):
             _check_selection(name, candidate, settings, selection)
-            keys.set_key(name, candidate)
             updated = copy.deepcopy(settings)
             _apply_selection(updated, name, selection)
             config.save_settings(updated)
+            keys.set_key(name, candidate)
     except Exception as exc:
         st.error(_error_message(exc, (candidate,)))
         return
@@ -833,7 +804,44 @@ def _scan_options(settings: dict, locked: bool) -> pipeline.RunParams:
             "Lượt xem tối thiểu", min_value=0, value=int(settings["scan"].get("min_views", 10000)),
             step=1000, key="scan_min_views", disabled=locked,
             help="Giữ video có lượt xem đạt hoặc vượt ngưỡng. Không biết lượt xem thì không đạt; đặt 0 để không lọc."))
-    return pipeline.RunParams(days, formats, min_views=minimum)
+        _preset_buttons("scan_min_views", (50_000, 100_000), lambda n: f"{n:,}".replace(",", "."), locked)
+        ratio = float(st.number_input(
+            "Lượt xem tối thiểu so với follower (×)", min_value=0.0,
+            value=float(settings["scan"].get("min_ratio_follow", 0)), step=1.0, format="%g",
+            key="scan_min_ratio_follow", disabled=locked,
+            help="Ví dụ 5 = lượt xem phải gấp ít nhất 5 lần số follower của page (hay dùng 5× và 10×). "
+                 "Không biết follower thì không đạt; đặt 0 để tắt."))
+        _preset_buttons("scan_min_ratio_follow", (5.0, 10.0), lambda n: f"{n:g}×", locked)
+        match_all = bool(settings["scan"].get("match_all", True))
+        if minimum > 0 and ratio > 0:
+            both = "Đạt cả hai điều kiện"
+            choice = st.radio("Cách kết hợp", [both, "Đạt một trong hai"], index=0 if match_all else 1,
+                              horizontal=True, key="scan_match_all", disabled=locked)
+            match_all = choice == both
+        params = pipeline.RunParams(days, formats, min_views=minimum, min_ratio_follow=ratio, match_all=match_all)
+        st.markdown(f"*{_filter_summary(params)}*")
+    return params
+
+
+def _preset_buttons(key: str, values: tuple, label, locked: bool) -> None:
+    """Nút chọn nhanh: đặt giá trị vào ô số ngay phía trên."""
+    def choose(value) -> None:
+        st.session_state[key] = value
+    for column, value in zip(st.columns(len(values)), values):
+        with column:
+            st.button(label(value), key=f"{key}_preset_{value}", on_click=choose, args=(value,),
+                      disabled=locked, width="stretch")
+
+
+def _filter_summary(params: pipeline.RunParams) -> str:
+    parts = []
+    if params.min_views > 0:
+        parts.append(f"≥ {params.min_views:,} lượt xem".replace(",", "."))
+    if params.min_ratio_follow > 0:
+        parts.append(f"≥ {params.min_ratio_follow:g}× follower")
+    if not parts:
+        return "Không lọc: giữ mọi video."
+    return "Giữ video có " + (" VÀ " if params.match_all else " HOẶC ").join(parts)
 
 
 def _start_scan(settings: dict, params: pipeline.RunParams) -> None:
@@ -842,10 +850,11 @@ def _start_scan(settings: dict, params: pipeline.RunParams) -> None:
     if not config.load_lines("config/channels.txt"):
         _show_error("Danh sách kênh trống. Vào Cài đặt để nhập các kênh cần quét.")
         return
-    threshold = "min_interactions" if pipeline.is_post_run(params) else "min_views"
-    settings["scan"][threshold] = getattr(params, threshold)
-    if not pipeline.is_post_run(params):
-        settings["scan"]["video_kinds"] = sorted(params.formats)
+    if pipeline.is_post_run(params):
+        settings["scan"]["min_interactions"] = params.min_interactions
+    else:
+        settings["scan"].update(min_views=params.min_views, min_ratio_follow=params.min_ratio_follow,
+                                match_all=params.match_all, video_kinds=sorted(params.formats))
     config.save_settings(settings)
     events, stop = queue.Queue(), threading.Event()
     worker = threading.Thread(target=_scan_worker, args=(params, copy.deepcopy(settings), events, stop),
@@ -862,8 +871,38 @@ def _scan_page(settings: dict) -> None:
     locked = _busy()
     params = _scan_options(settings, locked)
     _key_status_panel(settings, locked, require_deepgram=not pipeline.is_post_run(params))
-    if st.button("Bắt đầu quét", type="primary", width="stretch", disabled=locked or not params.formats, icon=":material/play_arrow:"):
+    accepted = _terms_gate(settings, locked)
+    if st.button("Bắt đầu quét", type="primary", width="stretch",
+                 disabled=locked or not params.formats or not accepted, icon=":material/play_arrow:"):
         _start_scan(settings, params)
+
+
+TERMS_NOTICE = (
+    "Công cụ này đọc Facebook qua trình duyệt đã đăng nhập (thu thập tự động). "
+    "[Điều khoản Facebook](https://www.facebook.com/terms) hạn chế việc thu thập tự động khi chưa được phép.\n\n"
+    "- Tài khoản dùng để quét có thể bị Facebook yêu cầu xác minh (checkpoint) hoặc khóa. "
+    "Nên dùng tài khoản phụ, không dùng tài khoản chính.\n"
+    "- Chỉ thu thập nội dung bạn được phép truy cập.\n"
+    "- Bạn tự chịu trách nhiệm về việc sử dụng công cụ."
+)
+
+
+def _terms_gate(settings: dict, locked: bool) -> bool:
+    """Xác nhận một lần trước lần quét đầu tiên; trả về True khi đã xác nhận."""
+    accepted_at = settings.get("terms_accepted_at")
+    if accepted_at:
+        with st.expander("Lưu ý khi dùng Facebook (đã xác nhận)"):
+            st.markdown(TERMS_NOTICE)
+            st.caption(f"Đã xác nhận lúc {accepted_at}")
+        return True
+    with st.container(border=True):
+        st.markdown("**Lưu ý quan trọng trước khi quét**")
+        st.markdown(TERMS_NOTICE)
+        ticked = st.checkbox("Tôi đã đọc và tự chịu trách nhiệm", value=False, disabled=locked, key="terms_ack")
+    if ticked:
+        settings["terms_accepted_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+        config.save_settings(settings)
+    return bool(ticked)
 
 
 def _format_duration(seconds: float) -> str:

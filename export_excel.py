@@ -51,6 +51,8 @@ _PARAM_LABELS = {
     "formats": "Định dạng",
     "min_views": "Lượt xem tối thiểu",
     "min_interactions": "Tương tác tối thiểu",
+    "min_ratio_follow": "Lượt xem tối thiểu so với follower (×)",
+    "match_all": "Cách kết hợp điều kiện",
 }
 
 FMT_INT = "#,##0"
@@ -248,13 +250,14 @@ def export(
 
 
 def build_summary_tables(videos: list[Video]) -> dict:
-    """Count videos per Jev topic and per hook type, with average views and score.
+    """Group by Jev topic, hook and structure, ranked by average formula score.
 
     The " (chưa chắc)" suffix is stripped for grouping. The commentary is left "" for the LLM.
     """
     return {
         "by_topic": _group(videos, lambda v: _label(v, "topic")),
         "by_hook": _group(videos, lambda v: _label(v, "hook_type")),
+        "by_structure": _group(videos, lambda v: _label(v, "structure")),
         "commentary": "",
     }
 
@@ -277,7 +280,7 @@ def _group(videos: list[Video], key_of: Callable[[Video], str]) -> list[dict]:
         }
         for label, items in buckets.items()
     ]
-    rows.sort(key=lambda r: (-r["count"], r["label"]))
+    rows.sort(key=lambda r: (r["avg_score"] is None, -(r["avg_score"] or 0), -r["count"], r["label"]))
     return rows
 
 
@@ -478,7 +481,7 @@ def _write_summary(ws: Worksheet, summary: dict, *, post_run: bool = False, mome
     headers = ["Số bài" if post_run else "Số video", "View trung bình", "Điểm công thức trung bình"]
     fmts = [None, FMT_INT, FMT_INT, FMT_DEC1]
     row = _write_table(
-        ws, 4, "Bảng 1 – Theo nhóm chủ đề", ["Nhóm chủ đề", *headers],
+        ws, 4, "Bảng 1 – Theo nhóm chủ đề (điểm giảm dần)", ["Nhóm chủ đề", *headers],
         _group_values(summary.get("by_topic")), fmts,
     )
     topics = summary.get("by_topic") or []
@@ -509,8 +512,12 @@ def _write_summary(ws: Worksheet, summary: dict, *, post_run: bool = False, mome
         for letter in "FGHIJKLMNO":
             ws.column_dimensions[letter].width = 10
     row = _write_table(
-        ws, row, "Bảng 2 – Theo kiểu hook", ["Kiểu hook", *headers],
+        ws, row, "Bảng 2 – Theo kiểu hook (điểm giảm dần)", ["Kiểu hook", *headers],
         _group_values(summary.get("by_hook")), fmts,
+    )
+    row = _write_table(
+        ws, row, "Bảng 3 – Theo cấu trúc (điểm giảm dần)", ["Cấu trúc", *headers],
+        _group_values(summary.get("by_structure")), fmts,
     )
 
     _put(ws, row, 1, "Nhận xét").font = TITLE_FONT
@@ -575,7 +582,9 @@ def _write_run_log(ws: Worksheet, run_log: dict) -> None:
     row = _write_table(
         ws, row, "Tham số đã chọn", ["Tham số", "Giá trị"],
         [[_PARAM_LABELS.get(key, key),
-          ", ".join(KIND_LABELS.get(kind, kind) for kind in sorted(value)) if key == "formats" else value]
+          ", ".join(KIND_LABELS.get(kind, kind) for kind in sorted(value)) if key == "formats"
+          else ("Đạt cả hai điều kiện" if value else "Đạt một trong hai") if key == "match_all"
+          else value]
          for key, value in params.items()],
         wrap={2},
     )

@@ -25,7 +25,7 @@ from playwright.sync_api import sync_playwright
 import config
 from collectors import graphql
 from collectors.cookies import has_login_cookies, load_cookie_file, write_netscape
-from errors import BrowserUnavailable, LoginRequired
+from errors import BrowserUnavailable, LoginRequired, QuotaError, ServiceError
 from models import Page, video_kind
 from normalize import is_older_than, parse_count
 
@@ -307,6 +307,9 @@ class _Collector:
                 continue
             posted_at = item.get("posted_at")
             if posted_at is not None and is_older_than(posted_at, self._days):
+                key = _dedupe_key(item)
+                if self._by_id.get(key, {}).get("posted_at") is None:
+                    self._by_id.pop(key, None)
                 # Feed có thể ghim bài cũ ở đầu; cần ba bài cũ khác nhau mới dừng.
                 if fmt == tab_format:
                     if fmt == "post":
@@ -327,37 +330,61 @@ class _Collector:
                 if is_live:
                     self._by_id[key]["is_live"] = True
                 continue
-            for field, value in item.items():
-                if field == "is_live":
-                    existing[field] = existing.get(field, False) or value
-                    continue
-                if existing.get(field) in (None, "") and value not in (None, ""):
-                    existing[field] = value
+            graphql.merge_record(existing, item)
 
     def count(self) -> int:
-        return len(self._by_id)
+        return sum(item.get("posted_at") is not None for item in self._by_id.values())
 
     def full(self) -> bool:
-        return len(self._by_id) >= self.limit
+        return self.count() >= self.limit
 
     def done(self, tab_format: str) -> bool:
         return tab_format in self._old_formats
 
     def videos(self) -> list[dict]:
-        return list(self._by_id.values())[: self.limit]
+        unknown = sum(item.get("posted_at") is None for item in self._by_id.values())
+        if unknown:
+            logger.debug("Bỏ %d bài chưa xác định ngày đăng, không thể kiểm tra số ngày quét.", unknown)
+        return [{key: value for key, value in item.items() if key != "_approx_counts"}
+                for item in self._by_id.values() if item.get("posted_at") is not None][:self.limit]
 
 
-def _drain(pending: list[Response], collector: _Collector, tab_format: str) -> None:
-    """Đọc nội dung các phản hồi GraphQL đã nhận. Đọc ở vòng lặp chính, không trong event handler."""
+def _drain(pending: list[Response], collector: _Collector, tab_format: str) -> bool:
+    """Read queued bodies and retain valid rows, including batches carrying errors."""
+    throttled = False
     responses = list(pending)
     pending.clear()
     for resp in responses:
+        if resp.status == 429 or 500 <= resp.status < 600:
+            throttled = True
+        if resp.status != 200:
+            continue
         try:
             body = resp.text()
         except PlaywrightError as exc:
             logger.debug("Bỏ qua phản hồi GraphQL không đọc được: %s", exc)
             continue
         collector.add(graphql.parse_graphql_response(body), tab_format)
+        throttled |= _rate_limited(body)
+    return throttled
+
+
+def _rate_limited(body: str) -> bool:
+    policy = SEL.get("rate_limit", {})
+    codes = {str(code) for code in policy.get("error_codes", [1675004])}
+    messages = policy.get("messages", ["rate limit", "temporarily blocked"])
+    for value in graphql.split_json_values(body):
+        for node in graphql._walk_dicts(value):
+            errors = node.get("errors")
+            if not isinstance(errors, list):
+                continue
+            for error in graphql._walk_dicts(errors):
+                if any(str(error.get(key)) in codes for key in ("code", "error_code")):
+                    return True
+                if any(marker.casefold() in str(error.get(key, "")).casefold()
+                       for marker in messages for key in ("message", "description", "summary")):
+                    return True
+    return False
 
 
 class FacebookScanner:
@@ -368,6 +395,7 @@ class FacebookScanner:
         self.settings = settings if settings is not None else config.load_settings()
         self._stack = contextlib.ExitStack()
         self._page: PwPage | None = None
+        self.scan_errors: list[str] = []
 
     def __enter__(self) -> FacebookScanner:
         ctx = self._stack.enter_context(_persistent_context(self.hidden))
@@ -480,19 +508,38 @@ class FacebookScanner:
         seen_before = collector.items_seen
         self._open(tab_url)
         _human_pause(scan, stop_event)
-        _drain(pending, collector, tab_format)
+        throttled = _drain(pending, collector, tab_format)
         collector.add(graphql.parse_initial_html(self._require_page().content()), tab_format)
         stall = 0
+        consecutive_throttles = 0
         max_rounds = int(scan["max_scroll_rounds"])
-        for round_no in range(1, max_rounds + 1):
+        round_no = 0
+        while round_no < max_rounds or throttled:
             if _stopped(stop_event):
                 return "đã dừng theo yêu cầu"
+            if throttled:
+                consecutive_throttles += 1
+                policy = SEL.get("rate_limit", {})
+                if consecutive_throttles >= int(policy.get("max_consecutive", 3)):
+                    raise QuotaError("facebook", "Facebook đang giới hạn truy cập, hãy nghỉ vài giờ rồi quét tiếp")
+                seconds = float(policy.get("backoff_s", 60)) * 2 ** (consecutive_throttles - 1)
+                message = f"Facebook đang giới hạn truy cập, nghỉ {seconds:g} giây rồi thử lại…"
+                logger.warning(message)
+                report(message)
+                _pause(seconds, stop_event)
+                if _stopped(stop_event):
+                    return "đã dừng theo yêu cầu"
+            else:
+                consecutive_throttles = 0
+                round_no += 1
             if collector.full():
                 return f"đã đủ {collector.limit} {noun}"
             before = collector.count()
             self._scroll_once()
             self._raise_if_blocked()
-            _drain(pending, collector, tab_format)
+            throttled = _drain(pending, collector, tab_format)
+            if throttled:
+                continue
             report(f"Tab {label} · cuộn lần {round_no}: đã thấy {collector.count() - found_before} {noun}")
             if collector.done(tab_format):
                 return f"đã tới {noun} cũ hơn số ngày quét"
@@ -516,8 +563,9 @@ class FacebookScanner:
     ) -> list[dict]:
         """Quét Reels/Video hoặc feed Bài đăng; trả dict từ graphql.flatten đã bỏ trùng.
 
-        Chỉ giữ bài đúng định dạng và không cũ hơn `days` ngày. Dừng khi hết bài mới (stall),
-        tab trống, đạt số vòng tối đa, đủ max_videos, gặp bài cũ, hoặc stop_event được bật.
+        Chỉ giữ bài có ngày đăng, đúng định dạng và không cũ hơn `days` ngày.
+        Lỗi một tab được ghi trong `scan_errors` rồi quét tab tiếp. Giới hạn Facebook
+        được chờ/thử lại; lỗi dịch vụ mang `partial_rows` để pipeline lưu trước khi dừng.
         `on_progress` nhận từng bước (mở tab, mỗi vòng cuộn, lý do dừng) để hiện cho người dùng.
         """
         base_formats = {kind.removesuffix("_live") for kind in formats}
@@ -528,9 +576,10 @@ class FacebookScanner:
         page = self._require_page()
         collector = _Collector(set(formats), days, max_videos)
         pending: list[Response] = []
+        self.scan_errors = []
 
         def on_response(resp: Response) -> None:
-            if resp.status == 200 and GRAPHQL_MARK in resp.url:
+            if GRAPHQL_MARK in resp.url:
                 pending.append(resp)
 
         page.on("response", on_response)
@@ -544,7 +593,17 @@ class FacebookScanner:
                 logger.info("Quét tab %s của %s", tab, page_url)
                 report(f"Tab {label}: đang mở…")
                 found_before = collector.count()
-                reason = self._scan_tab(url, fmt, collector, pending, stop_event, report)
+                try:
+                    reason = self._scan_tab(url, fmt, collector, pending, stop_event, report)
+                except ServiceError as exc:
+                    _drain(pending, collector, fmt)
+                    exc.partial_rows = collector.videos()
+                    raise
+                except Exception as exc:
+                    _drain(pending, collector, fmt)
+                    reason = f"lỗi khi quét tab: {exc}"
+                    self.scan_errors.append(f"Tab {label}: {reason}")
+                    logger.warning("Tab %s của %s: %s", tab, page_url, reason)
                 found = collector.count() - found_before
                 logger.info("Tab %s của %s: %d %s, dừng vì %s", tab, page_url, found, noun, reason)
                 report(f"Tab {label} xong: {found} {noun}, dừng vì {reason}")

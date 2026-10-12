@@ -348,6 +348,15 @@ def test_cli_builds_requested_params(harness, monkeypatch):
     assert seen[0].min_interactions == 250
 
 
+def test_cli_ratio_and_any(harness, monkeypatch):
+    seen = []
+    monkeypatch.setattr(pipeline, "run", lambda params, settings, progress, stop: seen.append(params) or Path("result.xlsx"))
+    assert pipeline.main(["--min-views", "50000", "--min-ratio", "5", "--any"]) == 0
+    assert (seen[0].min_views, seen[0].min_ratio_follow, seen[0].match_all) == (50_000, 5, False)
+    assert pipeline.main(["--min-ratio", "0.5"]) == 0
+    assert (seen[1].min_ratio_follow, seen[1].match_all) == (0.5, True)
+
+
 def test_missing_views_are_filled_and_persisted_before_filtering(harness, monkeypatch):
     h = harness
     h.rows["large"][0]["views"] = None
@@ -649,3 +658,19 @@ def test_post_images_cached_description_avoids_reading_and_text_analysis_cache(h
     assert post.transcript == "Image words"
     assert post.transcript_status == "images"
     assert h.analysis_calls == ["v1"]
+
+
+def test_login_required_mid_tab_exports_rows_collected_before_failure(harness):
+    h = harness
+
+    def login_failure(url, stop_event):
+        error = LoginRequired("facebook", "Phiên Facebook hết hạn")
+        error.partial_rows = deepcopy(h.rows[url])
+        raise error
+
+    h.scan_hook = login_failure
+    h.run()
+    assert [video.video_id for video in h.video_saved] == ["v1"]
+    assert [video.video_id for video in h.exports[0][0]] == ["v1"]
+    assert h.exports[0][2]["pages"][0]["scanned"] == 1
+    assert h.scans == ["large"]

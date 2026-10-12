@@ -7,7 +7,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules, copy_metada
 root = Path(SPECPATH)
 project_modules = [
     "app", "pipeline", "filters", "normalize", "db", "export_excel",
-    "errors", "retry", "keys", "jev_client", "llm_client", "config", "models", "applog",
+    "errors", "retry", "keys", "jev_client", "llm_client", "config", "models", "applog", "browser_setup",
 ]
 collector_sources = sorted((root / "collectors").rglob("*.py"))
 collector_modules = []

@@ -1,5 +1,5 @@
 {
-  "_doc": "JSON paths read by collectors/graphql.py. A path is a list of dict keys (strings) and list indices (integers); \"*\" means every item of a list. Each field is a list of alternative paths tried in order: the first value that converts wins (integers, numeric strings, or display strings such as \"1,2 Tr\" for counts). Paths for story fields start at the Story node; both comet_sections-wrapped and direct content/feedback projections are supported. Duplicate Story nodes fill missing fields while retaining first-seen non-empty values. Paths for views, comments, shares, reactions and video_markers start at the counter block: the merge of every dict that the `feedback` paths reach (first-seen values win), so Reels counters split across feedback, fb_reel_react_button and media are all read. Deferred fragments that share the Story's node id are merged into the Story first. Page header paths (page_name, page_followers) start at a node whose __typename is in page_typenames: an old-style Page node, or the profile header renderer of new-style pages, whose `user` is the page itself (its `viewer` is the logged-in account and is never read). When Facebook changes its JSON, edit this file; no rebuild is needed. Synthetic fixtures: tests/fixtures/graphql_sample.txt and tests/fixtures/initial_page.html.",
+  "_doc": "JSON paths read by collectors/graphql.py. A path is a list of dict keys (strings) and list indices (integers); \"*\" means every item of a list. Alternatives normally use the first convertible value. Counters prefer exact integers over localized display strings such as \"1,2 Tr\"; reduced and i18n fields are always approximate, including numeric values. Flattened records privately track approximate counters so later exact views/reactions/comments/shares replace rounded values, while other fields remain first-wins. Paths for Story fields start at the Story node; comet_sections-wrapped and direct projections are supported. The feedback counter block merges every dict reached by feedback paths, including fb_reel_react_button and media. Deferred fragments sharing the Story node id merge into the Story first. Channel tiles merge with Story records by video_id. Page header paths start at a node whose __typename is in page_typenames; the profile header renderer's user is the page and its viewer is never read. Edit this file when Facebook changes its JSON; no rebuild is needed. Synthetic fixtures: tests/fixtures/graphql_sample.txt and tests/fixtures/initial_page.html.",
   "story_typename": "Story",
   "video_typename": "Video",
   "post_id": [["post_id"]],
@@ -59,6 +59,7 @@
   ],
   "views": [
     ["video_view_count"],
+    ["play_count"],
     ["video_view_count_renderer", "feedback", "video_view_count"],
     ["video_view_count_renderer", "feedback", "play_count"],
     ["play_count_reduced"]

@@ -50,15 +50,30 @@ def _engagement(video: Video) -> float | None:
     return _safe_div(sum(parts), video.views)
 
 
-def passes(video: Video, min_views: int = 0, min_interactions: int = 0) -> bool:
-    """Ngưỡng bao gồm giá trị bằng; 0 tắt lọc, số liệu chưa biết không đạt."""
-    minimum = min_interactions if video.format == "post" else min_views
-    value = video.interactions if video.format == "post" else video.views
-    return minimum <= 0 or (value is not None and value >= minimum)
+def passes(video: Video, min_views: int = 0, min_interactions: int = 0,
+           min_ratio_follow: float = 0, match_all: bool = True) -> bool:
+    """Ngưỡng bao gồm giá trị bằng; 0 tắt lọc, số liệu chưa biết không đạt.
+
+    Bài đăng chỉ dùng tương tác. Video dùng lượt xem và tỷ lệ lượt xem/follower:
+    `match_all` yêu cầu mọi điều kiện đang bật cùng đạt, ngược lại chỉ cần một.
+    """
+    if video.format == "post":
+        return min_interactions <= 0 or (video.interactions is not None and video.interactions >= min_interactions)
+    results = []
+    if min_views > 0:
+        results.append(video.views is not None and video.views >= min_views)
+    if min_ratio_follow > 0:
+        ratio = _safe_div(video.views, video.page_followers)
+        results.append(ratio is not None and ratio >= min_ratio_follow)
+    if not results:
+        return True
+    return all(results) if match_all else any(results)
 
 
-def apply_filter(videos: list[Video], min_views: int = 0, min_interactions: int = 0) -> list[Video]:
-    return [video for video in videos if passes(video, min_views, min_interactions)]
+def apply_filter(videos: list[Video], min_views: int = 0, min_interactions: int = 0,
+                 min_ratio_follow: float = 0, match_all: bool = True) -> list[Video]:
+    return [video for video in videos
+            if passes(video, min_views, min_interactions, min_ratio_follow, match_all)]
 
 
 def formula_score(

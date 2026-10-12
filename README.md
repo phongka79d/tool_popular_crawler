@@ -11,6 +11,8 @@ pip install -r requirements.txt
 playwright install chromium
 ```
 
+`requirements.txt` ghim phiên bản đã kiểm thử để bản build lặp lại được. Khi Facebook đổi định dạng khiến yt-dlp lỗi, nâng riêng `yt-dlp` lên bản mới, chạy lại `pytest` rồi cập nhật số phiên bản trong tệp.
+
 Nhập key Jev, Deepgram, LLM và endpoint/model LLM trong tab **Cài đặt**; không ghi key vào mã nguồn hay tệp cấu hình. Đăng nhập Facebook bằng tài khoản phụ trước khi quét.
 
 ## Chạy và kiểm thử

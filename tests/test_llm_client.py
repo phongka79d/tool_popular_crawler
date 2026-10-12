@@ -263,6 +263,7 @@ SUMMARY = {
         {"label": "Kiến thức bệnh", "count": 4, "avg_views": 1234.5, "avg_score": 62.0, "caption": "BÍ MẬT CAPTION"},
     ],
     "by_hook": [{"label": "Câu hỏi", "count": 2, "avg_views": 900, "avg_score": 40.5}],
+    "by_structure": [{"label": "Liệt kê", "count": 3, "avg_views": None, "avg_score": 80}],
     "commentary": "NHẬN XÉT CŨ",
 }
 
@@ -282,11 +283,12 @@ class TestWriteCommentary:
         assert "BÍ MẬT CAPTION" not in system["content"] + user["content"]
         assert "NHẬN XÉT CŨ" not in system["content"] + user["content"]
         payload = json.loads(user["content"])
-        assert set(payload) == {"by_topic", "by_hook"}
+        assert set(payload) == {"by_topic", "by_hook", "by_structure"}
         assert payload["by_topic"] == [
             {"label": "Kiến thức bệnh", "count": 4, "avg_views": 1234.5, "avg_score": 62.0}
         ]
         assert payload["by_hook"] == [{"label": "Câu hỏi", "count": 2, "avg_views": 900, "avg_score": 40.5}]
+        assert payload["by_structure"] == SUMMARY["by_structure"]
 
     def test_commentary_wording_is_neutral_and_does_not_invent_missing_views(self):
         prompt = llm_client.COMMENTARY_SYSTEM_PROMPT
@@ -318,8 +320,8 @@ class TestCheckKey:
         client.models = SimpleNamespace(list=list_models)
         return client, comp
 
-    def test_listed_model_passes_without_spending_a_token(self, monkeypatch):
-        client, comp = self._client(["m-0", "m-1"])
+    def test_listed_model_requires_one_token_completion(self, monkeypatch):
+        client, comp = self._client(["m-0", "m-1"], None, _reply("pong"))
         seen = {}
 
         def fake_make_client(base_url, api_key):
@@ -330,11 +332,12 @@ class TestCheckKey:
 
         assert llm_client.check_key("https://llm.test/v1", "sk-test", "m-1") is None
         assert seen["args"] == ("https://llm.test/v1", "sk-test")
-        assert comp.calls == []
+        assert len(comp.calls) == 1
+        assert comp.calls[0]["max_tokens"] == 1
+        assert comp.calls[0]["reasoning_effort"] == "low"
 
-    @pytest.mark.parametrize("models_error", [None, FakeStatusError("no /models", status_code=404)])
-    def test_unlisted_model_or_no_models_endpoint_pings_with_one_token(self, monkeypatch, models_error):
-        client, comp = self._client(["other"], models_error, _reply("pong"))
+    def test_no_models_endpoint_pings_with_one_token(self, monkeypatch):
+        client, comp = self._client([], FakeStatusError("no /models", status_code=404), _reply("pong"))
         monkeypatch.setattr(llm_client, "make_client", lambda base_url, api_key: client)
 
         assert llm_client.check_key("https://llm.test/v1", "sk-test", "m-1") is None
@@ -352,11 +355,33 @@ class TestCheckKey:
         assert comp.calls == []
 
     def test_invalid_key_on_ping_raises_auth_error(self, monkeypatch):
-        client, _ = self._client(["other"], None, FakeStatusError("invalid key", status_code=401))
+        client, _ = self._client(["m-1"], None, FakeStatusError("invalid key", status_code=401))
         monkeypatch.setattr(llm_client, "make_client", lambda base_url, api_key: client)
 
         with pytest.raises(AuthError):
             llm_client.check_key("https://llm.test/v1", "sk-bad", "m-1")
+
+    def test_unlisted_model_fails_without_completion(self, monkeypatch):
+        from errors import ServiceError
+        client, comp = self._client(["other"])
+        monkeypatch.setattr(llm_client, "make_client", lambda *args: client)
+        with pytest.raises(ServiceError, match="không có"):
+            llm_client.check_key("https://llm.test/v1", "sk-test", "m-1")
+        assert not comp.calls
+
+    def test_token_cap_and_reasoning_fallbacks_keep_one_token_limit(self, monkeypatch):
+        client, comp = self._client(
+            ["m-1"], None,
+            FakeStatusError("unsupported max_tokens; use max_completion_tokens"),
+            FakeStatusError("unsupported reasoning_effort"),
+            _reply("pong"),
+        )
+        monkeypatch.setattr(llm_client, "make_client", lambda *args: client)
+        llm_client.check_key("https://llm.test/v1", "sk-test", "m-1")
+        assert len(comp.calls) == 3
+        assert comp.calls[-1]["max_completion_tokens"] == 1
+        assert "max_tokens" not in comp.calls[-1]
+        assert "reasoning_effort" not in comp.calls[-1]
 
 
 def test_make_client_disables_sdk_retries(monkeypatch):

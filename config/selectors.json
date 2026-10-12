@@ -9,6 +9,12 @@
     "video": "videos",
     "post": "posts"
   },
+  "rate_limit": {
+    "error_codes": [1675004, 4, 17, 32, 613],
+    "messages": ["rate limit", "temporarily blocked", "too many requests", "giới hạn", "tạm thời bị chặn"],
+    "max_consecutive": 3,
+    "backoff_s": 60
+  },
   "login": {
     "blocked_path_prefixes": ["/checkpoint", "/login"]
   }

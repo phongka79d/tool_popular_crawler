@@ -72,9 +72,9 @@ khác câu chữ và tình huống; y_tuong nêu rõ bố cục bài viết, kh�
 RETRY_PROMPT = "Chỉ trả JSON đúng các khóa đã yêu cầu. Không thêm lời dẫn, không bọc trong khối mã."
 
 COMMENTARY_SYSTEM_PROMPT = """Bạn viết nhận xét cho báo cáo "công thức đang thắng" của page B2B ngành dược (khách: chủ nhà thuốc, dược sĩ).
-Đầu vào là hai bảng đếm đã tính sẵn dạng JSON: by_topic (theo nhóm chủ đề) và by_hook (theo kiểu hook).
+Đầu vào là ba bảng đã tính sẵn dạng JSON: by_topic (nhóm chủ đề), by_hook (kiểu hook), by_structure (cấu trúc).
 Mỗi dòng có label, count (số nội dung), avg_views (lượt xem trung bình nếu có), avg_score (điểm công thức trung bình).
-Viết 5-7 dòng tiếng Việt về công thức đang thắng: nhóm nào có chỉ số và điểm cao, kiểu hook nào nên thử,
+Viết 5-7 dòng tiếng Việt về công thức đang thắng: nhóm nào có chỉ số và điểm cao, kiểu hook và cấu trúc nào nên thử,
 và nêu rõ khi số nội dung còn ít thì kết luận còn yếu. Chỉ dựa trên số trong bảng, không bịa thêm.
 Chỉ số thiếu/null không có nghĩa là 0; không suy ra lượt xem cho bài đăng khi bảng không có dữ liệu.
 Mỗi dòng là một câu hoàn chỉnh, không đánh số, không gạch đầu dòng, không dùng emoji."""
@@ -154,27 +154,33 @@ def describe_images(client: OpenAI, model: str, images: list[bytes], caption: st
 
 
 def check_key(base_url: str, api_key: str, model: str) -> None:
-    """Trả None nếu endpoint, key và model dùng được; ném ServiceError nếu không.
-
-    Ưu tiên GET /models (dưới 1 giây, không tốn token; key sai vẫn ra AuthError). Chỉ gọi thử
-    1 token khi endpoint không liệt kê được model: gọi thật trên model chậm có thể mất 20–40 giây.
-    """
+    """Kiểm tra danh sách model rồi xác thực bằng một completion giới hạn 1 token."""
     try:
-        if any(info["id"] == model for info in list_models(base_url, api_key)):
-            return
+        models = list_models(base_url, api_key)
     except (AuthError, QuotaError, NetworkError):
         raise
     except ServiceError:
-        pass  # endpoint không hỗ trợ /models: thử gọi model
+        models = None  # endpoint không hỗ trợ /models: thử gọi model
+    if models is not None and not any(info["id"] == model for info in models):
+        raise ServiceError("llm", f"Model {model} không có trong danh sách của endpoint.")
     client = make_client(base_url, api_key)
-    with_retry(
-        lambda: client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": "ping"}],
-            max_tokens=1,
-        ),
-        service="llm",
-    )
+    kwargs = {
+        "model": model,
+        "messages": [{"role": "user", "content": "ping"}],
+        "max_tokens": 1,
+        "reasoning_effort": reasoning_effort({}),
+    }
+    while True:
+        try:
+            with_retry(lambda: client.chat.completions.create(**kwargs), service="llm")
+            return
+        except Exception as exc:
+            if "reasoning_effort" in kwargs and _is_rejection(exc, "reasoning_effort"):
+                del kwargs["reasoning_effort"]
+            elif "max_tokens" in kwargs and _is_rejection(exc, "max_tokens"):
+                kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
+            else:
+                raise
 
 
 def list_models(base_url: str, api_key: str) -> list[dict]:
@@ -360,7 +366,7 @@ def _label(labels: dict, key: str) -> str:
 def write_commentary(
     client: OpenAI, model: str, summary_tables: dict, reasoning_effort: str | None = DEFAULT_REASONING_EFFORT
 ) -> tuple[str, int]:
-    """Viết 5-7 dòng nhận xét "công thức đang thắng" từ bảng by_topic và by_hook.
+    """Viết 5-7 dòng nhận xét từ bảng chủ đề, kiểu hook và cấu trúc.
 
     Trả (chữ nhận xét, tổng token). Chỉ gửi các cột của bảng đếm (không gửi caption, transcript hay nhận xét cũ).
     Không có dòng nào trong bảng thì trả ("", 0) và không gọi LLM.
@@ -368,8 +374,9 @@ def write_commentary(
     tables = {
         "by_topic": _table_rows(summary_tables.get("by_topic")),
         "by_hook": _table_rows(summary_tables.get("by_hook")),
+        "by_structure": _table_rows(summary_tables.get("by_structure")),
     }
-    if not tables["by_topic"] and not tables["by_hook"]:
+    if not any(tables.values()):
         return "", 0
     messages = [
         {"role": "system", "content": COMMENTARY_SYSTEM_PROMPT},
