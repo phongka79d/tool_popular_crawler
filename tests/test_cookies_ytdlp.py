@@ -421,6 +421,28 @@ def test_post_collector_counts_only_posts():
     assert collector.items_seen == 0 and collector.count() == 0
 
 
+def test_reel_seen_on_reels_and_videos_tabs_is_one_record_with_merged_counts():
+    collector = facebook._Collector({"video", "reel"}, 30, 100)
+    from_reels_tab = {"video_id": "post-1540", "format": "reel", "url": "https://www.facebook.com/reel/1832/",
+                      "views": 454000, "comments": 12, "shares": None}
+    from_videos_tab = {"video_id": "1832", "format": "reel", "url": "https://www.facebook.com/reel/1832/",
+                       "views": 454108, "comments": None, "shares": 7}
+    other = {"video_id": "9", "format": "video", "url": "https://www.facebook.com/Page/videos/9/"}
+    collector.add([from_reels_tab], "reel")
+    collector.add([from_videos_tab, other], "video")
+    rows = collector.videos()
+    assert [row["video_id"] for row in rows] == ["post-1540", "9"]
+    assert (rows[0]["views"], rows[0]["comments"], rows[0]["shares"]) == (454000, 12, 7)
+
+
+def test_posts_without_media_id_in_link_dedupe_by_post_id():
+    collector = facebook._Collector({"post"}, 30, 100)
+    collector.add([{"video_id": "a", "format": "post", "url": "https://www.facebook.com/photo/?fbid=1&set=a.2"},
+                   {"video_id": "b", "format": "post", "url": "https://www.facebook.com/P/posts/pfbid0x"}], "post")
+    assert collector.count() == 2
+
+
+
 @pytest.mark.parametrize("kinds,expected", [
     ({"video", "reel"}, {"video", "reel"}),
     ({"video_live"}, {"video_live"}), ({"reel_live"}, {"reel_live"}),

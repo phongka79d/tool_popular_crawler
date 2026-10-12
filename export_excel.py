@@ -374,7 +374,7 @@ def _write_details(ws: Worksheet, videos: list[Video], *, post_run: bool = False
     for r, video in enumerate(ordered, start=3):
         height = 30.0
         for c, col in enumerate(COLUMNS, start=1):
-            wrap = col.long or col.header == "Cờ rủi ro"
+            wrap = col.long or col.header in ("Cờ rủi ro", "Chủ đề bài")
             fmt = FMT_DEC2 if col.header == "Hệ số so trung vị kênh" else col.fmt
             cell = _put(ws, r, c, col.get(video, r - 2), fmt, TOP_WRAP if wrap else TOP)
             cell.font = BODY_FONT

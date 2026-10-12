@@ -274,8 +274,17 @@ def import_cookies(path: Path | str) -> bool:
     return True
 
 
+_MEDIA_ID_RE = re.compile(r"/(?:reel|videos)/(\d+)|[?&]v=(\d+)")
+
+
+def _dedupe_key(item: dict) -> str:
+    """Một reel có id bài (tab Reels) và id video (tab Video) khác nhau nhưng cùng link /reel/<id>: gộp theo id trong link."""
+    match = _MEDIA_ID_RE.search(item.get("url") or "")
+    return f"media:{match.group(1) or match.group(2)}" if match else str(item.get("video_id"))
+
+
 class _Collector:
-    """Gom bài đúng định dạng và nằm trong số ngày quét; bỏ trùng theo video_id."""
+    """Gom bài đúng định dạng và nằm trong số ngày quét; bỏ trùng theo id trong link (hoặc video_id)."""
 
     def __init__(self, formats: set[str], days: int, max_videos: int) -> None:
         self._formats = formats
@@ -305,24 +314,25 @@ class _Collector:
                     if fmt != "post" or len(self._old_post_ids) >= 3:
                         self._old_formats.add(tab_format)
                 continue
+            key = _dedupe_key(item)
             if item.get("is_live"):
-                self._live_ids.add(video_id)
-            is_live = video_id in self._live_ids
+                self._live_ids.add(key)
+            is_live = key in self._live_ids
             if video_kind(fmt, is_live) not in self._formats:
-                self._by_id.pop(video_id, None)
+                self._by_id.pop(key, None)
                 continue
-            existing = self._by_id.get(video_id)
+            existing = self._by_id.get(key)
             if existing is None:
-                self._by_id[video_id] = dict(item)
+                self._by_id[key] = dict(item)
                 if is_live:
-                    self._by_id[video_id]["is_live"] = True
+                    self._by_id[key]["is_live"] = True
                 continue
-            for key, value in item.items():
-                if key == "is_live":
-                    existing[key] = existing.get(key, False) or value
+            for field, value in item.items():
+                if field == "is_live":
+                    existing[field] = existing.get(field, False) or value
                     continue
-                if existing.get(key) in (None, "") and value not in (None, ""):
-                    existing[key] = value
+                if existing.get(field) in (None, "") and value not in (None, ""):
+                    existing[field] = value
 
     def count(self) -> int:
         return len(self._by_id)
