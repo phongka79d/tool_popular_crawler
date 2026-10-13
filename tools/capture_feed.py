@@ -29,9 +29,9 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit, urlunsplit
 
-ROOT = Path(__file__).resolve().parent.parent
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+SRC = Path(__file__).resolve().parent.parent / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
 
 from playwright.sync_api import Error as PlaywrightError  # noqa: E402
 from playwright.sync_api import Page, Response, sync_playwright  # noqa: E402

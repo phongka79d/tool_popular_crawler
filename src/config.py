@@ -9,8 +9,12 @@ import sys
 import unicodedata
 from pathlib import Path
 
-# Frozen exe: data lives next to VideoCongThuc.exe; source: next to this file.
-ROOT = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+# Frozen exe: user data lives next to VideoCongThuc.exe; program files (code, DLLs, assets,
+# ffmpeg) live in the app/ subfolder (sys._MEIPASS).
+# From source: code and assets are in src/, user data folders sit at the repository root.
+_SOURCE_DIR = Path(__file__).resolve().parent
+ROOT = Path(sys.executable).parent if getattr(sys, "frozen", False) else _SOURCE_DIR.parent
+BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", _SOURCE_DIR))
 
 CONFIG_DIR = ROOT / "config"
 DATA_DIR = ROOT / "data"

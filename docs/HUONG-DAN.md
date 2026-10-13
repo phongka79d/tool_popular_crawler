@@ -1,7 +1,7 @@
 # Video Công Thức — hướng dẫn nhanh
 
 ## 1. Mở ứng dụng
-Giải nén toàn bộ `VideoCongThuc.zip` vào thư mục có quyền ghi (ví dụ trong Documents), **không chạy trực tiếp trong ZIP**. Mở thư mục `VideoCongThuc`, bấm `VideoCongThuc.exe`; giao diện mở trong cửa sổ ứng dụng riêng (dùng Microsoft Edge có sẵn của Windows), không có cửa sổ đen (console). **Đóng cửa sổ này là tắt ứng dụng** (sau khoảng 15 giây). Máy không cần cài Python hay thư viện gì thêm; cần Internet. Máy có Edge thì không phải tải trình duyệt; máy không có Edge thì **lần đầu mở** ứng dụng tự tải Chromium (khoảng 150 MB, vài phút) vào ngay thư mục ứng dụng trước khi cửa sổ hiện ra. Model chuyển thoại dự phòng (faster-whisper) tự tải vào thư mục `models/` khi cần dùng lần đầu. Nếu ứng dụng không khởi động được, một hộp thoại báo lỗi sẽ hiện ra.
+Giải nén toàn bộ `VideoCongThuc.zip` vào thư mục có quyền ghi (ví dụ trong Documents), **không chạy trực tiếp trong ZIP**. Mở thư mục `VideoCongThuc`, bấm `VideoCongThuc.exe` (cạnh file này chỉ có `HUONG-DAN.pdf` và các thư mục `config/`, `data/`, `output/`, `profile/`; thư mục `app/` chứa tệp chương trình, không sửa hay xóa); giao diện mở trong cửa sổ ứng dụng riêng (dùng Microsoft Edge có sẵn của Windows), không có cửa sổ đen (console). **Đóng cửa sổ này là tắt ứng dụng** (sau khoảng 15 giây). Máy không cần cài Python hay thư viện gì thêm; cần Internet. Máy có Edge thì không phải tải trình duyệt; máy không có Edge thì **lần đầu mở** ứng dụng tự tải Chromium (khoảng 150 MB, vài phút) vào ngay thư mục ứng dụng trước khi cửa sổ hiện ra. Model chuyển thoại dự phòng (faster-whisper) tự tải vào thư mục `models/` khi cần dùng lần đầu. Nếu ứng dụng không khởi động được, một hộp thoại báo lỗi sẽ hiện ra.
 
 Nếu tải hoặc mở Chromium thất bại, ứng dụng mở trình duyệt mặc định và ghi lỗi vào nhật ký. Nếu không có cửa sổ nào kết nối được trong 2 phút sau khi mở trình duyệt, ứng dụng tự tắt; có thể mở lại sau khi xử lý lỗi.
 
@@ -16,7 +16,7 @@ Nếu tải hoặc mở Chromium thất bại, ứng dụng mở trình duyệt 
 - Bấm **Đăng nhập Facebook**, tự đăng nhập và hoàn tất xác minh trong cửa sổ trình duyệt hiện ra. **Nên dùng tài khoản phụ**, không dùng tài khoản quản trị quan trọng; chỉ thu thập nội dung được phép truy cập và tuân thủ quy định Facebook. Nếu phiên hết hạn hoặc gặp checkpoint, trở lại đây đăng nhập lại.
 - Mở **Nhãn phân loại (Jev)** để sửa tên hiển thị, mô tả (nên có ví dụ), thêm hoặc xóa nhãn ở bốn bảng rồi bấm **Lưu nhãn**; mỗi nhóm cần ít nhất hai nhãn, các lựa chọn **Khác / Không có CTA** luôn được giữ. Khi thay đổi nhãn, lần quét tiếp theo Jev sẽ phân loại lại nội dung và có thể phát sinh một khoản phí nhỏ. Muốn quay về bộ nhãn ban đầu, đánh dấu xác nhận rồi bấm **Khôi phục nhãn mặc định**.
 
-![Tab Cài đặt](docs/img/tab-cai-dat.png)
+![Tab Cài đặt](img/tab-cai-dat.png)
 
 ## 3. Trang Chạy quét
 Trang mở khi đã lưu Jev và LLM; quét video cần thêm Deepgram (chép lời), quét bài đăng thì không. Chọn số ngày và **Loại quét**: **Video** (đánh dấu ít nhất một ô **Video thường**, **Reel**, **Video (Live)**, **Reel (Live)**; mặc định chọn Video thường và Reel, không chọn Live) hoặc **Bài đăng** (bài chữ/ảnh, không gồm video). Với video, đặt **Lượt xem tối thiểu** và/hoặc **Lượt xem tối thiểu so với follower (×)** (5 = lượt xem gấp 5 lần số người theo dõi); khi bật cả hai, chọn **Đạt cả hai điều kiện** hoặc **Đạt một trong hai**. Bài đăng chỉ dùng **Tương tác tối thiểu** (cảm xúc + bình luận + chia sẻ). **Thời lượng Video** và **Thời lượng Reel** đặt riêng cho từng loại (tính bằng giây, có nút nhanh ≥ 1 phút / ≥ 3 phút cho Video, ≤ 60 giây / ≤ 90 giây cho Reel): mục nằm ngoài khoảng bị bỏ trước khi chép lời và phân tích nên không tốn Deepgram/LLM; Video (Live) theo giới hạn của Video, Reel (Live) theo giới hạn của Reel; mục chưa biết thời lượng vẫn được giữ và có ghi chú. Nhập 0 để tắt điều kiện đó; lựa chọn được nhớ cho lần sau. Lần đầu cần đánh dấu **Tôi đã đọc và tự chịu trách nhiệm**, rồi bấm **Bắt đầu quét**.
@@ -40,7 +40,7 @@ Video/bài đã phân tích trước đó có thể **dùng phân tích LLM đã
 
 **Giảm rủi ro tài khoản bị khóa:** tool quét bằng trình duyệt thật, cuộn và nghỉ như người dùng, nghỉ 30–60 giây giữa các kênh, và chỉ dùng cookie tài khoản khi video không xem được ẩn danh. Facebook chủ yếu khóa theo hành vi, nên: dùng tài khoản phụ đã có tuổi và hoạt động bình thường; mỗi lần chỉ quét vài chục kênh, không chạy liên tục nhiều lần trong ngày; không chạy song song trên nhiều máy với cùng tài khoản; không dùng VPN/proxy đổi quốc gia giữa các lần chạy. Gặp checkpoint thì xác minh bằng tay rồi nghỉ vài ngày trước khi quét tiếp.
 
-![Tab Chạy quét: chọn loại quét, ngưỡng lượt xem và tỷ lệ so với follower, cách kết hợp, xác nhận trước khi quét](docs/img/tab-chay-quet.png)
+![Tab Chạy quét: chọn loại quét, ngưỡng lượt xem và tỷ lệ so với follower, cách kết hợp, xác nhận trước khi quét](img/tab-chay-quet.png)
 
 ## 4. Trang Kết quả
 Chọn **Xem thống kê file** (mặc định file mới nhất) để xem **Nội dung đã xuất**, **Kênh có kết quả**, **Tổng lượt xem** hoặc **Tổng tương tác**, **Điểm công thức TB** và mức dùng AI của file đó. Mục **Biểu đồ kết quả** có **Top 10 theo lượt xem** hoặc **Top 10 theo tương tác**, **Nội dung theo chủ đề**, **Phân bố điểm công thức**; thiếu số liệu thì không có biểu đồ tương ứng.
@@ -55,7 +55,7 @@ File `cong-thuc_YYYY-MM-DD_HHmm.xlsx` có 4 trang, theo thứ tự:
 
 **Điểm Jev** là trung bình các điểm hook, cảm xúc, giá trị thực tiễn, khả năng chia sẻ Jev chấm. Đọc **Nhật ký** khi kênh bị bỏ qua hoặc thiếu chỉ số. Kiểm tra gợi ý AI trước khi sử dụng, đặc biệt nội dung sức khỏe và quảng cáo.
 
-![Tab Kết quả](docs/img/tab-ket-qua.png)
+![Tab Kết quả](img/tab-ket-qua.png)
 
 ## 5. Bảo mật và thay đổi Facebook
 Công cụ đọc Facebook tự động qua trình duyệt đã đăng nhập, điều mà [Điều khoản Facebook](https://www.facebook.com/terms) hạn chế khi chưa được phép: tài khoản có thể bị checkpoint hoặc khóa, nên dùng tài khoản phụ, chỉ thu thập nội dung bạn được phép truy cập và tự chịu trách nhiệm (ứng dụng yêu cầu xác nhận một lần trước lần quét đầu).

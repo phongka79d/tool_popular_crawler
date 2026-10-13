@@ -41,7 +41,7 @@ MAX_AUDIO_SECONDS = 600
 # Livestream thường mở đầu bằng nhạc chờ nhiều phút: tải 30 phút đầu, chép từng đoạn 10 phút
 # tới khi gặp thoại.
 SPEECH_SEARCH_SECONDS = 1800
-SAMPLE_PATH = config.ROOT / "assets" / "sample_1s.mp3"
+SAMPLE_PATH = config.BUNDLE_DIR / "assets" / "sample_1s.mp3"
 
 HOOK_WINDOW_S = 3.0
 HOOK_MAX_EXTRA_WORDS = 40          # giới hạn nối thêm tới dấu kết câu (video không có dấu câu)
@@ -78,7 +78,7 @@ def observe_usage(callback: Callable[[float], None]) -> Iterator[None]:
 # --- audio -----------------------------------------------------------------
 
 def _ffmpeg_exe() -> str | None:
-    bundled = config.ROOT / "ffmpeg.exe"
+    bundled = config.BUNDLE_DIR / "ffmpeg.exe"
     if bundled.exists():
         return str(bundled)
     return shutil.which("ffmpeg")
@@ -91,7 +91,7 @@ def extract_audio(src: Path | str, dst: Path | str, start_s: int = 0) -> Path | 
     src_path, dst_path = Path(src), Path(dst)
     exe = _ffmpeg_exe()
     if exe is None:
-        log.error("Không tìm thấy ffmpeg (ffmpeg.exe cạnh tool hoặc trong PATH)")
+        log.error("Không tìm thấy ffmpeg (ffmpeg.exe trong thư mục app của tool hoặc trong PATH)")
         return None
 
     dst_path.parent.mkdir(parents=True, exist_ok=True)

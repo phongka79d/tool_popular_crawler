@@ -11,9 +11,9 @@ $Templates = @(
     'settings.json', 'channels.txt', 'taxonomy.json', 'taxonomy.default.json', 'selectors.json',
     'graphql_paths.json', 'keyterms.txt', 'ban_words.txt'
 )
-$Documents = @('THIRD_PARTY_NOTICES.txt', 'HUONG-DAN.md')
+$Documents = @('THIRD_PARTY_NOTICES.txt', 'docs\HUONG-DAN.md')
 
-foreach ($Required in (@($Python, $Spec, (Join-Path $Root 'launcher.py')) +
+foreach ($Required in (@($Python, $Spec, (Join-Path $Root 'src\launcher.py')) +
         @($Templates | ForEach-Object { Join-Path $Root "config\$_" }) +
         @($Documents | ForEach-Object { Join-Path $Root $_ }))) {
     if (-not (Test-Path -LiteralPath $Required -PathType Leaf)) {
@@ -49,14 +49,16 @@ try {
     foreach ($Template in $Templates) {
         Copy-Item -LiteralPath (Join-Path $Root "config\$Template") -Destination $ConfigDestination -Force
     }
+    # Folder root keeps only the exe, the PDF guide and user folders; everything else lives in app/.
+    $AppDir = Join-Path $Package 'app'
     foreach ($Document in $Documents) {
-        Copy-Item -LiteralPath (Join-Path $Root $Document) -Destination $Package -Force
+        Copy-Item -LiteralPath (Join-Path $Root $Document) -Destination $AppDir -Force
     }
-    $Pdf = Join-Path $Root 'HUONG-DAN.pdf'
+    $Pdf = Join-Path $Root 'docs\HUONG-DAN.pdf'
     if (Test-Path -LiteralPath $Pdf -PathType Leaf) {
         Copy-Item -LiteralPath $Pdf -Destination $Package -Force
     }
-    Copy-Item -LiteralPath $Ffmpeg.Path -Destination (Join-Path $Package 'ffmpeg.exe') -Force
+    Copy-Item -LiteralPath $Ffmpeg.Path -Destination (Join-Path $AppDir 'ffmpeg.exe') -Force
     foreach ($Name in @('data', 'output', 'profile')) {
         New-Item -ItemType Directory -Path (Join-Path $Package $Name) -Force | Out-Null
     }

@@ -1,6 +1,14 @@
 # Video Công Thức
 
-Công cụ Windows quét video Facebook, lọc chỉ số viral, phân tích công thức bằng Jev/LLM và xuất Excel. Yêu cầu Python 3.11, Internet và `ffmpeg.exe` trong PATH. Hướng dẫn người dùng: [HUONG-DAN.md](HUONG-DAN.md); đặc tả: [PLAN-JEV.md](PLAN-JEV.md).
+Công cụ Windows quét video Facebook, lọc chỉ số viral, phân tích công thức bằng Jev/LLM và xuất Excel. Yêu cầu Python 3.11, Internet và `ffmpeg.exe` trong PATH. Hướng dẫn người dùng: [docs/HUONG-DAN.md](docs/HUONG-DAN.md); đặc tả: [docs/PLAN-JEV.md](docs/PLAN-JEV.md).
+
+## Cấu trúc thư mục
+
+- `src/`: mã nguồn (`app.py` giao diện, `pipeline.py`, `collectors/`, …) và `assets/`.
+- `config/`: mẫu cấu hình; `data/`, `output/`, `profile/`: dữ liệu khi chạy từ mã nguồn (gitignore).
+- `tests/`, `tools/`: kiểm thử và công cụ thu fixture.
+- `docs/`: hướng dẫn người dùng (Markdown + PDF, ảnh trong `docs/img/`) và đặc tả.
+- `build.ps1`, `VideoCongThuc.spec`: đóng gói exe.
 
 ## Thiết lập (PowerShell)
 
@@ -18,9 +26,9 @@ Nhập key Jev, Deepgram, LLM và endpoint/model LLM trong tab **Cài đặt**; 
 ## Chạy và kiểm thử
 
 ```powershell
-streamlit run app.py
+streamlit run src/app.py
 # Hoặc chạy pipeline từ dòng lệnh:
-python pipeline.py
+python src/pipeline.py
 
 pytest
 # Thu fixture Facebook để cập nhật parser (cần đăng nhập):
@@ -41,4 +49,4 @@ Sau khi thiết lập `.venv` và ffmpeg trong PATH, chạy tại repo:
 .\build.ps1
 ```
 
-Script dùng `VideoCongThuc.spec` để build **onedir**, chép đúng các mẫu `config/`, hướng dẫn và notices, kèm ffmpeg rồi tạo `dist/VideoCongThuc.zip`. `HUONG-DAN.pdf` được kèm nếu có. Không đóng gói `reference/`, `.venv` hay dữ liệu/phiên đăng nhập đang dùng; `data/`, `output/`, `profile/` trong bản ZIP là thư mục rỗng. Nếu một bản ứng dụng trong `dist/VideoCongThuc/` đã có dữ liệu người dùng, script từ chối ghi đè: chuyển nguyên bản đó ra ngoài `dist/` trước khi build lại.
+Script dùng `VideoCongThuc.spec` để build **onedir**, chép đúng các mẫu `config/`, hướng dẫn và notices, kèm ffmpeg rồi tạo `dist/VideoCongThuc.zip`. Cạnh `VideoCongThuc.exe` chỉ có `HUONG-DAN.pdf` và các thư mục dữ liệu; mã, DLL, assets, ffmpeg, hướng dẫn Markdown và notices nằm trong `app/` (`config.BUNDLE_DIR`). `HUONG-DAN.pdf` được kèm nếu có. Không đóng gói `reference/`, `.venv` hay dữ liệu/phiên đăng nhập đang dùng; `data/`, `output/`, `profile/` trong bản ZIP là thư mục rỗng. Nếu một bản ứng dụng trong `dist/VideoCongThuc/` đã có dữ liệu người dùng, script từ chối ghi đè: chuyển nguyên bản đó ra ngoài `dist/` trước khi build lại.

@@ -4,7 +4,7 @@ from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules, copy_metadata
 
-root = Path(SPECPATH)
+root = Path(SPECPATH) / "src"
 project_modules = [
     "app", "pipeline", "filters", "normalize", "db", "export_excel",
     "errors", "retry", "keys", "jev_client", "llm_client", "config", "models", "applog", "browser_setup",
@@ -61,8 +61,8 @@ exe = EXE(
     strip=False,
     upx=False,
     console=False,  # chỉ hiện cửa sổ ứng dụng; nhật ký ghi vào data/app.log (launcher.py)
-    # Keep assets beside the exe, consistent with config.ROOT.
-    contents_directory=".",
+    # Program files go to app/ so the folder root only shows the exe and user data.
+    contents_directory="app",
 )
 coll = COLLECT(
     exe,
