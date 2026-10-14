@@ -16,7 +16,7 @@ HEADERS = [
     "STT", "Kênh", "Follower kênh", "Ngày đăng", "Định dạng", "Thời lượng (giây)", "Link bài",
     "View", "Cảm xúc", "Bình luận", "Chia sẻ", "Tổng tương tác", "View/Follower", "Hệ số so trung vị kênh",
     "Tỷ lệ tương tác", "Tỷ lệ share",
-    "Chủ đề bài", "Tóm tắt", "Caption", "Nội dung thoại", "Hook gốc",
+    "Chủ đề bài", "Tóm tắt", "Caption", "Nội dung thoại", "Ngôn ngữ thoại", "Thoại dịch tiếng Việt", "Hook gốc",
     "Góc nhìn", "Mẫu hook điền chỗ trống", "Vị trí CTA",
     "Nhóm chủ đề", "Kiểu hook", "Độ mạnh hook", "Cấu trúc", "CTA",
     "Liên quan ngành (%)", "Làm lại được (%)", "Điểm công thức (0–100)", "Điểm Jev (0–100)", "Cờ rủi ro",
@@ -187,7 +187,7 @@ def test_post_export_labels_and_detail_title(tmp_path):
     path = xl.export([post], {}, {"params": {"formats": ["post"], "min_interactions": 200}}, out_dir=tmp_path, now=NOW)
     workbook = load_workbook(path)
     try:
-        assert workbook.sheetnames[:2] == ["Tổng quan", "Chi tiết bài đăng"]
+        assert workbook.sheetnames == ["Chi tiết bài đăng", "Tổng hợp công thức", "Nhật ký"]
         detail = workbook["Chi tiết bài đăng"]
         assert detail.cell(3, _col("Định dạng")).value == "Bài đăng"
         assert detail.cell(3, _col("Tổng tương tác")).value == 250
@@ -216,27 +216,26 @@ def test_run_log_shows_ratio_and_combination(tmp_path):
     ({"video": [180, 1200], "reel": [None, 90]}, "3–20 phút", "≤ 90 giây"),
     ({}, "Không giới hạn", "Không giới hạn"),
 ])
-def test_length_limits_appear_in_overview_and_log(tmp_path, limits, video_text, reel_text):
+def test_length_limits_appear_in_log(tmp_path, limits, video_text, reel_text):
     params = {"formats": ["video", "reel"], "length_limits": limits}
     path = xl.export([], {}, {"params": params}, out_dir=tmp_path, now=NOW)
     workbook = load_workbook(path)
     try:
-        for name in ("Tổng quan", "Nhật ký"):
-            rows = {row[0]: row[1] for row in workbook[name].iter_rows(values_only=True)
-                    if len(row) > 1 and isinstance(row[0], str)}
-            assert rows["Thời lượng Video"] == video_text
-            assert rows["Thời lượng Reel"] == reel_text
+        rows = {row[0]: row[1] for row in workbook["Nhật ký"].iter_rows(values_only=True)
+                if len(row) > 1 and isinstance(row[0], str)}
+        assert rows["Thời lượng Video"] == video_text
+        assert rows["Thời lượng Reel"] == reel_text
     finally:
         workbook.close()
 
 
 def test_sheet_names_in_order(wb) -> None:
-    assert wb.sheetnames == ["Tổng quan", "Chi tiết video", "Tổng hợp công thức", "Nhật ký"]
-    assert wb.active.title == "Tổng quan"
+    assert wb.sheetnames == ["Chi tiết video", "Tổng hợp công thức", "Nhật ký"]
+    assert wb.active.title == "Chi tiết video"
 
 
 def test_detail_header_order_matches_plan(detail) -> None:
-    assert detail.max_column == len(HEADERS) == 39
+    assert detail.max_column == len(HEADERS) == 41
     assert [detail.cell(2, c).value for c in range(1, len(HEADERS) + 1)] == HEADERS
 
 
@@ -253,7 +252,7 @@ def test_rows_sorted_by_score_desc_with_missing_score_last(detail) -> None:
 
 def test_freeze_panes_and_autofilter(detail) -> None:
     assert detail.freeze_panes == "C3"
-    assert detail.auto_filter.ref == "A2:AM6"
+    assert detail.auto_filter.ref == "A2:AO6"
 
 
 def test_risk_highlight_is_limited_to_nonempty_flags(detail) -> None:
@@ -355,10 +354,10 @@ def test_missing_jev_llm_fields_are_blank_and_raw_goes_to_notes(detail) -> None:
     assert "Không phải JSON: {oops" in notes
 
 
-def test_empty_export_still_writes_four_sheets(tmp_path: Path) -> None:
+def test_empty_export_still_writes_three_sheets(tmp_path: Path) -> None:
     path = xl.export([], {}, {}, out_dir=tmp_path, now=NOW)
     wb = load_workbook(path)
-    assert wb.sheetnames == ["Tổng quan", "Chi tiết video", "Tổng hợp công thức", "Nhật ký"]
+    assert wb.sheetnames == ["Chi tiết video", "Tổng hợp công thức", "Nhật ký"]
     assert wb["Chi tiết video"].max_row == 2
 
 
@@ -474,13 +473,12 @@ def test_live_labels_in_details_and_log_params(tmp_path):
         workbook.close()
 
 
-def test_overview_kpis_charts_and_print_layout(wb):
-    ws = wb[xl.SHEET_OVERVIEW]
+def test_run_totals_and_print_layout(wb):
+    ws = wb[xl.SHEET_LOG]
     expected = {
         "Số kênh": 3, "Số video quét được": 42, "Đạt ngưỡng": 3,
         "Đã phân tích": 3, "Số mục xuất": 4, "Gợi ý giữ lại": 3, "Video/bài có gợi ý": 1,
-        "Token Jev": 12_345, "Token LLM": 6_789, "Phút Deepgram": 3.5,
-        "Model LLM": "claude-sonnet", "Số ngày quét": 14, "Lượt xem tối thiểu": 10_000,
+        "Số ngày quét": 14, "Lượt xem tối thiểu": 10_000,
     }
     for label, value in expected.items():
         assert ws.cell(_find_row(ws, label), 2).value == value
@@ -492,11 +490,9 @@ def test_overview_kpis_charts_and_print_layout(wb):
     assert ws.cell(_find_row(ws, "Gợi ý giữ lại"), 2).value == sum(exported_counts)
     assert ws.cell(_find_row(ws, "Video/bài có gợi ý"), 2).value == sum(count > 0 for count in exported_counts)
     assert not any("điểm ≥ 70" in str(cell.value) for row in ws for cell in row)
-    assert ws.cell(_find_row(ws, "Phút Deepgram"), 2).number_format == xl.FMT_DEC2
-    assert len(ws._charts) >= 1
-    assert ws._charts[0].series[0].val.numRef.f.startswith("'Tổng quan'!")
-    assert ws.sheet_view.showGridLines is False
+    assert sum(cell.value == "Token Jev" for row in ws for cell in row) == 1
     for sheet in wb:
+        assert sheet.sheet_view.showGridLines is True
         assert sheet.freeze_panes
         assert sheet.print_title_rows
         assert sheet.page_setup.orientation == "landscape"
@@ -526,6 +522,79 @@ def test_read_summary_round_trip(exported):
          "interactions": v.interactions, "score": v.score, "topic": v.jev.get("topic", "")}
         for v in expected
     ]
+
+
+def test_read_summary_accepts_legacy_overview(exported):
+    expected = xl.read_summary(exported)
+    workbook = load_workbook(exported)
+    workbook.create_sheet("Tổng quan", 0)
+    workbook.save(exported)
+    workbook.close()
+    assert xl.read_summary(exported) == expected
+
+
+@pytest.mark.parametrize("code,label", [
+    ("vi", "Tiếng Việt"), ("en", "Tiếng Anh"), ("fr", "fr"), ("", None),
+])
+def test_detail_transcript_language(tmp_path, code, label):
+    video = Video("language", "https://facebook.test/language", "page")
+    video.transcript_language = code
+    path = xl.export([video], {}, {}, out_dir=tmp_path, now=NOW)
+    workbook = load_workbook(path)
+    try:
+        assert workbook[xl.SHEET_DETAIL].cell(3, _col("Ngôn ngữ thoại")).value == label
+    finally:
+        workbook.close()
+
+
+def test_detail_vietnamese_translation_is_wrapped(tmp_path):
+    video = Video("translated", "https://facebook.test/translated", "page")
+    video.transcript_language = "en"
+    video.transcript_vi = "Nội dung đã dịch sang tiếng Việt"
+    path = xl.export([video], {}, {}, out_dir=tmp_path, now=NOW)
+    workbook = load_workbook(path)
+    try:
+        detail = workbook[xl.SHEET_DETAIL]
+        cell = detail.cell(3, _col("Thoại dịch tiếng Việt"))
+        assert cell.value == video.transcript_vi
+        assert cell.alignment.wrap_text is True
+        assert _width(detail, _col("Thoại dịch tiếng Việt")) == _width(detail, _col("Nội dung thoại"))
+    finally:
+        workbook.close()
+
+
+def test_detail_group_bands_match_columns(detail):
+    assert {str(region) for region in detail.merged_cells.ranges} == {
+        "A1:G1", "H1:P1", "Q1:Z1", "AA1:AJ1", "AK1:AO1",
+    }
+    assert detail.cell(2, 26).value == "Vị trí CTA"
+    assert detail.cell(2, 27).value == "Nhóm chủ đề"
+    assert detail.cell(2, 36).value == "Cờ rủi ro"
+    assert detail.cell(2, 37).value == "Lý do viral"
+
+
+def test_all_table_headers_and_data_have_four_sided_borders(wb):
+    def assert_border(cell):
+        for side in ("left", "right", "top", "bottom"):
+            edge = getattr(cell.border, side)
+            assert edge.style == "thin"
+            assert edge.color.rgb == "00BFC7CE"
+
+    detail = wb[xl.SHEET_DETAIL]
+    for row in detail.iter_rows(min_row=2):
+        for cell in row:
+            assert_border(cell)
+    for sheet_name in (xl.SHEET_SUMMARY, xl.SHEET_LOG):
+        ws = wb[sheet_name]
+        width = 0
+        for row in ws.iter_rows():
+            if row[0].fill.fgColor.rgb == xl.HEADER_FILL.fgColor.rgb:
+                width = sum(cell.fill.fgColor.rgb == xl.HEADER_FILL.fgColor.rgb for cell in row)
+            elif all(cell.value is None for cell in row):
+                width = 0
+            if width:
+                for cell in row[:width]:
+                    assert_border(cell)
 
 
 def test_read_summary_post_and_empty_exports(tmp_path):

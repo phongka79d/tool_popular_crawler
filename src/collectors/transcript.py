@@ -34,6 +34,7 @@ DEEPGRAM_MODELS_URL = "https://api.deepgram.com/v1/models"
 DEEPGRAM_PROJECTS_URL = "https://api.deepgram.com/v1/projects"
 DEEPGRAM_LIST_TIMEOUT_S = 30
 DEEPGRAM_TIMEOUT_S = 300
+LANGUAGE_CONFIDENCE_THRESHOLD = 0.5
 FFMPEG_TIMEOUT_S = 600
 # Chỉ chép lời 10 phút: hook và cấu trúc nằm ở đầu video, Jev chỉ đọc 3000 ký tự đầu,
 # còn livestream 3 giờ sẽ tốn ~3 phút Deepgram, tiền và một prompt LLM rất dài.
@@ -53,6 +54,7 @@ STATUS_NO_SPEECH = "no_speech"
 STATUS_FAILED = "failed"
 NOTE_NO_SPEECH = "Không có thoại"
 NOTE_FAILED = "Chưa lấy được thoại"
+NOTE_LANGUAGE_UNCERTAIN = "Không chắc ngôn ngữ thoại, đã dùng tiếng Việt"
 _STATUS_NOTES = {STATUS_NO_SPEECH: NOTE_NO_SPEECH, STATUS_FAILED: NOTE_FAILED}
 _CACHED_STATUSES = (STATUS_OK, STATUS_NO_SPEECH)
 
@@ -120,9 +122,10 @@ def extract_audio(src: Path | str, dst: Path | str, start_s: int = 0) -> Path | 
 
 # --- speech-to-text --------------------------------------------------------
 
-def _parse_deepgram(payload: Any) -> dict:
+def _parse_deepgram(payload: Any, language: str = "") -> dict:
     try:
-        alt = payload["results"]["channels"][0]["alternatives"][0]
+        channel = payload["results"]["channels"][0]
+        alt = channel["alternatives"][0]
     except (KeyError, IndexError, TypeError) as exc:
         raise ServiceError("deepgram", "Deepgram trả về dữ liệu không đúng định dạng.") from exc
 
@@ -137,21 +140,27 @@ def _parse_deepgram(payload: Any) -> dict:
             "start": float(raw.get("start") or 0.0),
             "end": float(raw.get("end") or 0.0),
         })
+    confidence = channel.get("language_confidence")
+    text = str(alt.get("transcript") or "").strip()
+    # Không có thoại thì ngôn ngữ "phát hiện" chỉ là đoán (độ tin cậy ~0): bỏ trống.
     return {
-        "text": str(alt.get("transcript") or "").strip(),
+        "text": text,
         "duration": float(duration),
         "words": words,
+        "language": str(channel.get("detected_language") or language or "") if text else "",
+        "language_confidence": float(confidence) if confidence is not None and text else None,
     }
 
 
 def transcribe_deepgram(path: Path | str, api_key: str, stt: dict, keyterms: list[str]) -> dict:
-    """Gửi file mp3 tới Deepgram /v1/listen. Trả {"text", "duration" (giây), "words"}.
+    """Gửi file mp3 tới Deepgram /v1/listen; trả text, duration, words và ngôn ngữ.
 
     Raises: AuthError (401/403), QuotaError (402, hoặc 429/529 quá số lần thử), NetworkError.
     """
     params: list[tuple[str, str]] = [
         ("model", stt["model"]),
-        ("language", stt["language"]),
+        *([("detect_language", "vi"), ("detect_language", "en")]
+          if stt.get("auto_language", True) else [("language", stt["language"])]),
         ("smart_format", "true"),
     ]
     params += [("keyterm", term) for term in keyterms]
@@ -165,7 +174,8 @@ def transcribe_deepgram(path: Path | str, api_key: str, stt: dict, keyterms: lis
         resp.raise_for_status()
         return resp.json()
 
-    return _parse_deepgram(with_retry(_post, service="deepgram"))
+    language = "" if stt.get("auto_language", True) else stt["language"]
+    return _parse_deepgram(with_retry(_post, service="deepgram"), language)
 
 
 @functools.lru_cache(maxsize=1)
@@ -175,11 +185,13 @@ def _load_whisper(model_size: str) -> Any:
     return WhisperModel(model_size, device="cpu", compute_type="int8", download_root=str(config.MODELS_DIR))
 
 
-def transcribe_local(path: Path | str, model_size: str) -> dict:
-    """faster-whisper chạy CPU, tiếng Việt, có timestamp từng từ. Cùng định dạng với Deepgram."""
+def transcribe_local(path: Path | str, model_size: str, stt: dict | None = None) -> dict:
+    """faster-whisper chạy CPU, tự nhận ngôn ngữ hoặc dùng cấu hình, có timestamp từng từ."""
+    stt = stt if stt is not None else {}
+    language = None if stt.get("auto_language", True) else stt.get("language", "vi")
     with _WHISPER_LOCK:
         model = _load_whisper(model_size)
-        segments, info = model.transcribe(str(path), language="vi", word_timestamps=True)
+        segments, info = model.transcribe(str(path), language=language, word_timestamps=True)
         texts: list[str] = []
         words: list[dict] = []
         for seg in segments:  # segments chạy dần khi đọc: phải đọc hết trong khóa
@@ -190,7 +202,9 @@ def transcribe_local(path: Path | str, model_size: str) -> dict:
                 token = w.word.strip()
                 if token:
                     words.append({"punctuated_word": token, "start": float(w.start), "end": float(w.end)})
-    return {"text": " ".join(texts), "duration": float(info.duration), "words": words}
+    return {"text": " ".join(texts), "duration": float(info.duration), "words": words,
+            "language": getattr(info, "language", "") or language or "",
+            "language_confidence": None}
 
 
 def check_key(api_key: str, stt: dict | None = None) -> None:
@@ -290,46 +304,64 @@ def _apply_cached(video: Video, text: str, status: str) -> float:
     stored = db.get_video(video.video_id)
     hook = (stored.hook if stored and stored.hook else "") or first_lines_hook(video.caption, text)
     _set_fields(video, text, status, hook)
+    if stored:
+        video.transcript_language = stored.transcript_language
+        video.transcript_vi = stored.transcript_vi
     return 0.0
 
 
 def _save(video: Video, text: str, status: str, words: list[dict], minutes: float) -> float:
     hook = hook_3s(words) or first_lines_hook(video.caption, text)
     _set_fields(video, text, status, hook)
-    db.save_transcript(video.video_id, text, status, hook)
+    db.save_transcript(video.video_id, text, status, hook,
+                       transcript_language=video.transcript_language)
     return minutes
 
 
 def _transcribe(audio: Path, api_key: str, stt: dict, keyterms: list[str],
                 warnings: list[str]) -> tuple[dict | None, float]:
     """Trả (kết quả, phút Deepgram đã tính phí); ghi cảnh báo hạn mức và trạng thái dự phòng."""
+    minutes = 0.0
+    uncertain = False
     try:
-        result = None
-        try:
-            result = transcribe_deepgram(audio, api_key, stt, keyterms)
-        finally:
-            callback = getattr(_usage, "callback", None)
-            if callback is not None:
-                callback(result["duration"] / 60.0 if result is not None else 0.0)
-        return result, result["duration"] / 60.0
+        for attempt in range(2):
+            result = None
+            call_settings = {**stt, "auto_language": False, "language": "vi"} if attempt else stt
+            try:
+                result = transcribe_deepgram(audio, api_key, call_settings, keyterms)
+            finally:
+                billed = result["duration"] / 60.0 if result is not None else 0.0
+                minutes += billed
+                callback = getattr(_usage, "callback", None)
+                if callback is not None:
+                    callback(billed)
+            confidence = result.get("language_confidence")
+            if (attempt == 0 and stt.get("auto_language", True)
+                    and confidence is not None and confidence < LANGUAGE_CONFIDENCE_THRESHOLD):
+                uncertain = True
+                continue
+            if uncertain:
+                result["language"] = "vi"
+                result["language_note"] = NOTE_LANGUAGE_UNCERTAIN
+            return result, minutes
     except QuotaError as exc:
         log.warning("Deepgram không dùng được: %s", exc)
 
     warning = "Tài khoản Deepgram đã hết credit/hạn mức."
     if stt.get("fallback") != "local_whisper":
         warnings.append(f"{warning} Không dùng local whisper (đã tắt dự phòng).")
-        return None, 0.0
+        return None, minutes
 
     model_size = stt.get("whisper_model", "small")
     log.info("Chuyển sang faster-whisper (%s) chạy máy", model_size)
     try:
-        result = transcribe_local(audio, model_size)
+        result = transcribe_local(audio, model_size, stt)
         warnings.append(f"{warning} Đã dùng local whisper.")
-        return result, 0.0
+        return result, minutes
     except Exception:
         log.exception("faster-whisper lỗi, bỏ qua thoại của video")
         warnings.append(f"{warning} Đã thử local whisper nhưng không lấy được thoại.")
-        return None, 0.0
+        return None, minutes
 
 
 def _remove(path: Path | None) -> None:
@@ -387,6 +419,10 @@ def get_transcript(video: Video, api_key: str, stt_settings: dict,
             result, billed = _transcribe(audio, api_key, stt_settings, keyterms,
                                          warnings if warnings is not None else [])
             minutes += billed
+            if result is not None:
+                video.transcript_language = result.get("language") or video.transcript_language
+                if result.get("language_note"):
+                    _add_note(video, result["language_note"])
             if result is None:
                 return _save(video, "", STATUS_FAILED, [], minutes)
             if result["text"]:

@@ -169,7 +169,8 @@ def test_transcribe_deepgram_sends_params_keyterms_and_headers_then_parses(tmp_p
     assert sent["url"] == "https://api.deepgram.com/v1/listen"
     assert sent["kwargs"]["params"] == [
         ("model", "nova-3"),
-        ("language", "vi"),
+        ("detect_language", "vi"),
+        ("detect_language", "en"),
         ("smart_format", "true"),
         ("keyterm", "Thông tư 02"),
         ("keyterm", "GPP"),
@@ -188,6 +189,47 @@ def test_transcribe_deepgram_sends_params_keyterms_and_headers_then_parses(tmp_p
         {"punctuated_word": "nhà", "start": 0.4, "end": 0.7},
         {"punctuated_word": "thuốc", "start": 0.7, "end": 1.1},
     ]
+    assert result["language"] == ""
+    assert result["language_confidence"] is None
+
+
+def test_transcribe_deepgram_fixed_language_and_detected_language(tmp_path, monkeypatch):
+    audio = tmp_path / "a.mp3"
+    audio.write_bytes(b"audio")
+    sent = []
+    payload = {"metadata": {"duration": 1}, "results": {"channels": [{
+        "detected_language": "en", "language_confidence": 0.9,
+        "alternatives": [{"transcript": "Hello", "words": []}],
+    }]}}
+    monkeypatch.setattr(transcript.requests, "post",
+                        lambda url, **kwargs: (sent.append(kwargs["params"]) or FakeResponse(200, payload)))
+    result = transcript.transcribe_deepgram(audio, "k", STT, [])
+    assert result["language"] == "en"
+    assert result["language_confidence"] == 0.9
+    monkeypatch.setattr(transcript.requests, "post",
+                        lambda url, **kwargs: (sent.append(kwargs["params"]) or FakeResponse(200, DG_PAYLOAD)))
+    result = transcript.transcribe_deepgram(audio, "k", {**STT, "auto_language": False, "language": "en"}, [])
+    assert ("language", "en") in sent[-1]
+    assert not any(key == "detect_language" for key, _ in sent[-1])
+    assert result["language"] == "en"
+    assert result["language_confidence"] is None
+
+
+def test_transcribe_deepgram_silent_audio_has_no_language_and_no_retry(tmp_path, monkeypatch):
+    # Deepgram still "detects" a language (confidence ~0) on audio without speech: it must not
+    # be labelled English nor trigger the paid low-confidence retry.
+    audio = tmp_path / "a.mp3"
+    audio.write_bytes(b"audio")
+    calls = []
+    payload = {"metadata": {"duration": 60}, "results": {"channels": [{
+        "detected_language": "en", "language_confidence": 0.0,
+        "alternatives": [{"transcript": "", "words": []}],
+    }]}}
+    monkeypatch.setattr(transcript.requests, "post",
+                        lambda url, **kwargs: (calls.append(kwargs["params"]) or FakeResponse(200, payload)))
+    result, minutes = transcript._transcribe(audio, "k", STT, [], [])
+    assert result["language"] == "" and result["language_confidence"] is None
+    assert len(calls) == 1 and minutes == 1.0
 
 
 def test_transcribe_deepgram_401_raises_auth_error_without_retrying(tmp_path, monkeypatch):
@@ -248,7 +290,7 @@ def test_check_key_uses_given_stt_model_and_language(monkeypatch):
                                   "metadata": {"duration": 1.0}})
 
     monkeypatch.setattr(transcript.requests, "post", fake_post)
-    transcript.check_key("good-key", {**STT, "model": "nova-2-general", "language": "en"})
+    transcript.check_key("good-key", {**STT, "model": "nova-2-general", "language": "en", "auto_language": False})
     assert sent["params"]["model"] == "nova-2-general"
     assert sent["params"]["language"] == "en"
 
@@ -359,7 +401,10 @@ def fresh_whisper_cache():
     transcript._load_whisper.cache_clear()
 
 
-def test_transcribe_local_uses_cpu_int8_vi_word_timestamps(monkeypatch, fresh_whisper_cache):
+@pytest.mark.parametrize("settings, expected_language", [
+    ({}, None), ({"auto_language": False, "language": "en"}, "en"),
+])
+def test_transcribe_local_uses_cpu_int8_word_timestamps(monkeypatch, fresh_whisper_cache, settings, expected_language):
     created: dict[str, Any] = {}
 
     class FakeWord:
@@ -372,6 +417,7 @@ def test_transcribe_local_uses_cpu_int8_vi_word_timestamps(monkeypatch, fresh_wh
 
     class FakeInfo:
         duration = 4.2
+        language = "en"
 
     class FakeWhisperModel:
         def __init__(self, size: str, device: str, compute_type: str, download_root: str) -> None:
@@ -391,13 +437,15 @@ def test_transcribe_local_uses_cpu_int8_vi_word_timestamps(monkeypatch, fresh_wh
     fake_module.WhisperModel = FakeWhisperModel  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "faster_whisper", fake_module)
 
-    result = transcript.transcribe_local(Path("a.mp3"), "small")
+    result = transcript.transcribe_local(Path("a.mp3"), "small", settings)
 
     assert created["init"] == ("small", "cpu", "int8", str(config.MODELS_DIR))
-    assert created["call"] == ("a.mp3", "vi", True)
+    assert created["call"] == ("a.mp3", expected_language, True)
     assert result == {
         "text": "Chủ nhà thuốc.",
         "duration": 4.2,
+        "language": "en",
+        "language_confidence": None,
         "words": [
             {"punctuated_word": "Chủ", "start": 0.1, "end": 0.4},
             {"punctuated_word": "nhà", "start": 0.4, "end": 0.7},
@@ -415,6 +463,7 @@ class Env:
         self.cached: tuple[str, str] | None = None
         self.stored: Video | None = None
         self.saved: list[tuple[str, str, str, str]] = []
+        self.saved_languages: list[str] = []
         self.download_ok = True
         self.extract_ok = True
         self.downloads = 0
@@ -425,6 +474,7 @@ class Env:
         self.dg_calls: list[tuple[Path, str, dict, list[str]]] = []
         self.deepgram: Any = None
         self.local_calls: list[tuple[Path, str]] = []
+        self.local_settings: list[dict] = []
         self.local: Any = None
 
 
@@ -456,16 +506,20 @@ def env(monkeypatch) -> Env:
             raise e.deepgram
         return e.deepgram
 
-    def fake_local(path: Path, model_size: str) -> Any:
+    def fake_local(path: Path, model_size: str, stt: dict) -> Any:
         e.local_calls.append((Path(path), model_size))
+        e.local_settings.append(stt)
         if isinstance(e.local, BaseException):
             raise e.local
         return e.local
 
     monkeypatch.setattr(transcript.db, "get_transcript", lambda video_id: e.cached)
     monkeypatch.setattr(transcript.db, "get_video", lambda video_id: e.stored)
-    monkeypatch.setattr(transcript.db, "save_transcript",
-                        lambda video_id, text, status, hook: e.saved.append((video_id, text, status, hook)))
+    def fake_save(video_id, text, status, hook, transcript_language=""):
+        e.saved.append((video_id, text, status, hook))
+        e.saved_languages.append(transcript_language)
+
+    monkeypatch.setattr(transcript.db, "save_transcript", fake_save)
     monkeypatch.setattr(transcript, "download_audio", fake_download)
     monkeypatch.setattr(transcript, "extract_audio", fake_extract)
     monkeypatch.setattr(transcript, "transcribe_deepgram", fake_deepgram)
@@ -502,6 +556,7 @@ def test_quota_error_falls_back_to_local_whisper_and_warns(env, tmp_path):
 
     assert minutes == 0.0
     assert env.local_calls == [(env.audio_path, "small")]
+    assert env.local_settings == [STT]
     assert video.transcript == "Chủ nhà thuốc."
     assert video.transcript_status == "ok"
     assert video.hook == TIMED_HOOK
@@ -612,7 +667,7 @@ def test_long_video_without_speech_stops_after_the_searched_minutes(env, tmp_pat
 
 def test_cached_ok_transcript_skips_download_and_reuses_stored_hook(env, tmp_path):
     env.cached = ("Chủ nhà thuốc.", "ok")
-    env.stored = Video(video_id="vid1", url="", page_url="", hook="Hook đã lưu")
+    env.stored = Video(video_id="vid1", url="", page_url="", hook="Hook đã lưu", transcript_language="en")
     video = _video()
 
     minutes = transcript.get_transcript(video, "dg-key", STT, [], tmp_path / "tmp")
@@ -624,6 +679,7 @@ def test_cached_ok_transcript_skips_download_and_reuses_stored_hook(env, tmp_pat
     assert video.transcript == "Chủ nhà thuốc."
     assert video.transcript_status == "ok"
     assert video.hook == "Hook đã lưu"
+    assert video.transcript_language == "en"
 
 
 def test_cached_no_speech_adds_note_and_falls_back_to_caption_hook(env, tmp_path):
@@ -665,3 +721,97 @@ def test_auth_error_propagates_without_local_fallback_and_cleans_files(env, tmp_
     assert warnings == []
     assert not env.audio_path.exists()
     assert not env.raw_path.exists()
+
+
+def test_low_language_confidence_retries_once_in_vi_and_bills_both_calls(env, tmp_path, monkeypatch):
+    results = iter([
+        {"text": "Uncertain", "duration": 60.0, "words": [], "language": "en", "language_confidence": 0.49},
+        {"text": TIMED_HOOK, "duration": 60.0, "words": TIMED_WORDS, "language": "vi", "language_confidence": 0.1},
+    ])
+    calls = []
+
+    def fake_deepgram(audio, key, stt, keyterms):
+        calls.append((audio, dict(stt)))
+        return next(results)
+
+    monkeypatch.setattr(transcript, "transcribe_deepgram", fake_deepgram)
+    usage = []
+    video = _video()
+    with transcript.observe_usage(usage.append):
+        minutes = transcript.get_transcript(video, "k", STT, [], tmp_path)
+    assert minutes == 2.0
+    assert usage == [1.0, 1.0]
+    assert len(calls) == 2 and calls[0][0] == calls[1][0]
+    assert calls[1][1]["auto_language"] is False
+    assert calls[1][1]["language"] == "vi"
+    assert video.transcript == TIMED_HOOK
+    assert video.transcript_language == "vi"
+    assert video.notes == [transcript.NOTE_LANGUAGE_UNCERTAIN]
+    assert env.saved_languages == ["vi"]
+
+
+@pytest.mark.parametrize("auto, confidence", [(True, None), (True, 0.5), (False, 0.1)])
+def test_language_detection_does_not_retry_when_confident_unknown_or_disabled(env, tmp_path, auto, confidence):
+    env.deepgram = {"text": "Hello", "duration": 60.0, "words": [],
+                    "language": "en", "language_confidence": confidence}
+    video = _video()
+    minutes = transcript.get_transcript(video, "k", {**STT, "auto_language": auto}, [], tmp_path)
+    assert minutes == 1.0
+    assert len(env.dg_calls) == 1
+    assert video.transcript_language == "en"
+    assert env.saved_languages == ["en"]
+    assert video.notes == []
+
+
+def test_transcript_language_database_roundtrip_migration_and_cache_restore(tmp_path, monkeypatch):
+    path = tmp_path / "old.db"
+    with transcript.db.conn(path) as connection:
+        connection.executescript(transcript.db.SCHEMA
+                                 .replace("    transcript_language TEXT,\n", "")
+                                 .replace("    transcript_vi     TEXT,\n", ""))
+        connection.execute("INSERT INTO videos (video_id, transcript, transcript_status, hook) "
+                           "VALUES ('vid1', 'Hello', 'ok', 'Hello')")
+    transcript.db.init_db(path)
+    transcript.db.init_db(path)
+    assert transcript.db.get_video("vid1", path).transcript_language == ""
+    assert transcript.db.get_video("vid1", path).transcript_vi == ""
+    transcript.db.save_transcript("vid1", "Hello", "ok", "Hello", path,
+                                  transcript_language="en", transcript_vi="Xin chào")
+    transcript.db.upsert_video(_video(), path)
+    transcript.db.save_transcript("vid1", "", "", "", path)
+    assert transcript.db.get_video("vid1", path).transcript_language == "en"
+    assert transcript.db.get_video("vid1", path).transcript_vi == "Xin chào"
+    monkeypatch.setattr(transcript.config, "DB_PATH", path)
+    monkeypatch.setattr(transcript, "download_audio", lambda *args: pytest.fail("cache must skip audio"))
+    video = _video()
+    assert transcript.get_transcript(video, "k", STT, [], tmp_path) == 0.0
+    assert video.transcript == "Hello"
+    assert video.transcript_language == "en"
+    assert video.transcript_vi == "Xin chào"
+    transcript.db.upsert_video(_video(video_id="other", transcript_language="en", transcript_vi="Bản dịch"), path)
+    assert transcript.db.get_video("other", path).transcript_language == "en"
+    assert transcript.db.get_video("other", path).transcript_vi == "Bản dịch"
+
+
+def test_low_confidence_retry_quota_keeps_first_call_billing(env, tmp_path, monkeypatch):
+    calls = []
+
+    def fake_deepgram(audio, key, stt, keyterms):
+        calls.append(dict(stt))
+        if len(calls) == 2:
+            raise QuotaError("deepgram", QUOTA_MSG)
+        return {"text": "Uncertain", "duration": 60.0, "words": [],
+                "language": "en", "language_confidence": 0.1}
+
+    monkeypatch.setattr(transcript, "transcribe_deepgram", fake_deepgram)
+    env.local = {"text": "Hello", "duration": 60.0, "words": [],
+                 "language": "en", "language_confidence": None}
+    usage = []
+    video = _video()
+    with transcript.observe_usage(usage.append):
+        minutes = transcript.get_transcript(video, "k", STT, [], tmp_path)
+    assert minutes == 1.0
+    assert usage == [1.0, 0.0]
+    assert video.transcript == "Hello"
+    assert video.transcript_language == "en"
+    assert env.local_settings == [STT]

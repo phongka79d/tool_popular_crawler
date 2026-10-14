@@ -38,6 +38,8 @@ class Video:
     # --- transcript (collectors/transcript.py) ---
     transcript: str = ""
     transcript_status: str = ""       # "ok" | "no_speech" | "failed" | "images" | ""
+    transcript_language: str = ""     # BCP-47; "" khi chưa biết ngôn ngữ thoại
+    transcript_vi: str = ""           # Bản dịch tiếng Việt của thoại tiếng Anh
     hook: str = ""
     # --- analysis ---
     jev: dict = field(default_factory=dict)   # jev_client.interpret_labels() output

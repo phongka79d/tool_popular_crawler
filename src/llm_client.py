@@ -394,6 +394,21 @@ def _chat(
     return _reply_text(resp), _total_tokens(resp), False
 
 
+def translate_to_vi(base_url: str, api_key: str, model: str, text: str) -> tuple[str, int]:
+    """Dịch thoại sang tiếng Việt; giữ bản gốc cho phân tích và báo usage như các lượt LLM khác."""
+    client = make_client(base_url, api_key)
+    messages = [
+        {"role": "system", "content": "Dịch sát nghĩa sang tiếng Việt tự nhiên, giữ tên riêng/thương hiệu. "
+                                     "Không thêm bình luận, chỉ trả bản dịch."},
+        {"role": "user", "content": text},
+    ]
+    translated, usage, _ = _chat(client, model, messages, temperature=None, json_mode=False,
+                                reasoning_effort=DEFAULT_REASONING_EFFORT, thinking=False)
+    if not translated:
+        raise ServiceError("llm", "LLM không trả bản dịch thoại sang tiếng Việt.")
+    return translated, usage
+
+
 def write_analysis(client: OpenAI, model: str, video: Video, labels: dict, settings: dict) -> dict:
     """Viết phân tích và gợi ý nhân bản cho 1 video (PLAN mục 7).
 

@@ -12,7 +12,6 @@ from typing import Any
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
-from openpyxl.chart import BarChart, Reference
 from openpyxl.formatting.rule import ColorScaleRule, DataBarRule, FormulaRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
@@ -25,7 +24,6 @@ from normalize import to_vn_datetime
 
 log = logging.getLogger(__name__)
 
-SHEET_OVERVIEW = "Tổng quan"
 SHEET_DETAIL = "Chi tiết video"
 SHEET_POST_DETAIL = "Chi tiết bài đăng"
 SHEET_SUMMARY = "Tổng hợp công thức"
@@ -72,7 +70,12 @@ HEADER_FONT = Font(name="Calibri", bold=True, color="FFFFFF", size=11)
 TITLE_FONT = Font(name="Calibri", bold=True, color="234E63", size=14)
 BODY_FONT = Font(name="Calibri", color="243746", size=11)
 ZEBRA_FILL = PatternFill("solid", fgColor="F3F7FA")
-ROW_BORDER = Border(bottom=Side(style="hair", color="DCE5EB"))
+TABLE_BORDER = Border(
+    left=Side(style="thin", color="BFC7CE"),
+    right=Side(style="thin", color="BFC7CE"),
+    top=Side(style="thin", color="BFC7CE"),
+    bottom=Side(style="thin", color="BFC7CE"),
+)
 TOP = Alignment(vertical="top")
 TOP_WRAP = Alignment(vertical="top", wrap_text=True)
 HEADER_ALIGN = Alignment(vertical="center", wrap_text=True)
@@ -185,6 +188,9 @@ COLUMNS: tuple[_Column, ...] = (
     _Column("Tóm tắt", lambda v, _: _llm(v, "tom_tat"), long=True),
     _Column("Caption", lambda v, _: v.caption, long=True),
     _Column("Nội dung thoại", lambda v, _: v.transcript, long=True),
+    _Column("Ngôn ngữ thoại", lambda v, _: {"vi": "Tiếng Việt", "en": "Tiếng Anh"}.get(
+        getattr(v, "transcript_language", ""), getattr(v, "transcript_language", "")), width=18),
+    _Column("Thoại dịch tiếng Việt", lambda v, _: getattr(v, "transcript_vi", ""), long=True),
     _Column("Hook gốc", lambda v, _: _llm(v, "hook_goc") or v.hook, long=True),
     _Column("Góc nhìn", lambda v, _: _llm(v, "goc_nhin"), long=True),
     _Column("Mẫu hook điền chỗ trống", lambda v, _: _llm(v, "mau_hook_dien_cho_trong"), long=True),
@@ -230,17 +236,15 @@ def export(
 
     run_log = run_log or {}
     wb = Workbook()
-    overview = wb.active
-    overview.title = SHEET_OVERVIEW
+    detail = wb.active
     post_run = set((run_log.get("params") or {}).get("formats") or []) == {"post"}
-    _write_overview(overview, videos, summary or {}, run_log, moment, post_run=post_run)
-    detail = wb.create_sheet(SHEET_POST_DETAIL if post_run else SHEET_DETAIL)
+    detail.title = SHEET_POST_DETAIL if post_run else SHEET_DETAIL
     _write_details(detail, videos, post_run=post_run)
     _write_summary(wb.create_sheet(SHEET_SUMMARY), summary or {}, post_run=post_run, moment=moment)
-    _write_run_log(wb.create_sheet(SHEET_LOG), run_log, moment=moment)
-    for ws, colour in zip(wb.worksheets, ("234E63", "287D8E", "55A58B", "8295A3")):
+    _write_run_log(wb.create_sheet(SHEET_LOG), run_log, videos, moment=moment, post_run=post_run)
+    for ws, colour in zip(wb.worksheets, ("287D8E", "55A58B", "8295A3")):
         ws.sheet_properties.tabColor = colour
-        ws.sheet_view.showGridLines = False
+        ws.sheet_view.showGridLines = True
         ws.page_setup.orientation = "landscape"
         ws.page_setup.paperSize = ws.PAPERSIZE_A3 if ws is detail else ws.PAPERSIZE_A4
         ws.page_setup.fitToWidth = 1
@@ -351,6 +355,7 @@ def _put(
 # Bài đăng không có lượt xem, thời lượng hay thoại: ẩn các cột luôn trống này (vẫn giữ để bố cục hai loại file giống nhau).
 _VIDEO_ONLY_HEADERS = frozenset({
     "Thời lượng (giây)", "View", "View/Follower", "Tỷ lệ tương tác", "Tỷ lệ share", "Nội dung thoại",
+    "Ngôn ngữ thoại", "Thoại dịch tiếng Việt",
 })
 
 
@@ -358,14 +363,15 @@ def _write_details(ws: Worksheet, videos: list[Video], *, post_run: bool = False
     groups = (
         (1, 7, "Thông tin bài", "DCEAF3"),
         (8, 16, "Chỉ số", "DDF0E8"),
-        (17, 24, "Nội dung", "E6EFF3"),
-        (25, 34, "Công thức (Jev)", "CCE5E2"),
-        (35, 39, "Gợi ý làm lại", "E8F2EF"),
+        (17, 26, "Nội dung", "E6EFF3"),
+        (27, 36, "Công thức (Jev)", "CCE5E2"),
+        (37, 41, "Gợi ý làm lại", "E8F2EF"),
     )
     for first, last, title, colour in groups:
         ws.merge_cells(start_row=1, start_column=first, end_row=1, end_column=last)
         for c in range(first, last + 1):
             ws.cell(1, c).fill = PatternFill("solid", fgColor=colour)
+            ws.cell(1, c).border = TABLE_BORDER
         cell = _put(ws, 1, first, title, align=HEADER_ALIGN)
         cell.font = TITLE_FONT
     has_images = post_run and any(v.transcript_status == "images" and v.transcript for v in videos)
@@ -374,6 +380,7 @@ def _write_details(ws: Worksheet, videos: list[Video], *, post_run: bool = False
         header = _put(ws, 2, c, title, align=HEADER_ALIGN)
         header.font = HEADER_FONT
         header.fill = HEADER_FILL
+        header.border = TABLE_BORDER
         width = 16 if col.link else LONG_WIDTH if col.long else col.width
         ws.column_dimensions[get_column_letter(c)].width = width
         if post_run and col.header in _VIDEO_ONLY_HEADERS and not (has_images and col.header == "Nội dung thoại"):
@@ -389,7 +396,7 @@ def _write_details(ws: Worksheet, videos: list[Video], *, post_run: bool = False
             fmt = FMT_DEC2 if col.header == "Hệ số so trung vị kênh" else col.fmt
             cell = _put(ws, r, c, col.get(video, r - 2), fmt, TOP_WRAP if wrap else TOP)
             cell.font = BODY_FONT
-            cell.border = ROW_BORDER
+            cell.border = TABLE_BORDER
             if r % 2:
                 cell.fill = ZEBRA_FILL
             if wrap and isinstance(cell.value, str):
@@ -448,6 +455,7 @@ def _write_table(
         cell = _put(ws, header_row, c, h, align=HEADER_ALIGN)
         cell.font = HEADER_FONT
         cell.fill = HEADER_FILL
+        cell.border = TABLE_BORDER
     ws.row_dimensions[header_row].height = 34
     for i, values in enumerate(rows, start=1):
         r = header_row + i
@@ -455,7 +463,7 @@ def _write_table(
             fmt = fmts[c - 1] if fmts else None
             cell = _put(ws, r, c, value, fmt, TOP_WRAP if c in wrap else TOP)
             cell.font = BODY_FONT
-            cell.border = ROW_BORDER
+            cell.border = TABLE_BORDER
             if i % 2:
                 cell.fill = ZEBRA_FILL
         height = max((_text_height(str(values[c - 1] or ""), 60) for c in wrap), default=24)
@@ -508,7 +516,7 @@ def _write_summary(ws: Worksheet, summary: dict, *, post_run: bool = False, mome
     note = _put(ws, note_row, 1, text, align=TOP_WRAP)
     note.font = BODY_FONT
     note.fill = PatternFill("solid", fgColor="E8F2EF")
-    note.border = ROW_BORDER
+    note.border = TABLE_BORDER
     ws.row_dimensions[note_row].height = min(240, _text_height(text, chars_per_line=80))
 
 
@@ -547,7 +555,7 @@ def _page_row(page: dict) -> list[Any]:
 
 
 def _param_rows(params: dict) -> list[list[Any]]:
-    """Render scan parameters identically in the overview and run log."""
+    """Render the selected scan parameters in the run log."""
     rows = []
     for key, value in params.items():
         if key == "length_limits":
@@ -564,7 +572,9 @@ def _param_rows(params: dict) -> list[list[Any]]:
     return rows
 
 
-def _write_run_log(ws: Worksheet, run_log: dict, *, moment: datetime) -> None:
+def _write_run_log(
+    ws: Worksheet, run_log: dict, videos: list[Video], *, moment: datetime, post_run: bool,
+) -> None:
     for letter, width in zip("ABCDEFGH", (28, 60, 14, 12, 14, 14, 30, 60)):
         ws.column_dimensions[letter].width = width
 
@@ -582,6 +592,25 @@ def _write_run_log(ws: Worksheet, run_log: dict, *, moment: datetime) -> None:
         ],
         [None, FMT_DATETIME],
         wrap={2},
+    )
+    suggestion_counts = [
+        sum(_cell_value(_suggestion(v, index)) is not None for index in range(3))
+        for v in videos
+    ]
+    unit = "bài đăng" if post_run else "video"
+    row = _write_table(
+        ws, row, "Kết quả lượt chạy", ["Chỉ số", "Giá trị"],
+        [
+            ["Số kênh", len(pages) if pages else len({v.page_url for v in videos})],
+            [f"Số {unit} quét được", sum(p.get("scanned") or 0 for p in pages)],
+            ["Đạt ngưỡng", sum(p.get("passed") or 0 for p in pages) if pages else len(videos)],
+            ["Đã phân tích", sum(p.get("analyzed") or 0 for p in pages) if pages
+             else sum(bool(v.jev or v.llm) for v in videos)],
+            ["Số mục xuất", len(videos)],
+            ["Gợi ý giữ lại", sum(suggestion_counts)],
+            ["Video/bài có gợi ý", sum(count > 0 for count in suggestion_counts)],
+        ],
+        [None, FMT_INT], wrap={1},
     )
     row = _write_table(
         ws, row, "Tham số đã chọn", ["Tham số", "Giá trị"],
@@ -616,92 +645,6 @@ def _write_run_log(ws: Worksheet, run_log: dict, *, moment: datetime) -> None:
     )
     ws.freeze_panes = "B3"
 
-
-def _write_overview(
-    ws: Worksheet, videos: list[Video], summary: dict, run_log: dict,
-    moment: datetime, *, post_run: bool,
-) -> None:
-    ws.column_dimensions["A"].width = 44
-    ws.column_dimensions["B"].width = 28
-    ws.column_dimensions["C"].width = 3
-    for letter in "DEFGHIJKLM":
-        ws.column_dimensions[letter].width = 10
-    ws.merge_cells("A1:M1")
-    title = _put(ws, 1, 1, "VIDEO CÔNG THỨC • BÁO CÁO PHÂN TÍCH")
-    title.font = Font(name="Calibri", size=22, bold=True, color="234E63")
-    ws.row_dimensions[1].height = 40
-    _put(ws, 2, 1, "Xuất lúc").font = BODY_FONT
-    _put(ws, 2, 2, moment.replace(tzinfo=None), FMT_DATETIME).font = BODY_FONT
-    pages = run_log.get("pages") or []
-    usage = run_log.get("usage") or {}
-    unit = "bài đăng" if post_run else "video"
-    suggestion_counts = [
-        sum(_cell_value(_suggestion(v, index)) is not None for index in range(3))
-        for v in videos
-    ]
-    kpis = [
-        ["Số kênh", len(pages) if pages else len({v.page_url for v in videos})],
-        [f"Số {unit} quét được", sum(p.get("scanned") or 0 for p in pages)],
-        ["Đạt ngưỡng", sum(p.get("passed") or 0 for p in pages) if pages else len(videos)],
-        ["Đã phân tích", sum(p.get("analyzed") or 0 for p in pages) if pages
-         else sum(bool(v.jev or v.llm) for v in videos)],
-        ["Số mục xuất", len(videos)],
-        ["Gợi ý giữ lại", sum(suggestion_counts)],
-        ["Video/bài có gợi ý", sum(count > 0 for count in suggestion_counts)],
-        ["Token Jev", usage.get("jev_tokens", 0)],
-        ["Token LLM", usage.get("llm_tokens", 0)],
-        ["Phút Deepgram", usage.get("deepgram_minutes", 0.0)],
-        ["Model LLM", usage.get("llm_model", "")],
-    ]
-    row = _write_table(ws, 4, "Kết quả lượt chạy", ["Chỉ số", "Giá trị"], kpis, [None, FMT_INT], wrap={1, 2})
-    for index, (label, _) in enumerate(kpis, start=6):
-        if label == "Phút Deepgram":
-            ws.cell(index, 2).number_format = FMT_DEC2
-    params = run_log.get("params") or {}
-    row = _write_table(
-        ws, row, "Phạm vi quét", ["Tham số", "Giá trị"],
-        _param_rows(params), wrap={1, 2},
-    )
-    row = _write_table(
-        ws, row, "Thời gian chạy", ["Mục", "Giá trị"],
-        [["Bắt đầu", _fmt_time(run_log.get("started_at"))],
-         ["Kết thúc", _fmt_time(run_log.get("finished_at"))]], [None, FMT_DATETIME], wrap={2},
-    )
-    topics = summary.get("by_topic") or build_summary_tables(videos)["by_topic"]
-    table_row = max(42, row)
-    next_row = _write_table(
-        ws, table_row, "Phân bố chủ đề", ["Nhóm chủ đề", "Số bài" if post_run else "Số video"],
-        [[r.get("label"), r.get("count", 0)] for r in topics] or [["Chưa có dữ liệu", 0]],
-        [None, FMT_INT], wrap={1},
-    )
-    _add_overview_chart(ws, table_row + 1, max(1, len(topics)), "Phân bố chủ đề", "D23")
-    top = sorted(videos, key=_score_order)[:10]
-    _write_table(
-        ws, next_row, "Nội dung nổi bật", ["Nội dung", "Điểm công thức"],
-        [[_llm(v, "chu_de_bai") or v.caption[:80] or v.url, v.score] for v in top]
-        or [["Chưa có dữ liệu", 0]], [None, FMT_DEC1], wrap={1},
-    )
-    _add_overview_chart(ws, next_row + 1, max(1, len(top)), "Top nội dung theo điểm công thức", "D4")
-    ws.freeze_panes = "B6"
-    ws.print_title_rows = "1:2"
-    ws.print_area = f"A1:M{ws.max_row}"
-
-
-def _add_overview_chart(ws: Worksheet, header: int, count: int, title: str, anchor: str) -> None:
-    chart = BarChart()
-    chart.type = "bar"
-    chart.style = 10
-    chart.title = title
-    chart.add_data(Reference(ws, min_col=2, min_row=header, max_row=header + count), titles_from_data=True)
-    chart.set_categories(Reference(ws, min_col=1, min_row=header + 1, max_row=header + count))
-    chart.y_axis.scaling.min = 0
-    chart.y_axis.numFmt = FMT_INT
-    chart.series[0].graphicalProperties.solidFill = "55A58B"
-    chart.series[0].graphicalProperties.line.noFill = True
-    chart.legend = None
-    chart.width = 22
-    chart.height = 9
-    ws.add_chart(chart, anchor)
 
 
 def read_summary(path: Path) -> dict:

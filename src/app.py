@@ -39,7 +39,7 @@ SERVICE_LABELS = {"jev": "Jev", "deepgram": "Deepgram", "llm": "LLM"}
 DEFAULT_SETTINGS = {
     "jev": {"model": "", "yes_threshold": 0.5, "min_confidence": 0.6},
     "llm": {"base_url": "", "model": "", "temperature": 0.4},
-    "stt": {"provider": "deepgram", "model": "", "language": "vi",
+    "stt": {"provider": "deepgram", "model": "", "language": "vi", "auto_language": True,
             "keyterms_file": "config/keyterms.txt", "fallback": "local_whisper",
             "whisper_model": "small"},
     "scan": {"video_kinds": ["video", "reel"], "min_views": 10000, "min_ratio_follow": 0, "match_all": True,
@@ -322,19 +322,25 @@ def _render_deepgram_model(items: list[dict], settings: dict, tag: str, locked: 
     if not languages:
         st.error("Model này không có ngôn ngữ nào. Hãy chọn model khác.")
         return None
+    auto_language = st.checkbox(
+        "Tự nhận biết tiếng Việt / tiếng Anh", value=settings["stt"].get("auto_language", True),
+        key=f"svc_auto_lang_{tag[:12]}", disabled=locked,
+        help="Deepgram nghe audio và chọn tiếng Việt (vi) hoặc tiếng Anh (en) cho từng video. "
+             "Nếu độ tin cậy dưới 0,5, tool chép lại một lần bằng tiếng Việt.",
+    )
     codes = [lang["code"] for lang in languages]
     labels = {lang["code"]: f"{lang['label']} ({lang['code']})" for lang in languages}
     saved_language = settings["stt"]["language"]
-    if "vi" in codes:
-        index = codes.index("vi")
-    elif saved_language in codes:
+    if saved_language in codes:
         index = codes.index(saved_language)
+    elif "vi" in codes:
+        index = codes.index("vi")
     else:
         index = 0
-    language = st.selectbox("Ngôn ngữ thoại", codes, index=index, format_func=labels.__getitem__,
-                            key=f"svc_lang_{tag[:12]}_{model}", disabled=locked,
-                            help="Ngôn ngữ của video. Ưu tiên tiếng Việt (vi) khi model hỗ trợ.")
-    return {"model": model, "language": language}
+    language = st.selectbox("Ngôn ngữ thoại (khi tắt tự nhận biết)", codes, index=index, format_func=labels.__getitem__,
+                            key=f"svc_lang_{tag[:12]}_{model}", disabled=locked or auto_language,
+                            help="Ngôn ngữ cố định dùng khi tắt tự nhận biết tiếng Việt / tiếng Anh.")
+    return {"model": model, "language": language, "auto_language": auto_language}
 
 
 def _render_llm_model(items: list[dict], settings: dict, tag: str, locked: bool, base_url: str) -> dict:
@@ -410,7 +416,9 @@ def _check_selection(name: str, candidate: str, settings: dict, selection: dict)
     if name == "jev":
         jev_client.check_key(candidate, selection["model"])
     elif name == "deepgram":
-        transcript.check_key(candidate, {**settings["stt"], "model": selection["model"], "language": selection["language"]})
+        transcript.check_key(candidate, {**settings["stt"], "model": selection["model"],
+                                         "language": selection["language"],
+                                         "auto_language": selection.get("auto_language", True)})
     else:
         llm_client.check_key(selection["base_url"], candidate, selection["model"])
 
@@ -419,7 +427,8 @@ def _apply_selection(settings: dict, name: str, selection: dict) -> None:
     if name == "jev":
         settings["jev"]["model"] = selection["model"]
     elif name == "deepgram":
-        settings["stt"].update(model=selection["model"], language=selection["language"])
+        settings["stt"].update(model=selection["model"], language=selection["language"],
+                               auto_language=selection.get("auto_language", True))
     else:
         settings["llm"].update(base_url=selection["base_url"], model=selection["model"])
 

@@ -416,10 +416,38 @@ def run(
                     )
                 if not deepgram_calls and minutes and minutes > 0:
                     add_usage({"deepgram_minutes": float(minutes), "deepgram_calls": 1}, turn, video=video)
+                if video.transcript_language:
+                    language = {"vi": "tiếng Việt", "en": "tiếng Anh"}.get(
+                        video.transcript_language, video.transcript_language)
+                    say(f"chép lời xong: thoại {language}")
                 for warning in warnings:
                     with lock:
                         run_log["messages"].append(warning)
                     say(warning)
+                if (video.transcript_language.startswith("en") and video.transcript
+                        and not video.transcript_vi):
+                    say("LLM dịch thoại sang tiếng Việt…")
+                    try:
+                        (video.transcript_vi, _), _ = call_llm(
+                            turn, llm_client.translate_to_vi, settings["llm"]["base_url"],
+                            credentials["llm"], settings["llm"]["model"], video.transcript,
+                            tokens=lambda result: _tokens(result[1]), video=video,
+                        )
+                        db.save_transcript(
+                            video.video_id, video.transcript, video.transcript_status, video.hook,
+                            transcript_language=video.transcript_language, transcript_vi=video.transcript_vi,
+                        )
+                    except AuthError:
+                        raise
+                    except ServiceError as exc:
+                        note = "Chưa dịch được thoại sang tiếng Việt"
+                        if note not in video.notes:
+                            video.notes.append(note)
+                        warning = f"{note}: {_safe_message(exc, credentials)}"
+                        logger.warning("%s", warning)
+                        with lock:
+                            run_log["messages"].append(warning)
+                        say(warning)
             checkpoint()
             say("Jev gắn nhãn chủ đề, kiểu hook, cấu trúc…")
             raw, _ = call_jev(turn, jev_client.ask_labels, jev_instance(), video, taxonomy,

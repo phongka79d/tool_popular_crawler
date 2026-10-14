@@ -9,7 +9,7 @@ import pytest
 
 import llm_client
 from config import load_lines
-from errors import AuthError
+from errors import AuthError, ServiceError
 from models import Video
 
 
@@ -518,3 +518,44 @@ def test_shipped_keyterms_has_gpp_and_thong_tu():
     terms = load_lines("config/keyterms.txt")
     assert "GPP" in terms
     assert "thông tư" in terms
+
+
+def test_translate_to_vi_uses_plain_text_prompt_and_reports_usage(monkeypatch):
+    client, completions = fake_client(_reply("  Xin chào từ Acme.  ", total=23))
+    created = []
+    monkeypatch.setattr(llm_client, "make_client",
+                        lambda url, key: created.append((url, key)) or client)
+    reported = []
+    llm_client.meter_take()
+    with llm_client.observe_usage(reported.append):
+        translated, tokens = llm_client.translate_to_vi(
+            "https://llm.test/v1", "fake-key", "m-1", "Hello from Acme.")
+    meter = llm_client.meter_take()
+
+    assert (translated, tokens) == ("Xin chào từ Acme.", 23)
+    assert created == [("https://llm.test/v1", "fake-key")]
+    assert reported == [23]
+    assert meter["calls"] == 1
+    call, = completions.calls
+    assert call["model"] == "m-1"
+    assert "response_format" not in call
+    assert call["messages"][1] == {"role": "user", "content": "Hello from Acme."}
+    system = call["messages"][0]["content"]
+    assert "tiếng Việt tự nhiên" in system
+    assert "giữ tên riêng/thương hiệu" in system
+    assert "chỉ trả bản dịch" in system
+
+
+def test_translate_to_vi_rejects_empty_reply(monkeypatch):
+    client, _ = fake_client(_reply("   "))
+    monkeypatch.setattr(llm_client, "make_client", lambda *args: client)
+    with pytest.raises(ServiceError, match="không trả bản dịch"):
+        llm_client.translate_to_vi("https://llm.test/v1", "fake-key", "m-1", "Hello.")
+    llm_client.meter_take()
+
+
+def test_translate_to_vi_propagates_auth_error(monkeypatch):
+    client, _ = fake_client(AuthError("llm", "Key không hợp lệ"))
+    monkeypatch.setattr(llm_client, "make_client", lambda *args: client)
+    with pytest.raises(AuthError):
+        llm_client.translate_to_vi("https://llm.test/v1", "fake-key", "m-1", "Hello.")

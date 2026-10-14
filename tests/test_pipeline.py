@@ -7,8 +7,9 @@ from types import SimpleNamespace
 import pytest
 
 import pipeline
-from errors import AuthError, LoginRequired, NetworkError, QuotaError
+from errors import AuthError, LoginRequired, NetworkError, QuotaError, ServiceError
 from collectors.facebook import page_url_problem
+from collectors.transcript import get_transcript as get_cached_transcript
 from models import Page
 
 
@@ -962,3 +963,150 @@ def test_failed_jev_call_counts_without_tokens(harness):
     assert usage["jev_calls"] == 1
     assert usage["jev_tokens"] == 0
     assert any(not p.message and p.usage["jev_calls"] == 1 for p in harness.progress)
+
+
+@pytest.mark.parametrize("language,text,expected_calls", [
+    ("en", "Hello from Acme.", 1),
+    ("en-US", "Hello from Acme.", 1),
+    ("vi", "Xin chào.", 0),
+    ("", "Unknown language.", 0),
+    ("en", "", 0),
+])
+def test_translates_only_nonempty_english_transcript(
+        harness, monkeypatch, language, text, expected_calls):
+    calls = []
+    saved = []
+    original_inputs = []
+
+    def transcript(video, *args):
+        video.transcript = text
+        video.transcript_status = "ok" if text else "no_speech"
+        video.transcript_language = language
+        return 0.0
+
+    def translate(*args):
+        calls.append(args)
+        pipeline.llm_client._record(
+            SimpleNamespace(usage=SimpleNamespace(total_tokens=9, completion_tokens=3)), 0.5)
+        return "Xin chào từ Acme.", 9
+
+    labels = pipeline.jev_client.ask_labels
+    analysis = pipeline.llm_client.write_analysis
+
+    def original_labels(client, video, *args):
+        original_inputs.append(("jev", video.transcript))
+        return labels(client, video, *args)
+
+    def original_analysis(client, model, video, *args):
+        original_inputs.append(("llm", video.transcript))
+        return analysis(client, model, video, *args)
+
+    monkeypatch.setattr(pipeline.transcript, "get_transcript", transcript)
+    monkeypatch.setattr(pipeline.llm_client, "translate_to_vi", translate)
+    monkeypatch.setattr(pipeline.db, "save_transcript",
+                        lambda *args, **kwargs: saved.append((args, kwargs)))
+    monkeypatch.setattr(pipeline.jev_client, "ask_labels", original_labels)
+    monkeypatch.setattr(pipeline.llm_client, "write_analysis", original_analysis)
+    assert harness.run() is not None
+
+    assert len(calls) == expected_calls
+    video, = harness.exports[0][0]
+    assert video.transcript == text
+    assert video.transcript_vi == ("Xin chào từ Acme." if expected_calls else "")
+    assert original_inputs == [("jev", text), ("llm", text)]
+    usage = harness.exports[0][2]["usage"]
+    assert usage["llm_tokens"] == 17 + 9 * expected_calls
+    assert usage["llm_calls"] == 2 + expected_calls
+    assert usage["llm_output_tokens"] == 6 + 3 * expected_calls
+    assert usage["llm_seconds"] == 3.0 + 0.5 * expected_calls
+    if expected_calls:
+        assert calls == [("https://llm.test/v1", "fake-key-llm", "llm-test", text)]
+        assert saved[0][1]["transcript_vi"] == video.transcript_vi
+        assert saved[0][1]["transcript_language"] == language
+        assert any(p.transient and not p.message and p.usage["llm_tokens"] == 9
+                   for p in harness.progress)
+    else:
+        assert saved == []
+
+
+@pytest.mark.parametrize("translated", ["", "Bản dịch đã lưu"])
+def test_cached_english_transcript_restores_translation_or_translates_once(
+        harness, monkeypatch, tmp_path, translated):
+    monkeypatch.setattr(pipeline.config, "DB_PATH", tmp_path / "translation-cache.db")
+    with pipeline.db.conn() as connection:
+        connection.executescript(pipeline.db.SCHEMA)
+    pipeline.db.save_transcript(
+        "v1", "Original English.", "ok", "Original English.",
+        transcript_language="en", transcript_vi=translated)
+    monkeypatch.setattr(pipeline.transcript, "get_transcript", get_cached_transcript)
+    monkeypatch.setattr(pipeline.transcript, "download_audio",
+                        lambda *args, **kwargs: pytest.fail("cached transcript downloaded audio"))
+    calls = []
+
+    def translate(*args):
+        calls.append(args)
+        return "Bản dịch mới", 9
+
+    monkeypatch.setattr(pipeline.llm_client, "translate_to_vi", translate)
+    assert harness.run() is not None
+    video, = harness.exports[0][0]
+    expected = translated or "Bản dịch mới"
+    assert video.transcript == "Original English."
+    assert video.transcript_language == "en"
+    assert video.transcript_vi == expected
+    assert len(calls) == (0 if translated else 1)
+    assert pipeline.db.get_video("v1").transcript_vi == expected
+    assert harness.exports[0][2]["usage"]["deepgram_calls"] == 0
+    assert harness.exports[0][2]["usage"]["llm_tokens"] == (17 if translated else 26)
+
+
+@pytest.mark.parametrize("error", [
+    ServiceError("llm", "Không dịch được"),
+    NetworkError("llm", "Không kết nối được"),
+    QuotaError("llm", "Hết hạn mức dịch"),
+])
+def test_translation_failure_adds_note_and_continues(harness, monkeypatch, error, caplog):
+    def transcript(video, *args):
+        video.transcript = "Original English."
+        video.transcript_status = "ok"
+        video.transcript_language = "en"
+        return 0.0
+
+    def translate(*args):
+        raise error
+
+    monkeypatch.setattr(pipeline.transcript, "get_transcript", transcript)
+    monkeypatch.setattr(pipeline.llm_client, "translate_to_vi", translate)
+    assert harness.run() is not None
+    video, = harness.exports[0][0]
+    note = "Chưa dịch được thoại sang tiếng Việt"
+    assert note in video.notes
+    assert video.transcript == "Original English."
+    assert video.transcript_vi == ""
+    assert harness.jev_calls == ["v1"]
+    assert harness.analysis_calls == ["v1"]
+    assert video.llm["goi_y_nhan_ban"]
+    assert any(note in message for message in harness.exports[0][2]["messages"])
+    assert any(note in p.message for p in harness.progress)
+    assert any(record.levelname == "WARNING" and note in record.message
+               for record in caplog.records)
+
+
+def test_translation_auth_error_stops_video_before_analysis(harness, monkeypatch):
+    def transcript(video, *args):
+        video.transcript = "Original English."
+        video.transcript_status = "ok"
+        video.transcript_language = "en"
+        return 0.0
+
+    def translate(*args):
+        raise AuthError("llm", "Key LLM không hợp lệ")
+
+    monkeypatch.setattr(pipeline.transcript, "get_transcript", transcript)
+    monkeypatch.setattr(pipeline.llm_client, "translate_to_vi", translate)
+    assert harness.run() is not None
+    assert harness.jev_calls == []
+    assert harness.analysis_calls == []
+    assert any("Key LLM không hợp lệ" in message
+               for message in harness.exports[0][2]["messages"])
+    assert "Chưa dịch được thoại sang tiếng Việt" not in harness.exports[0][0][0].notes

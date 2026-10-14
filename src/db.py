@@ -47,6 +47,8 @@ CREATE TABLE IF NOT EXISTS videos (
     caption           TEXT,
     transcript        TEXT,
     transcript_status TEXT,
+    transcript_language TEXT,
+    transcript_vi     TEXT,
     hook              TEXT,
     updated_at        INTEGER
 );
@@ -90,15 +92,17 @@ _TRANSCRIPT_MERGE = """
         ELSE videos.transcript_status
     END,
     hook = COALESCE(NULLIF(excluded.hook, ''), videos.hook),
+    transcript_language = COALESCE(NULLIF(excluded.transcript_language, ''), videos.transcript_language),
+    transcript_vi = COALESCE(NULLIF(excluded.transcript_vi, ''), videos.transcript_vi),
 """
 
 _UPSERT_VIDEO_SQL = f"""
 INSERT INTO videos (
     video_id, url, page_url, page_name, page_followers, posted_at, format, is_live, duration_s,
-    views, reactions, comments, shares, caption, transcript, transcript_status, hook, updated_at
+    views, reactions, comments, shares, caption, transcript, transcript_status, transcript_language, transcript_vi, hook, updated_at
 ) VALUES (
     :video_id, :url, :page_url, :page_name, :page_followers, :posted_at, :format, :is_live, :duration_s,
-    :views, :reactions, :comments, :shares, :caption, :transcript, :transcript_status, :hook,
+    :views, :reactions, :comments, :shares, :caption, :transcript, :transcript_status, :transcript_language, :transcript_vi, :hook,
     :updated_at
 )
 ON CONFLICT(video_id) DO UPDATE SET
@@ -120,8 +124,8 @@ ON CONFLICT(video_id) DO UPDATE SET
 """
 
 _SAVE_TRANSCRIPT_SQL = f"""
-INSERT INTO videos (video_id, transcript, transcript_status, hook, updated_at)
-VALUES (:video_id, :transcript, :transcript_status, :hook, :updated_at)
+INSERT INTO videos (video_id, transcript, transcript_status, transcript_language, transcript_vi, hook, updated_at)
+VALUES (:video_id, :transcript, :transcript_status, :transcript_language, :transcript_vi, :hook, :updated_at)
 ON CONFLICT(video_id) DO UPDATE SET
     {_TRANSCRIPT_MERGE}
     updated_at = excluded.updated_at
@@ -155,8 +159,13 @@ def init_db(path: str | Path | None = None) -> None:
     """Create all tables and indexes. Safe to call on every start."""
     with conn(path) as c:
         c.executescript(SCHEMA)
-        if "is_live" not in {row["name"] for row in c.execute("PRAGMA table_info(videos)")}:
+        columns = {row["name"] for row in c.execute("PRAGMA table_info(videos)")}
+        if "is_live" not in columns:
             c.execute("ALTER TABLE videos ADD COLUMN is_live INTEGER NOT NULL DEFAULT 0")
+        if "transcript_language" not in columns:
+            c.execute("ALTER TABLE videos ADD COLUMN transcript_language TEXT")
+        if "transcript_vi" not in columns:
+            c.execute("ALTER TABLE videos ADD COLUMN transcript_vi TEXT")
 
 
 def upsert_page(page: Page, path: str | Path | None = None) -> None:
@@ -201,14 +210,16 @@ def get_transcript(video_id: str, path: str | Path | None = None) -> tuple[str, 
 
 
 def save_transcript(
-    video_id: str, text: str, status: str, hook: str, path: str | Path | None = None
+    video_id: str, text: str, status: str, hook: str, path: str | Path | None = None,
+    transcript_language: str = "", transcript_vi: str = "",
 ) -> None:
-    """Store transcript, status and hook. Empty values do not erase what is already stored."""
+    """Store transcript, language, translation and hook. Empty values never erase stored values."""
     with conn(path) as c:
         c.execute(
             _SAVE_TRANSCRIPT_SQL,
             {"video_id": video_id, "transcript": text, "transcript_status": status,
-             "hook": hook, "updated_at": _now()},
+             "hook": hook, "transcript_language": transcript_language,
+             "transcript_vi": transcript_vi, "updated_at": _now()},
         )
 
 def analysis_cache_key(video: Video) -> str:
@@ -345,6 +356,8 @@ def _video_params(video: Video) -> dict[str, Any]:
         "caption": video.caption,
         "transcript": video.transcript,
         "transcript_status": video.transcript_status,
+        "transcript_language": video.transcript_language,
+        "transcript_vi": video.transcript_vi,
         "hook": video.hook,
         "updated_at": _now(),
     }
@@ -368,5 +381,7 @@ def _row_to_video(row: sqlite3.Row) -> Video:
         caption=row["caption"] or "",
         transcript=row["transcript"] or "",
         transcript_status=row["transcript_status"] or "",
+        transcript_language=row["transcript_language"] or "",
+        transcript_vi=row["transcript_vi"] or "",
         hook=row["hook"] or "",
     )
