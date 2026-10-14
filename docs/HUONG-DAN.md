@@ -16,7 +16,13 @@ Nếu tải hoặc mở Chromium thất bại, ứng dụng mở trình duyệt 
 - Nhập link trang chính của các page (fanpage) cần quét, mỗi dòng một link (ví dụ `https://www.facebook.com/ten-page`), rồi bấm **Lưu danh sách kênh**. **Không hỗ trợ nhóm (group)**: link nhóm bị báo lỗi khi lưu, và link nhóm đã lưu từ trước bị bỏ qua khi quét. Tên page và khách hàng mục tiêu của page mình (dùng để chấm "làm lại được" và viết gợi ý) nằm ở mục `my_page` trong `config/settings.json`; nhờ người phát triển sửa nếu cần.
 - Nếu không đăng nhập được trong cửa sổ của tool, mở mục **Không đăng nhập được? Nạp file cookie** và nạp file cookie xuất bằng tiện ích Cookie-Editor từ tài khoản phụ.
 - Bấm **Đăng nhập Facebook**, tự đăng nhập và hoàn tất xác minh trong cửa sổ trình duyệt hiện ra. **Nên dùng tài khoản phụ**, không dùng tài khoản quản trị quan trọng; chỉ thu thập nội dung được phép truy cập và tuân thủ quy định Facebook. Nếu phiên hết hạn hoặc gặp checkpoint, trở lại đây đăng nhập lại.
-- Mở **Nhãn phân loại (Jev)** để sửa tên hiển thị, mô tả (nên có ví dụ), thêm hoặc xóa nhãn ở bốn bảng rồi bấm **Lưu nhãn**; mỗi nhóm cần ít nhất hai nhãn, các lựa chọn **Khác / Không có CTA** luôn được giữ. Khi thay đổi nhãn, lần quét tiếp theo Jev sẽ phân loại lại nội dung và có thể phát sinh một khoản phí nhỏ. Muốn quay về bộ nhãn ban đầu, đánh dấu xác nhận rồi bấm **Khôi phục nhãn mặc định**.
+- Mở **Nhãn phân loại (Jev)** để chỉnh danh sách đáp án mà Jev được chọn. Jev đọc caption và lời thoại của mỗi nội dung đạt ngưỡng rồi chọn **đúng 1 nhãn** trong mỗi bảng:
+  - **Chủ đề:** nội dung nói về chuyện gì → cột **Nhóm chủ đề**, dùng để gom nhóm ở trang **Tổng hợp công thức**.
+  - **Kiểu hook:** câu mở đầu thuộc kiểu nào → cột **Kiểu hook**; Jev cũng dùng nhãn này để duyệt gợi ý của LLM (gợi ý phải giữ kiểu hook hoặc cấu trúc của video gốc).
+  - **Cấu trúc:** nội dung được sắp xếp theo trình tự nào → cột **Cấu trúc**, cũng dùng để duyệt gợi ý.
+  - **CTA:** cuối nội dung kêu gọi người xem làm gì → cột **CTA**.
+
+  Mỗi dòng có **Tên hiển thị** (chữ trong Excel; đổi tên không làm Jev chấm lại) và **Mô tả cho Jev** (Jev dựa vào ô này để chọn nhãn: viết cụ thể, có ví dụ, nói rõ ranh giới với nhãn gần giống; mô tả mơ hồ khiến Jev hay ghi **(chưa chắc)**). Thêm dòng để có lựa chọn mới; xóa dòng thì nội dung kiểu đó rơi vào nhãn gần nhất hoặc **Khác**. Mỗi nhóm cần ít nhất hai nhãn, các lựa chọn **Khác / Không có CTA** luôn được giữ; tránh tạo quá nhiều nhãn vì mỗi nhãn chỉ có vài nội dung thì khó thấy xu hướng. Sau khi thêm, xóa hoặc sửa mô tả và bấm **Lưu nhãn**, lần quét tiếp theo Jev **chấm lại mọi nội dung** (kể cả nội dung đã chấm), tốn thêm một ít phí Jev. Nhãn không ảnh hưởng tới lượt xem, việc lọc ngưỡng hay các câu chấm điểm khác (độ mạnh hook, liên quan ngành, rủi ro…). Muốn quay về bộ nhãn ban đầu, đánh dấu xác nhận rồi bấm **Khôi phục nhãn mặc định**.
 
 ![Tab Cài đặt](img/tab-cai-dat.png)
 

@@ -672,16 +672,42 @@ def _facebook_section(fb_ready: bool, locked: bool) -> None:
                 _import_cookie_file(uploaded)
 
 
+# Ghi chú cho từng bảng nhãn: Jev trả lời câu hỏi gì và kết quả hiện ở đâu.
+_TAXONOMY_NOTES = {
+    "topic": "Jev trả lời: **video/bài này nói về chuyện gì?** Kết quả nằm ở cột **Nhóm chủ đề** trong Excel và "
+             "dùng để gom nhóm ở trang **Tổng hợp công thức**.",
+    "hook_type": "Jev trả lời: **câu mở đầu (hook) thuộc kiểu nào?** Kết quả nằm ở cột **Kiểu hook**. Gợi ý của LLM "
+                 "phải giữ kiểu hook hoặc cấu trúc của video gốc; Jev dùng nhãn này để duyệt gợi ý.",
+    "structure": "Jev trả lời: **nội dung được sắp xếp theo trình tự nào?** (mở – thân – kết). Kết quả nằm ở cột "
+                 "**Cấu trúc** và cũng dùng để duyệt gợi ý như kiểu hook.",
+    "cta": "Jev trả lời: **cuối video/bài kêu gọi người xem làm gì?** Kết quả nằm ở cột **CTA**.",
+}
+
+
 def _taxonomy_section(locked: bool) -> None:
     with st.expander("Nhãn phân loại (Jev)"):
-        st.caption("Sửa tên và mô tả, thêm dòng cuối bảng hoặc chọn dòng để xóa. Mỗi nhóm cần ít nhất 2 nhãn.")
-        st.caption("Thay đổi nhãn khiến Jev phân loại lại nội dung ở lần quét tiếp theo, phát sinh một khoản phí Jev nhỏ.")
+        st.markdown(
+            "Jev đọc caption và lời thoại của mỗi nội dung đạt ngưỡng, rồi **chọn đúng 1 nhãn** trong mỗi bảng "
+            "dưới đây. Mỗi dòng là một lựa chọn Jev được phép chọn:\n"
+            "- **Tên hiển thị:** chữ bạn thấy trong Excel. Đổi tên không làm Jev chấm lại.\n"
+            "- **Mô tả cho Jev:** Jev dựa vào ô này để quyết định chọn nhãn. Viết cụ thể, có ví dụ thật, "
+            "và nói rõ ranh giới với nhãn gần giống; mô tả mơ hồ khiến Jev hay ghi **(chưa chắc)**.\n"
+            "- **Thêm dòng:** thêm lựa chọn mới (ví dụ chủ đề \"Mỹ phẩm\"). **Xóa dòng:** nội dung kiểu đó sẽ "
+            "rơi vào nhãn gần nhất hoặc **Khác**.\n"
+            "- Thêm, xóa hoặc sửa mô tả rồi bấm **Lưu nhãn** thì ở lần quét sau Jev **chấm lại mọi nội dung** "
+            "(kể cả nội dung đã chấm), tốn thêm một ít phí Jev.\n"
+            "- Nhãn **không** ảnh hưởng tới lượt xem, việc lọc ngưỡng hay các câu chấm điểm khác (độ mạnh hook, "
+            "liên quan ngành, rủi ro…)."
+        )
+        st.caption("Sửa trực tiếp trong bảng, thêm dòng ở cuối bảng hoặc chọn dòng để xóa. Mỗi nhóm cần ít nhất 2 nhãn. "
+                   "Tránh tạo quá nhiều nhãn: mỗi nhãn chỉ có vài nội dung thì bảng tổng hợp khó thấy xu hướng.")
         taxonomy = config.load_taxonomy()
         revision = st.session_state.get("taxonomy_revision", 0)
         groups = {}
         with st.form(f"taxonomy_form_{revision}", border=False):
             for group, title in config.TAXONOMY_GROUPS.items():
                 st.markdown(f"**{title}**")
+                st.caption(_TAXONOMY_NOTES[group])
                 groups[group] = st.data_editor(
                     config.taxonomy_rows(taxonomy, group),
                     column_config={
