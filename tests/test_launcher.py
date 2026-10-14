@@ -161,3 +161,37 @@ def test_failed_download_raises_without_accepting_missing_executable(monkeypatch
     run.return_value.returncode = 1
     with pytest.raises(RuntimeError):
         browser_setup.ensure_chromium()
+
+
+def _complete_bundle(path: Path) -> Path:
+    for name in ("app.py", "base_library.zip", "ffmpeg.exe"):
+        (path / name).write_bytes(b"")
+    (path / "streamlit-1.65.0.dist-info").mkdir()
+    return path
+
+
+def test_complete_bundle_has_no_problems(tmp_path):
+    bundle = _complete_bundle(tmp_path)
+    assert launcher.bundle_problems(bundle, Path("C:/VideoCongThuc/VideoCongThuc.exe")) == []
+
+
+def test_partially_extracted_bundle_names_missing_files(tmp_path):
+    bundle = _complete_bundle(tmp_path)
+    (bundle / "ffmpeg.exe").unlink()
+    (bundle / "streamlit-1.65.0.dist-info").rmdir()
+    problems = launcher.bundle_problems(bundle, Path("C:/VideoCongThuc/VideoCongThuc.exe"))
+    assert problems == ["thiếu app\\ffmpeg.exe", "thiếu thông tin thư viện streamlit (app\\streamlit-*.dist-info)"]
+
+
+@pytest.mark.parametrize("exe", [
+    r"C:\Users\A\AppData\Local\Temp\Temp1_VideoCongThuc.zip\VideoCongThuc\VideoCongThuc.exe",
+    r"C:\Users\A\AppData\Local\Temp\Rar$EXa1234.5678\VideoCongThuc\VideoCongThuc.exe",
+])
+def test_running_from_inside_zip_is_reported(tmp_path, exe):
+    problems = launcher.bundle_problems(_complete_bundle(tmp_path), Path(exe))
+    assert problems == ["đang chạy trực tiếp bên trong file ZIP"]
+
+
+def test_unreadable_bundle_dir_is_reported(tmp_path):
+    problems = launcher.bundle_problems(tmp_path / "missing", Path("C:/VideoCongThuc/VideoCongThuc.exe"))
+    assert len(problems) == 1 and problems[0].startswith("không đọc được thư mục")

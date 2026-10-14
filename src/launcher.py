@@ -177,12 +177,62 @@ def _open_window(port: int, stopped: threading.Event, window: BrowserWindow) -> 
         window.ready.set()
 
 
+# Tệp mà bản exe luôn cần trong thư mục app/; thiếu là do giải nén chưa đủ hoặc bị phần mềm diệt virus xóa.
+_REQUIRED_BUNDLE_FILES = ("app.py", "base_library.zip", "ffmpeg.exe")
+_REQUIRED_METADATA = ("streamlit",)
+# Windows và WinRAR/7-Zip chạy exe trong ZIP bằng cách chép tạm ra các thư mục này.
+_ARCHIVE_TEMP_MARKERS = ("\\temp1_", "\\rar$", "\\7zo")
+
+
+class BundleIncomplete(RuntimeError):
+    """Bộ cài thiếu tệp: báo cách giải nén lại thay vì lỗi kỹ thuật của thư viện."""
+
+
+def bundle_problems(bundle_dir: Path, exe_path: Path) -> list[str]:
+    """Các vấn đề làm bản exe không chạy được; rỗng khi bộ cài đầy đủ."""
+    problems: list[str] = []
+    if any(marker in str(exe_path).lower() for marker in _ARCHIVE_TEMP_MARKERS):
+        problems.append("đang chạy trực tiếp bên trong file ZIP")
+    try:
+        names = os.listdir(bundle_dir)
+    except OSError as exc:
+        return problems + [f"không đọc được thư mục {bundle_dir} ({exc.strerror or exc})"]
+    lowered = {name.lower() for name in names}
+    problems += [f"thiếu app\\{name}" for name in _REQUIRED_BUNDLE_FILES if name.lower() not in lowered]
+    for package in _REQUIRED_METADATA:
+        if not any(name.startswith(f"{package}-") and name.endswith(".dist-info") for name in lowered):
+            problems.append(f"thiếu thông tin thư viện {package} (app\\{package}-*.dist-info)")
+    return problems
+
+
+def _check_bundle() -> None:
+    if not getattr(sys, "frozen", False):
+        return
+    bundle_dir, exe_path = Path(sys._MEIPASS), Path(sys.executable)
+    applog.log.info("Bản exe: %s · thư mục chương trình: %s", exe_path, bundle_dir)
+    problems = bundle_problems(bundle_dir, exe_path)
+    if problems:
+        applog.log.error("Bộ cài chưa đầy đủ: %s", "; ".join(problems))
+        raise BundleIncomplete("; ".join(problems))
+
+
 def _show_fatal_error(exc: BaseException) -> None:
     """Không có console thì lỗi khởi động phải hiện bằng hộp thoại, không im lặng."""
     import ctypes
 
-    message = ("Video Công Thức không khởi động được.\n\n"
-               f"{type(exc).__name__}: {exc}\n\nChi tiết trong data\\app.log.")
+    if isinstance(exc, BundleIncomplete):
+        message = ("Video Công Thức chưa được giải nén đầy đủ nên không chạy được.\n\n"
+                   f"Lý do: {exc}.\n\n"
+                   "Cách sửa:\n"
+                   "1. Đóng cửa sổ này. Bấm chuột phải vào file VideoCongThuc.zip → Extract All (Giải nén tất cả).\n"
+                   "2. Giải nén vào thư mục ngắn, ví dụ C:\\VideoCongThuc hoặc D:\\VideoCongThuc.\n"
+                   "3. Mở thư mục vừa giải nén và chạy VideoCongThuc.exe. Không chạy exe khi đang xem bên trong file ZIP, "
+                   "không chép riêng file exe ra chỗ khác (dùng Send to → Desktop (create shortcut)).\n"
+                   "4. Nếu vẫn lỗi, phần mềm diệt virus có thể đã xóa tệp: cho phép thư mục này rồi giải nén lại.\n\n"
+                   "Tool đã có sẵn mọi thư viện cần thiết, không cần cài thêm Python.")
+    else:
+        message = ("Video Công Thức không khởi động được.\n\n"
+                   f"{type(exc).__name__}: {exc}\n\nChi tiết trong data\\app.log.")
     ctypes.windll.user32.MessageBoxW(None, message, "Video Công Thức", 0x10)
 
 
@@ -190,6 +240,7 @@ def main() -> None:
     # Trước khi import Streamlit: handler của Streamlit ghi vào sys.stderr, tức là vào data/app.log.
     applog.setup()
     try:
+        _check_bundle()
         _serve()
     except Exception as exc:
         applog.log.exception("Không khởi động được ứng dụng")

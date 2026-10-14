@@ -5,6 +5,8 @@ Giải nén toàn bộ `VideoCongThuc.zip` vào thư mục có quyền ghi (ví 
 
 Nếu tải hoặc mở Chromium thất bại, ứng dụng mở trình duyệt mặc định và ghi lỗi vào nhật ký. Nếu không có cửa sổ nào kết nối được trong 2 phút sau khi mở trình duyệt, ứng dụng tự tắt; có thể mở lại sau khi xử lý lỗi.
 
+**Báo "chưa được giải nén đầy đủ"** (hoặc lỗi kiểu `No package metadata was found for streamlit`): bản trong máy thiếu tệp chương trình, không phải máy thiếu thư viện. Bấm chuột phải vào `VideoCongThuc.zip` → **Extract All (Giải nén tất cả)**, giải nén vào thư mục ngắn như `C:\VideoCongThuc`, rồi chạy `VideoCongThuc.exe` trong thư mục đó. Không chạy exe khi đang xem bên trong file ZIP, không chép riêng file exe ra chỗ khác (muốn có biểu tượng trên Desktop thì dùng **Send to → Desktop (create shortcut)**). Nếu phần mềm diệt virus báo hoặc xóa tệp, cho phép thư mục này rồi giải nén lại.
+
 **Nhật ký:** nút **Nhật ký** ở góc trên bên phải hiện mọi thông báo và lỗi của ứng dụng (mặc định chỉ lỗi và cảnh báo; chọn **Lần mở trước** để xem lỗi của lần chạy trước). Tất cả được ghi vào file `data/app.log`; API key luôn được che. Khi cần hỗ trợ, bấm **Mở file nhật ký** và chỉ gửi file này, không gửi cả thư mục `data/`.
 
 ## 2. Trang Cài đặt

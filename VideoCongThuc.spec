@@ -18,6 +18,9 @@ for source in collector_sources:
     collector_modules.append(".".join(parts))
 
 streamlit_datas, streamlit_binaries, streamlit_hiddenimports = collect_all("streamlit")
+# streamlit/.agents chứa mẫu cho trợ lý AI, app không dùng; bỏ đi để đường dẫn khi giải nén ngắn hơn.
+streamlit_datas = [(src, dest) for src, dest in streamlit_datas
+                   if ".agents" not in Path(dest).parts]
 datas = streamlit_datas + [
     (str(root / f"{module}.py"), ".") for module in project_modules
 ]
