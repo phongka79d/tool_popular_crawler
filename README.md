@@ -1,12 +1,16 @@
 # Video Công Thức
 
-Công cụ Windows quét video Facebook, lọc chỉ số viral, phân tích công thức bằng Jev/LLM và xuất Excel. Yêu cầu Python 3.11, Internet và `ffmpeg.exe` trong PATH. Hướng dẫn người dùng: [docs/HUONG-DAN.md](docs/HUONG-DAN.md); đặc tả: [docs/PLAN-JEV.md](docs/PLAN-JEV.md).
+Công cụ Windows quét video Facebook, lọc chỉ số viral, phân tích công thức bằng Jev/LLM và xuất Excel. Giao diện HTML/CSS/JS chạy trong cửa sổ pywebview, dùng Microsoft Edge WebView2 Runtime. Chạy từ mã nguồn cần Python 3.11, Internet và `ffmpeg.exe` trong PATH. WebView2 thường có sẵn trên Windows 10/11 có Edge; nếu thiếu, cài [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/). Hướng dẫn người dùng: [docs/HUONG-DAN.md](docs/HUONG-DAN.md); đặc tả: [docs/PLAN-JEV.md](docs/PLAN-JEV.md).
 
 ## Cấu trúc thư mục
 
+- `backend/main.py`: điểm vào cửa sổ pywebview, kiểm tra bộ cài/WebView2 và xác nhận khi đóng lúc đang quét.
 - `backend/core/`: cấu hình, dữ liệu và tiện ích nền tảng; `backend/services/`: pipeline, dịch vụ AI và xuất Excel.
-- `backend/collectors/`: thu thập Facebook, phụ đề và chuẩn bị trình duyệt; `backend/api/`: cầu nối Python cho giao diện; `backend/assets/`: tài nguyên ứng dụng.
-- `frontend/`: giao diện HTML/CSS/JS; `frontend/js/components/`: thành phần dùng chung; `frontend/js/pages/`: các trang cài đặt, quét và kết quả.
+- `backend/collectors/`: thu thập Facebook, phụ đề và chuẩn bị trình duyệt; `backend/assets/`: tài nguyên ứng dụng.
+- `backend/api/__init__.py`: cầu nối `Bridge` giữa JavaScript và Python, kèm hộp thoại chọn/lưu tệp của Windows. Các mô-đun `app_state`, `services`, `channels`, `taxonomy`, `logs`, `scan`, `results` xử lý từng nhóm chức năng; `common` chứa tiện ích chung.
+- `frontend/index.html`, `frontend/css/`: giao diện và kiểu hiển thị; `frontend/js/main.js`: khung ứng dụng, điều hướng và nhật ký; `api.js`, `store.js`: gọi cầu nối và quản lý trạng thái.
+- `frontend/js/components/`: thành phần dùng chung; `frontend/js/pages/settings/`, `scan/`, `results/`: các trang Cài đặt, Chạy quét và Kết quả.
+- `frontend/js/mock/`: dữ liệu và hành vi mô phỏng (`index.js`, `app.js`, `settings.js`, `scan.js`, `results.js`) để xem giao diện bằng trình duyệt, không chạy quét thật.
 - `config/`: mẫu cấu hình; `data/`, `output/`, `profile/`: dữ liệu khi chạy từ mã nguồn (gitignore).
 - `tests/`: kiểm thử; `tools/`: công cụ thu fixture.
 - `docs/`: hướng dẫn người dùng (Markdown + PDF, ảnh trong `docs/img/`) và đặc tả.
@@ -25,6 +29,8 @@ playwright install chromium
 
 Nhập key Jev, Deepgram, LLM và endpoint/model LLM trong tab **Cài đặt**; không ghi key vào mã nguồn hay tệp cấu hình. Đăng nhập Facebook bằng tài khoản phụ trước khi quét.
 
+Trình duyệt quét dùng Edge nếu có. Nếu không có Edge, ứng dụng chuẩn bị Chromium khi mở lần đầu. WebView2 là bộ máy hiển thị cửa sổ ứng dụng, khác với trình duyệt dùng để quét.
+
 ## Chạy và kiểm thử
 
 ```powershell
@@ -38,6 +44,16 @@ python tools/capture_feed.py
 ```
 
 Fixture thật có thể chứa dữ liệu riêng; giữ trong `tests/fixtures/live/` đã được gitignore và loại bỏ cookie/thông tin cá nhân trước khi chia sẻ.
+
+### Xem trước giao diện khi phát triển
+
+Frontend dùng JavaScript thuần, không cần bước build. Chạy một máy chủ tĩnh từ thư mục repo, ví dụ:
+
+```powershell
+python -m http.server -d frontend
+```
+
+Mở `http://localhost:8000/index.html?mock=1`. Có thể dùng máy chủ tĩnh khác và thêm `?mock=1` vào đường dẫn `/index.html`. Chế độ này dùng dữ liệu mô phỏng, không gọi dịch vụ AI, không đăng nhập Facebook và không chạy quét thật. Để dùng đầy đủ cầu nối Python và hộp thoại tệp của Windows, chạy `python -m backend.main`.
 
 ## Mã nguồn tham khảo
 

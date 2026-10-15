@@ -1,0 +1,23 @@
+.settings-page{gap:24px}
+.settings-controls{border:0;padding:0;margin:0;min-width:0;gap:28px}
+.settings-controls>section{gap:16px}
+.settings-page .settings-service>summary{font-weight:600;overflow-wrap:anywhere;padding:18px 20px}
+.settings-page .settings-service[open]>summary{border-bottom:1px solid var(--border);background:var(--primary-soft)}
+.settings-page .settings-service>.expander-body{padding:20px}
+.settings-page .settings-service .field{max-width:780px}
+.settings-page .settings-service .search-select select{min-height:170px}
+.settings-page .settings-service .search-select option{padding:7px 8px}
+.settings-connections{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:20px;align-items:start}
+.settings-connections>div{min-width:0}
+.settings-connections .card-body>.stack{gap:16px}
+.settings-channel-editor textarea{font-family:var(--mono);min-height:196px;line-height:1.65}
+.settings-intro{margin:0;padding-left:22px;display:grid;gap:8px;color:var(--muted)}
+.settings-taxonomy-group{padding-top:20px;border-top:1px solid var(--border);gap:12px}
+.settings-taxonomy-group table{width:100%;table-layout:fixed}
+.settings-taxonomy-group th:first-child{width:28%}
+.settings-taxonomy-group th:last-child{width:88px}
+.settings-taxonomy-group td{vertical-align:top}
+.settings-taxonomy-group .input{width:100%;min-width:0}
+.settings-taxonomy-reset{padding-top:20px;border-top:1px solid var(--border)}
+.settings-controls:disabled input,.settings-controls:disabled textarea,.settings-controls:disabled select{cursor:not-allowed;opacity:.65}
+@media(max-width:1000px){.settings-connections{grid-template-columns:1fr}}
