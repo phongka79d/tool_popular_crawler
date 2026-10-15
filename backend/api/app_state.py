@@ -76,7 +76,7 @@ def _next_step(guide: _Guide) -> dict:
                                         ("đăng nhập Facebook", guide.fb_ready)) if not done]
         text, page = f"Hoàn tất bước 2 ở tab Cài đặt: {' và '.join(todo)}.", "settings"
     elif guide.has_result:
-        text, page = "Đã có file Excel mới. Xem và tải về ở tab Kết quả.", "results"
+        text, page = "Đã có file Excel mới. Xem thống kê và mở file ở tab Kết quả.", "results"
     else:
         text, page = "Mọi thứ đã sẵn sàng. Ở tab Chạy quét, chọn loại quét và ngưỡng rồi bấm Bắt đầu quét.", "scan"
     return {"text": text, "page": page}
