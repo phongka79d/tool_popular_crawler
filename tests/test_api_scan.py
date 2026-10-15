@@ -121,7 +121,7 @@ def configured(monkeypatch):
     return settings, saved
 
 
-@pytest.mark.parametrize("formats", [["video_live", "reel"], ["post"]])
+@pytest.mark.parametrize("formats", [["video", "reel"], ["post"]])
 def test_start_remembers_video_kinds_without_changing_them_for_posts(configured, formats):
     settings, saved = configured
     assert scan.start_scan({"kind": "post" if formats == ["post"] else "video", "formats": formats})["ok"]
@@ -141,9 +141,9 @@ def test_ratio_params_summary_and_persistence(configured):
 
 
 def test_start_persists_length_limits_preserves_unselected_type(configured):
-    assert scan.start_scan(dict(formats=["reel_live"], length_limits={"reel": [None, 90]}))["ok"]
+    assert scan.start_scan(dict(formats=["reel"], length_limits={"reel": [None, 90]}))["ok"]
     assert configured[1][0]["scan"]["length_limits"] == {"video": [180, None], "reel": (None, 90)}
-    assert scan._params(dict(formats=["reel_live"], length_limits={"video": [180, None], "reel": [None, 90]})).length_limits == {"reel": (None, 90)}
+    assert scan._params(dict(formats=["reel"], length_limits={"video": [180, None], "reel": [None, 90]})).length_limits == {"reel": (None, 90)}
 
 
 def test_invalid_length_blocks_start_before_services(configured, monkeypatch):
@@ -267,13 +267,34 @@ def test_options_saved_formats_presets_and_post_mode(configured):
     settings, _ = configured
     settings["scan"]["video_kinds"] = ["reel_live"]
     options = scan.get_scan_options()
-    assert options["defaults"]["formats"] == ["reel_live"]
-    assert [item["id"] for item in options["kinds"]] == ["video", "reel", "video_live", "reel_live"]
+    assert options["defaults"]["formats"] == ["video", "reel"]
+    assert [item["id"] for item in options["kinds"]] == ["video", "reel"]
     assert options["presets"]["length"]["video"][1] == {"label": "≥ 3 phút", "min": 180, "max": None}
     assert options["terms"]["link"]["url"] == "https://www.facebook.com/terms"
     assert len(options["terms"]["bullets"]) == 3
     params = scan._params({"kind": "post"})
     assert params.formats == {"post"} and params.length_limits == {}
+
+
+@pytest.mark.parametrize("old,expected", [
+    (["video", "video_live", "reel_live"], ["video"]),
+    (["video_live", "reel_live"], ["video", "reel"]),
+    ([], ["video", "reel"]),
+])
+@pytest.mark.parametrize("post", [False, True])
+def test_saved_video_kinds_migrate_on_read_and_persist(configured, old, expected, post):
+    settings, saved = configured
+    settings["scan"]["video_kinds"] = old
+    assert scan.get_scan_options()["defaults"]["formats"] == expected
+    assert scan._params({}).formats == set(expected)
+    assert scan.start_scan({"kind": "post" if post else "video"})["ok"]
+    assert saved[0]["scan"]["video_kinds"] == (expected if post else sorted(expected))
+
+
+@pytest.mark.parametrize("formats", [["video_live"], ["reel_live"], ["video", "video_live"]])
+def test_explicit_removed_kinds_are_rejected(configured, formats):
+    assert "Loại video không hợp lệ." in scan.preview_scan({"formats": formats})["problems"]
+    assert not scan.start_scan({"formats": formats})["ok"]
 
 
 def test_question_answer_and_stop(monkeypatch):

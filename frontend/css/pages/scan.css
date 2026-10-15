@@ -1,1 +1,153 @@
-.scan-page{min-width:0}.scan-options-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:24px;align-items:start}.scan-field-pair,.scan-kind-grid,.scan-chart-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px}.scan-length{padding-top:16px;border-top:1px solid var(--border)}.scan-presets{gap:8px}.scan-summary{font-style:italic;color:var(--muted);padding:16px;background:var(--surface-hover);border-radius:8px}.scan-key{display:flex;flex-direction:column;gap:4px;max-width:300px}.scan-start{width:100%;min-height:52px;font-size:16px}.scan-terms{border-color:var(--warning);background:var(--warning-soft)}.scan-question{border-color:var(--warning)}.scan-usage-grid{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr) minmax(0,1fr);gap:16px}.scan-usage-grid .card-header{padding-bottom:8px}.scan-usage-grid h2{font-size:15px}.scan-current-message{font-weight:600;overflow-wrap:anywhere}.scan-log{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.8 var(--mono);color:var(--muted)}.scan-log-full{max-height:420px;overflow:auto}.scan-page .card,.scan-page .card-body,.scan-page .chart{min-width:0}.scan-page .progress{min-width:90px}.scan-page .field[hidden]{display:none}.scan-page .expander-body>.stack{min-width:0}@media(max-width:1199px){.scan-options-grid{grid-template-columns:1fr}.scan-usage-grid{grid-template-columns:minmax(0,2fr) minmax(0,1fr)}.scan-usage-grid>.card:last-child{grid-column:1/-1}}@media(max-width:760px){.scan-field-pair,.scan-kind-grid,.scan-chart-grid,.scan-usage-grid{grid-template-columns:1fr}.scan-usage-grid>.card:last-child{grid-column:auto}}
+.scan-page {
+  min-width: 0;
+}
+
+.scan-options-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+
+.scan-field-pair,
+.scan-kind-grid,
+.scan-chart-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 14px;
+}
+
+.scan-length {
+  gap: 10px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.scan-length-foot {
+  justify-content: space-between;
+}
+
+.scan-presets {
+  gap: 8px;
+}
+
+.scan-summary {
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text);
+  font-style: italic;
+}
+
+.scan-key {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 320px;
+}
+
+.scan-start {
+  width: 100%;
+  min-height: 50px;
+  font-size: var(--fs-lg);
+}
+
+.scan-terms {
+  border-color: var(--warning);
+  background: var(--warning-soft);
+}
+
+.scan-terms .card-header h2 {
+  color: var(--warning);
+}
+
+.scan-question {
+  border-color: var(--warning);
+  box-shadow: inset 0 0 0 1px var(--warning);
+}
+
+.scan-usage-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr);
+  gap: 14px;
+}
+
+.scan-usage-grid .card-header h2 {
+  font-size: var(--fs-md);
+}
+
+.scan-usage-grid .metric-value {
+  font-size: 24px;
+}
+
+.scan-current {
+  gap: 2px;
+}
+
+.scan-current a {
+  width: fit-content;
+  overflow-wrap: anywhere;
+}
+
+.scan-current-message {
+  font-weight: 600;
+  color: var(--text-strong);
+  overflow-wrap: anywhere;
+}
+
+.scan-log {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  font: var(--fs-xs) / 1.8 var(--mono);
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.scan-log-full {
+  max-height: 420px;
+  overflow: auto;
+}
+
+.scan-page .card,
+.scan-page .card-body,
+.scan-page .chart {
+  min-width: 0;
+}
+
+.scan-page .progress {
+  min-width: 90px;
+}
+
+.scan-page .expander-body > .stack {
+  min-width: 0;
+}
+
+@media (max-width: 1100px) {
+  .scan-options-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .scan-usage-grid {
+    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  }
+
+  .scan-usage-grid > .card:last-child {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 760px) {
+  .scan-field-pair,
+  .scan-kind-grid,
+  .scan-chart-grid,
+  .scan-usage-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .scan-usage-grid > .card:last-child {
+    grid-column: auto;
+  }
+}

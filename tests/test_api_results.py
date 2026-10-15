@@ -144,6 +144,20 @@ def test_open_file_and_folder(monkeypatch, output_dir):
     assert not results.open_result("../outside.xlsx")["ok"]
 
 
+def test_open_guide_prefers_packaged_pdf_then_docs(monkeypatch, tmp_path):
+    monkeypatch.setattr(results.config, "ROOT", tmp_path)
+    opened = []
+    monkeypatch.setattr(results.os, "startfile", opened.append, raising=False)
+    assert not results.open_guide()["ok"]
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "HUONG-DAN.pdf").touch()
+    (tmp_path / "HUONG-DAN.pdf").touch()
+    assert results.open_guide()["ok"]
+    (tmp_path / "HUONG-DAN.pdf").unlink()
+    assert results.open_guide()["ok"]
+    assert opened == [tmp_path / "HUONG-DAN.pdf", tmp_path / "docs" / "HUONG-DAN.pdf"]
+
+
 def test_list_results_newest_first_excludes_unsafe_files(monkeypatch, output_dir):
     first, second = output_dir / "a.xlsx", output_dir / "b.XLSX"
     first.write_bytes(b"a")

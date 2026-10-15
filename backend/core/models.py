@@ -21,7 +21,7 @@ class Video:
     page_followers: int | None = None
     posted_at: int | None = None      # unix seconds (UTC)
     format: str = "video"             # "reel" | "video" | "post"
-    is_live: bool = False             # live broadcast or replay
+    is_live: bool = False             # broadcast or replay; excluded from scans
     duration_s: float | None = None
     views: int | None = None
     reactions: int | None = None
@@ -48,11 +48,5 @@ class Video:
     notes: list[str] = field(default_factory=list)
 
 
-VIDEO_KINDS = frozenset({"video", "reel", "video_live", "reel_live"})
-KIND_LABELS = {"video": "Video", "reel": "Reel", "video_live": "Video (Live)",
-               "reel_live": "Reel (Live)", "post": "Bài đăng"}
-
-
-def video_kind(format: str, is_live: bool = False) -> str:
-    """Keep the base format separate from the live/replay scan kind."""
-    return f"{format}_live" if is_live and format in {"video", "reel"} else format
+VIDEO_KINDS = frozenset({"video", "reel"})
+KIND_LABELS = {"video": "Video", "reel": "Reel", "post": "Bài đăng"}

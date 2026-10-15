@@ -2,7 +2,7 @@
 
 Chỉ số lấy từ phản hồi GraphQL mà trình duyệt nhận khi cuộn và từ JSON nhúng trong HTML ban đầu
 (qua collectors.graphql). Các selector và tên tab nằm trong config/selectors.json.
-Tiến độ cuối tab báo riêng số mục trong ngày quét bị bỏ qua vì chưa chọn loại (kể cả Live/phát lại).
+Tiến độ cuối tab báo riêng số mục bị bỏ qua vì chưa chọn loại hoặc là Live/phát lại.
 """
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ from backend.core import config
 from backend.collectors import graphql
 from backend.collectors.cookies import has_login_cookies, load_cookie_file, write_netscape
 from backend.core.errors import BrowserUnavailable, LoginRequired, QuotaError, ServiceError
-from backend.core.models import Page, video_kind
+from backend.core.models import Page
 from backend.core.normalize import is_older_than, parse_count
 
 logger = logging.getLogger(__name__)
@@ -307,7 +307,6 @@ class _Collector:
 
     def __init__(self, formats: set[str], days: int, max_videos: int) -> None:
         self._formats = formats
-        self._base_formats = {kind.removesuffix("_live") for kind in formats}
         self._days = days
         self.limit = max_videos
         self.items_seen = 0  # feed Bài đăng chỉ đếm post; tab video đếm mọi record như trước
@@ -325,15 +324,19 @@ class _Collector:
                 self.items_seen += 1
             if not video_id:
                 continue
-            if fmt not in self._base_formats:
+            key = _dedupe_key(item)
+            if item.get("is_live"):
+                self._live_ids.add(key)
+                # Evidence may arrive after an ordinary-looking record in another tab.
+                existing = self._by_id.pop(key, None)
+                if existing is not None and existing.get("posted_at") is not None:
+                    self._excluded_by_tab.setdefault(tab_format, {})[key] = "Live"
+            if fmt not in self._formats:
                 posted_at = item.get("posted_at")
                 if (fmt in {"video", "reel", "post"} and posted_at is not None
                         and not is_older_than(posted_at, self._days)):
-                    key = _dedupe_key(item)
-                    if item.get("is_live"):
-                        self._live_ids.add(key)
-                    self._excluded_by_tab.setdefault(tab_format, {})[key] = video_kind(
-                        fmt, key in self._live_ids)
+                    self._excluded_by_tab.setdefault(tab_format, {})[key] = (
+                        "Live" if key in self._live_ids else fmt)
                 continue
             posted_at = item.get("posted_at")
             if posted_at is not None and is_older_than(posted_at, self._days):
@@ -347,35 +350,31 @@ class _Collector:
                     if fmt != "post" or len(self._old_post_ids) >= OLD_POST_STOP_COUNT:
                         self._old_formats.add(tab_format)
                 continue
-            key = _dedupe_key(item)
-            if item.get("is_live"):
-                self._live_ids.add(key)
-            is_live = key in self._live_ids
-            kind = video_kind(fmt, is_live)
-            if kind not in self._formats:
-                existing = self._by_id.pop(key, None)
-                if posted_at is not None or existing is not None and existing.get("posted_at") is not None:
-                    self._excluded_by_tab.setdefault(tab_format, {})[key] = kind
+            if key in self._live_ids:
+                self._by_id.pop(key, None)
+                if posted_at is not None:
+                    self._excluded_by_tab.setdefault(tab_format, {})[key] = "Live"
                 continue
             existing = self._by_id.get(key)
             if existing is None:
                 self._by_id[key] = dict(item)
-                if is_live:
-                    self._by_id[key]["is_live"] = True
                 continue
             graphql.merge_record(existing, item)
 
     def excluded_summary(self, tab_format: str) -> str:
         """Count distinct excluded items in this tab only when their date is in range."""
-        labels = {"video": "Video thường", "reel": "Reel", "video_live": "Video (Live)",
-                  "reel_live": "Reel (Live)", "post": "Bài đăng"}
+        labels = {"video": "Video thường", "reel": "Reel", "post": "Bài đăng"}
         counts: dict[str, int] = {}
-        for kind in self._excluded_by_tab.get(tab_format, {}).values():
+        for key, kind in self._excluded_by_tab.get(tab_format, {}).items():
+            kind = "Live" if key in self._live_ids else kind
             counts[kind] = counts.get(kind, 0) + 1
-        return " · ".join(
+        parts = [
             f"bỏ qua {counts[kind]} mục {label} vì chưa chọn {label} (trong số ngày quét)"
             for kind, label in labels.items() if kind in counts
-        )
+        ]
+        if counts.get("Live"):
+            parts.append(f"bỏ qua {counts['Live']} mục Live (tool không quét video phát trực tiếp)")
+        return " · ".join(parts)
 
     def count(self) -> int:
         return sum(item.get("posted_at") is not None for item in self._by_id.values())
@@ -654,8 +653,8 @@ class FacebookScanner:
         được chờ/thử lại; lỗi dịch vụ mang `partial_rows` để pipeline lưu trước khi dừng.
         `on_progress` nhận từng bước (mở tab, mỗi vòng cuộn, lý do dừng) để hiện cho người dùng.
         """
-        base_formats = {kind.removesuffix("_live") for kind in formats}
-        tabs = [(fmt, tab) for fmt, tab in _TABS if fmt in base_formats]
+        tabs = [(fmt, tab) for fmt, tab in _TABS if fmt in formats]
+        self.scan_timings: dict[str, float] = {}
         if not tabs or max_videos <= 0:
             return []
         report = on_progress or (lambda message, transient=False: None)
@@ -681,6 +680,7 @@ class FacebookScanner:
                 logger.info("Quét tab %s của %s", tab, page_url)
                 report(f"Tab {label}: đang mở…")
                 found_before = collector.count()
+                tab_started = time.monotonic()
                 try:
                     reason = self._scan_tab(url, fmt, collector, pending, stop_event, report)
                 except ServiceError as exc:
@@ -692,6 +692,8 @@ class FacebookScanner:
                     reason = f"lỗi khi quét tab: {exc}"
                     self.scan_errors.append(f"Tab {label}: {reason}")
                     logger.warning("Tab %s của %s: %s", tab, page_url, reason)
+                finally:
+                    self.scan_timings[label] = time.monotonic() - tab_started
                 found = collector.count() - found_before
                 excluded = collector.excluded_summary(fmt)
                 note = f" · {excluded}" if excluded else ""

@@ -1,6 +1,5 @@
 """Retry policy for external API calls. Failures are mapped to ServiceError (PLAN-JEV.md §9, §11.5).
 
-Adapted from videoanalyzer `scripts/whisper.py` (`_post_whisper`, `_retry_after`):
 - Other 4xx (not 429): map authentication, credit and not-found errors; otherwise re-raise immediately.
 - 429/529: honor `Retry-After`, otherwise double the delay. After `max_rate_retries` retries: QuotaError.
   A 429 whose body reports out-of-credit (e.g. `insufficient_quota`) is QuotaError at once.

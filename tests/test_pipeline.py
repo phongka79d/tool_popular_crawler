@@ -182,12 +182,12 @@ def test_length_filter_runs_before_paid_analysis_and_logs_counts(harness):
         for ident, kind, duration in (
             ("video-ok", "video", 180), ("video-short", "video", 179),
             ("reel-ok", "reel", 90), ("reel-long", "reel", 120),
-            ("live-video", "video_live", 180), ("live-reel-long", "reel_live", 91),
+            ("long-video", "video", 180), ("another-reel-long", "reel", 91),
             ("unknown", "reel", None))
     ]
     h.params.length_limits = {"video": (180, None), "reel": (None, 90)}
     assert h.run() is not None
-    expected = ["video-ok", "reel-ok", "live-video", "unknown"]
+    expected = ["video-ok", "reel-ok", "long-video", "unknown"]
     assert h.transcript_calls == expected
     assert h.jev_calls == expected
     assert h.analysis_calls == expected
@@ -518,21 +518,6 @@ def test_deepgram_auth_pauses_and_exports_partial(harness, monkeypatch):
     assert harness.progress[-1].message == "Đã xuất kết quả một phần."
 
 
-def test_deepgram_quota_warning_is_logged_and_analysis_continues(harness, monkeypatch):
-    warning = "Tài khoản Deepgram đã hết credit/hạn mức. Đã dùng local whisper."
-
-    def get(video, key, stt, terms, tmp, warnings):
-        warnings.append(warning)
-        video.transcript = "Thoại dự phòng"
-        return 0.0
-
-    monkeypatch.setattr(pipeline.transcript, "get_transcript", get)
-    harness.run()
-    assert warning in harness.exports[0][2]["messages"]
-    assert harness.exports[0][2]["usage"]["deepgram_minutes"] == 0.0
-    assert harness.jev_calls == ["v1"]
-
-
 @pytest.mark.parametrize("choice", ["pause", "continue", None])
 def test_llm_quota_choice_controls_remaining_analysis(harness, choice):
     h = harness
@@ -706,29 +691,20 @@ def test_stop_during_second_page_exports_rows_not_yet_filtered(harness):
     assert "v2" not in h.jev_calls
 
 
-@pytest.mark.parametrize("formats", ["video_live", "reel_live", "video,reel", "video,reel,video_live,reel_live"])
-def test_cli_accepts_live_kinds(harness, monkeypatch, formats):
+@pytest.mark.parametrize("formats", ["video", "reel", "video,reel"])
+def test_cli_accepts_video_kinds(harness, monkeypatch, formats):
     seen = []
     monkeypatch.setattr(pipeline, "run", lambda params, settings, progress, stop: seen.append(params) or Path("result.xlsx"))
     assert pipeline.main(["--formats", formats]) == 0
     assert seen[0].formats == set(formats.split(","))
 
 
-@pytest.mark.parametrize("formats", ["post,video_live", "live", ""])
-def test_cli_rejects_mixed_posts_or_unknown_kinds(formats):
-    with pytest.raises(SystemExit):
+@pytest.mark.parametrize("formats", ["post,video", "video_live", "reel_live", "live", ""])
+def test_cli_rejects_mixed_posts_or_unknown_kinds(formats, capsys):
+    with pytest.raises(SystemExit) as exc:
         pipeline.main(["--formats", formats])
-
-
-def test_pipeline_preserves_collected_live_flag(harness):
-    h = harness
-    h.params.formats = {"video_live"}
-    h.rows["large"][0].update(format="video", is_live=True)
-    assert h.run() is not None
-    assert h.video_saved[0].is_live is True
-    assert h.exports[0][0][0].is_live is True
-    assert h.exports[0][2]["params"]["formats"] == ["video_live"]
-    assert h.scan_formats == [{"video_live"}]
+    assert exc.value.code == 2
+    assert "định dạng gồm video,reel hoặc riêng post" in capsys.readouterr().err
 
 
 def test_cli_defaults_exclude_live(harness, monkeypatch):
@@ -1092,7 +1068,7 @@ def test_translation_failure_adds_note_and_continues(harness, monkeypatch, error
                for record in caplog.records)
 
 
-def test_translation_auth_error_stops_video_before_analysis(harness, monkeypatch):
+def test_translation_auth_error_pauses_before_llm_analysis(harness, monkeypatch):
     def transcript(video, *args):
         video.transcript = "Original English."
         video.transcript_status = "ok"
@@ -1105,8 +1081,76 @@ def test_translation_auth_error_stops_video_before_analysis(harness, monkeypatch
     monkeypatch.setattr(pipeline.transcript, "get_transcript", transcript)
     monkeypatch.setattr(pipeline.llm_client, "translate_to_vi", translate)
     assert harness.run() is not None
-    assert harness.jev_calls == []
+    assert harness.jev_calls == ["v1"]  # nhãn độc lập đã chạy song song với dịch
     assert harness.analysis_calls == []
     assert any("Key LLM không hợp lệ" in message
                for message in harness.exports[0][2]["messages"])
     assert "Chưa dịch được thoại sang tiếng Việt" not in harness.exports[0][0][0].notes
+
+
+@pytest.mark.parametrize("value,expected", [
+    (None, 6), (-2, 1), (0, 1), (1, 1), (5, 5), (8, 8), (99, 8),
+    ("3", 3), ("invalid", 6),
+])
+def test_analysis_worker_setting_default_and_clamp(value, expected):
+    scan = {} if value is None else {"analyze_workers": value}
+    assert pipeline.analyze_workers({"scan": scan}) == expected
+
+
+def test_timings_are_logged_without_ui_timeline_entries(harness, caplog):
+    with caplog.at_level("INFO"):
+        harness.run()
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(message.startswith("Video 1 · thời gian: Jev ") for message in messages)
+    assert any(message.startswith("Kênh 1/1 · thời gian quét: đầu trang ") for message in messages)
+    summary, = [message for message in messages if message.startswith("Tổng thời gian:")]
+    for stage in ("quét kênh", "nghỉ giữa kênh", "chờ phân tích sau khi quét xong", "xuất Excel", "tổng"):
+        assert stage in summary
+    assert not any("thời gian" in progress.message for progress in harness.progress)
+
+
+def test_translation_and_labels_overlap_without_changing_results_or_usage(harness, monkeypatch):
+    barrier = Barrier(2)
+    labels = pipeline.jev_client.ask_labels
+    analysis = pipeline.llm_client.write_analysis
+
+    def transcript(video, *args):
+        video.transcript = "Original English."
+        video.transcript_status = "ok"
+        video.transcript_language = "en"
+        return 0.0
+
+    def translate(*args):
+        barrier.wait(timeout=5)
+        pipeline.llm_client._record(
+            SimpleNamespace(usage=SimpleNamespace(total_tokens=9, completion_tokens=3)), 0.5)
+        return "Bản dịch.", 9
+
+    def label(client, video, *args):
+        barrier.wait(timeout=5)
+        return labels(client, video, *args)
+
+    def write(client, model, video, *args):
+        assert video.transcript_vi == "Bản dịch."
+        assert video.jev["topic"] == "Nghề dược"
+        return analysis(client, model, video, *args)
+
+    monkeypatch.setattr(pipeline.transcript, "get_transcript", transcript)
+    monkeypatch.setattr(pipeline.llm_client, "translate_to_vi", translate)
+    monkeypatch.setattr(pipeline.jev_client, "ask_labels", label)
+    monkeypatch.setattr(pipeline.llm_client, "write_analysis", write)
+    monkeypatch.setattr(pipeline.db, "save_transcript", lambda *args, **kwargs: None)
+    assert harness.run() is not None
+    video, = harness.exports[0][0]
+    assert video.transcript == "Original English."
+    assert video.transcript_vi == "Bản dịch."
+    assert video.llm["goi_y_nhan_ban"] == [{"hook_moi": "Mẹo nhà thuốc", "y_tuong": "Một góc mới"}]
+    usage = harness.exports[0][2]["usage"]
+    assert usage["llm_tokens"] == 26
+    assert usage["llm_calls"] == 3
+    assert usage["llm_output_tokens"] == 9
+    assert usage["llm_seconds"] == 3.5
+    assert usage["jev_tokens"] == 14
+    assert usage["jev_calls"] == 2
+    turns = [p.turn for p in harness.progress if p.turn]
+    assert sum(turn["llm_tokens"] for turn in turns) == usage["llm_tokens"]

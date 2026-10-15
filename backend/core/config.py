@@ -21,7 +21,6 @@ CONFIG_DIR = ROOT / "config"
 DATA_DIR = ROOT / "data"
 OUTPUT_DIR = ROOT / "output"
 PROFILE_DIR = ROOT / "profile"
-MODELS_DIR = ROOT / "models"  # faster-whisper downloads models here on first use
 DB_PATH = DATA_DIR / "cache.db"
 COOKIE_FILE = DATA_DIR / "fb_cookies.txt"
 SETTINGS_FILE = CONFIG_DIR / "settings.json"

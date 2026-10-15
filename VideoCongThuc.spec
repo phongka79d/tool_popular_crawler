@@ -33,7 +33,9 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=["streamlit", "pandas", "pyarrow", "altair", "matplotlib", "tkinter"],
+    excludes=["streamlit", "pandas", "pyarrow", "altair", "matplotlib", "tkinter",
+              "faster_whisper", "ctranslate2", "onnxruntime", "av", "tokenizers",
+              "huggingface_hub", "hf_xet"],
     noarchive=False,
 )
 pyz = PYZ(a.pure)

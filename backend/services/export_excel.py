@@ -19,7 +19,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from backend.core import config
 from backend.services.filters import length_limit_text
-from backend.core.models import KIND_LABELS, Video, video_kind
+from backend.core.models import KIND_LABELS, Video
 from backend.core.normalize import to_vn_datetime
 
 log = logging.getLogger(__name__)
@@ -170,7 +170,7 @@ COLUMNS: tuple[_Column, ...] = (
     _Column("Kênh", lambda v, _: v.page_name or v.page_url, width=24),
     _Column("Follower kênh", lambda v, _: v.page_followers, FMT_INT),
     _Column("Ngày đăng", lambda v, _: _naive_vn(v.posted_at), FMT_DATETIME, width=17),
-    _Column("Định dạng", lambda v, _: KIND_LABELS.get(video_kind(v.format, v.is_live), v.format), width=14),
+    _Column("Định dạng", lambda v, _: KIND_LABELS.get(v.format, v.format), width=14),
     _Column("Thời lượng (giây)", lambda v, _: v.duration_s, FMT_INT, width=13),
     _Column("Link bài", lambda v, _: v.url, width=40, link=True),
     # Chỉ số

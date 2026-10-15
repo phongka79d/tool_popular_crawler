@@ -1,27 +1,24 @@
-"""Offline tests for collectors/transcript.py. Mọi HTTP, ffmpeg, faster-whisper và DB đều được giả lập."""
+"""Offline tests for collectors/transcript.py. Mọi HTTP, ffmpeg và DB đều được giả lập."""
 from __future__ import annotations
 
 import subprocess
-import sys
-import types
 from pathlib import Path
 from typing import Any
 
 import pytest
 import requests
 
-from backend.core import config
 from backend.collectors import transcript
 from backend.core.errors import AuthError, QuotaError, ServiceError
 from backend.core.models import Video
+
+_REAL_TRANSCRIBE_DEEPGRAM = transcript.transcribe_deepgram
 
 STT = {
     "provider": "deepgram",
     "model": "nova-3",
     "language": "vi",
     "keyterms_file": "config/keyterms.txt",
-    "fallback": "local_whisper",
-    "whisper_model": "small",
 }
 
 DG_PAYLOAD = {
@@ -392,68 +389,6 @@ def test_extract_audio_returns_none_on_ffmpeg_error(tmp_path, monkeypatch):
     assert transcript.extract_audio(tmp_path / "raw.mp4", tmp_path / "a.mp3") is None
 
 
-# --- transcribe_local -------------------------------------------------------
-
-@pytest.fixture
-def fresh_whisper_cache():
-    transcript._load_whisper.cache_clear()
-    yield
-    transcript._load_whisper.cache_clear()
-
-
-@pytest.mark.parametrize("settings, expected_language", [
-    ({}, None), ({"auto_language": False, "language": "en"}, "en"),
-])
-def test_transcribe_local_uses_cpu_int8_word_timestamps(monkeypatch, fresh_whisper_cache, settings, expected_language):
-    created: dict[str, Any] = {}
-
-    class FakeWord:
-        def __init__(self, word: str, start: float, end: float) -> None:
-            self.word, self.start, self.end = word, start, end
-
-    class FakeSegment:
-        def __init__(self, text: str, words: list[FakeWord] | None) -> None:
-            self.text, self.words = text, words
-
-    class FakeInfo:
-        duration = 4.2
-        language = "en"
-
-    class FakeWhisperModel:
-        def __init__(self, size: str, device: str, compute_type: str, download_root: str) -> None:
-            created["init"] = (size, device, compute_type, download_root)
-
-        def transcribe(self, path: str, language: str, word_timestamps: bool):
-            created["call"] = (path, language, word_timestamps)
-            segments = [
-                FakeSegment(" Chủ nhà thuốc.", [FakeWord(" Chủ", 0.1, 0.4),
-                                                 FakeWord(" nhà", 0.4, 0.7),
-                                                 FakeWord(" thuốc.", 0.7, 1.2)]),
-                FakeSegment("   ", None),
-            ]
-            return iter(segments), FakeInfo()
-
-    fake_module = types.ModuleType("faster_whisper")
-    fake_module.WhisperModel = FakeWhisperModel  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "faster_whisper", fake_module)
-
-    result = transcript.transcribe_local(Path("a.mp3"), "small", settings)
-
-    assert created["init"] == ("small", "cpu", "int8", str(config.MODELS_DIR))
-    assert created["call"] == ("a.mp3", expected_language, True)
-    assert result == {
-        "text": "Chủ nhà thuốc.",
-        "duration": 4.2,
-        "language": "en",
-        "language_confidence": None,
-        "words": [
-            {"punctuated_word": "Chủ", "start": 0.1, "end": 0.4},
-            {"punctuated_word": "nhà", "start": 0.4, "end": 0.7},
-            {"punctuated_word": "thuốc.", "start": 0.7, "end": 1.2},
-        ],
-    }
-
-
 # --- get_transcript ---------------------------------------------------------
 
 class Env:
@@ -473,9 +408,6 @@ class Env:
         self.extract_starts: list[int] = []  # start_s của từng lần tách audio
         self.dg_calls: list[tuple[Path, str, dict, list[str]]] = []
         self.deepgram: Any = None
-        self.local_calls: list[tuple[Path, str]] = []
-        self.local_settings: list[dict] = []
-        self.local: Any = None
 
 
 @pytest.fixture
@@ -506,13 +438,6 @@ def env(monkeypatch) -> Env:
             raise e.deepgram
         return e.deepgram
 
-    def fake_local(path: Path, model_size: str, stt: dict) -> Any:
-        e.local_calls.append((Path(path), model_size))
-        e.local_settings.append(stt)
-        if isinstance(e.local, BaseException):
-            raise e.local
-        return e.local
-
     monkeypatch.setattr(transcript.db, "get_transcript", lambda video_id: e.cached)
     monkeypatch.setattr(transcript.db, "get_video", lambda video_id: e.stored)
     def fake_save(video_id, text, status, hook, transcript_language=""):
@@ -523,7 +448,6 @@ def env(monkeypatch) -> Env:
     monkeypatch.setattr(transcript, "download_audio", fake_download)
     monkeypatch.setattr(transcript, "extract_audio", fake_extract)
     monkeypatch.setattr(transcript, "transcribe_deepgram", fake_deepgram)
-    monkeypatch.setattr(transcript, "transcribe_local", fake_local)
     return e
 
 
@@ -535,7 +459,6 @@ def test_deepgram_success_saves_ok_bills_minutes_and_removes_temp_audio(env, tmp
 
     assert minutes == pytest.approx(1.5)
     assert env.dg_calls == [(env.audio_path, "dg-key", STT, ["GPP"])]
-    assert env.local_calls == []
     assert video.transcript == TIMED_HOOK
     assert video.transcript_status == "ok"
     assert video.hook == TIMED_HOOK
@@ -545,57 +468,31 @@ def test_deepgram_success_saves_ok_bills_minutes_and_removes_temp_audio(env, tmp
     assert not env.raw_path.exists()
 
 
-def test_quota_error_falls_back_to_local_whisper_and_warns(env, tmp_path):
+def test_quota_error_warns_marks_failed_and_retries_instead_of_using_cache(env, tmp_path):
     env.deepgram = QuotaError("deepgram", QUOTA_MSG)
-    env.local = {"text": "Chủ nhà thuốc.", "duration": 4.0, "words": TIMED_WORDS}
     video = _video()
-
     warnings = []
+
     minutes = transcript.get_transcript(video, "dg-key", STT, [], tmp_path / "tmp", warnings)
-    assert warnings == [QUOTA_MSG + " Đã dùng local whisper."]
 
+    assert warnings == [QUOTA_MSG + " Nạp thêm hoặc đổi key Deepgram trong Cài đặt rồi quét lại."]
     assert minutes == 0.0
-    assert env.local_calls == [(env.audio_path, "small")]
-    assert env.local_settings == [STT]
-    assert video.transcript == "Chủ nhà thuốc."
-    assert video.transcript_status == "ok"
-    assert video.hook == TIMED_HOOK
-    assert video.notes == []
-    assert env.saved == [("vid1", "Chủ nhà thuốc.", "ok", TIMED_HOOK)]
-    assert not env.audio_path.exists()
-    assert not env.raw_path.exists()
-
-
-def test_quota_error_without_fallback_marks_failed_with_note(env, tmp_path):
-    env.deepgram = QuotaError("deepgram", QUOTA_MSG)
-    stt = {**STT, "fallback": "none"}
-    video = _video()
-
-    warnings = []
-    minutes = transcript.get_transcript(video, "dg-key", stt, [], tmp_path / "tmp", warnings)
-    assert warnings == [QUOTA_MSG + " Không dùng local whisper (đã tắt dự phòng)."]
-
-    assert minutes == 0.0
-    assert env.local_calls == []
     assert video.transcript == ""
     assert video.transcript_status == "failed"
     assert video.notes == ["Chưa lấy được thoại"]
     expected_hook = "Cảnh báo sai lầm khi bán thuốc"
     assert video.hook == expected_hook
     assert env.saved == [("vid1", "", "failed", expected_hook)]
+    assert not env.audio_path.exists()
+    assert not env.raw_path.exists()
 
-
-def test_local_whisper_failure_marks_failed_without_raising(env, tmp_path):
-    env.deepgram = QuotaError("deepgram", QUOTA_MSG)
-    env.local = RuntimeError("không tải được model")
-    video = _video()
-
-    minutes = transcript.get_transcript(video, "dg-key", STT, [], tmp_path / "tmp")
-
-    assert minutes == 0.0
-    assert video.transcript_status == "failed"
-    assert video.notes == ["Chưa lấy được thoại"]
-    assert env.saved[0][2] == "failed"
+    env.cached = ("", "failed")
+    env.deepgram = {"text": TIMED_HOOK, "duration": 60.0, "words": TIMED_WORDS}
+    retried = _video()
+    assert transcript.get_transcript(retried, "dg-key", STT, [], tmp_path / "tmp") == 1.0
+    assert env.downloads == 2
+    assert retried.transcript_status == "ok"
+    assert retried.transcript == TIMED_HOOK
 
 
 def test_empty_transcript_is_no_speech_and_still_bills_deepgram_minutes(env, tmp_path):
@@ -707,16 +604,13 @@ def test_cached_failed_transcript_is_retried(env, tmp_path):
     assert env.saved[0][2] == "ok"
 
 
-@pytest.mark.parametrize("fallback", ["local_whisper", "none"])
-def test_auth_error_propagates_without_local_fallback_and_cleans_files(env, tmp_path, fallback):
+def test_auth_error_propagates_and_cleans_files(env, tmp_path):
     error = AuthError("deepgram", AUTH_MSG)
     env.deepgram = error
     warnings = []
     with pytest.raises(AuthError) as caught:
-        transcript.get_transcript(_video(), "dg-key", {**STT, "fallback": fallback},
-                                  [], tmp_path / "tmp", warnings)
+        transcript.get_transcript(_video(), "dg-key", STT, [], tmp_path / "tmp", warnings)
     assert caught.value is error
-    assert env.local_calls == []
     assert env.saved == []
     assert warnings == []
     assert not env.audio_path.exists()
@@ -804,14 +698,84 @@ def test_low_confidence_retry_quota_keeps_first_call_billing(env, tmp_path, monk
                 "language": "en", "language_confidence": 0.1}
 
     monkeypatch.setattr(transcript, "transcribe_deepgram", fake_deepgram)
-    env.local = {"text": "Hello", "duration": 60.0, "words": [],
-                 "language": "en", "language_confidence": None}
     usage = []
     video = _video()
     with transcript.observe_usage(usage.append):
         minutes = transcript.get_transcript(video, "k", STT, [], tmp_path)
     assert minutes == 1.0
     assert usage == [1.0, 0.0]
-    assert video.transcript == "Hello"
-    assert video.transcript_language == "en"
-    assert env.local_settings == [STT]
+    assert video.transcript == ""
+    assert video.transcript_status == "failed"
+    assert env.saved[0][2] == "failed"
+
+
+@pytest.mark.parametrize("duration,extension,direct", [
+    (30, ".m4a", True), (600, ".MP4", True), (10, ".webm", True),
+    (10, ".opus", True), (10, ".ogg", True), (10, ".mp3", True),
+    (None, ".m4a", False), (0, ".m4a", False), (601, ".m4a", False),
+    (30, ".wav", False),
+])
+def test_original_audio_decision_and_ffmpeg_path(env, tmp_path, monkeypatch, duration, extension, direct):
+    raw = tmp_path / ("raw" + extension)
+    raw.write_bytes(b"raw")
+    monkeypatch.setattr(transcript, "download_audio", lambda *args, **kwargs: raw)
+    env.deepgram = {"text": TIMED_HOOK, "duration": 30.0, "words": TIMED_WORDS}
+    assert transcript.get_transcript(_video(duration_s=duration), "k", STT, [], tmp_path) == 0.5
+    assert env.extract_starts == ([] if direct else [0])
+    assert env.dg_calls[0][0] == (raw if direct else env.audio_path)
+    assert not raw.exists()
+
+
+def test_large_original_audio_keeps_ffmpeg_path(env, tmp_path, monkeypatch):
+    monkeypatch.setattr(transcript, "MAX_DIRECT_AUDIO_BYTES", 3)
+    env.deepgram = {"text": TIMED_HOOK, "duration": 30.0, "words": TIMED_WORDS}
+    transcript.get_transcript(_video(duration_s=30), "k", STT, [], tmp_path)
+    assert env.extract_starts == [0]
+
+
+@pytest.mark.parametrize("extension,content_type", [
+    (".m4a", "audio/mp4"), (".mp4", "audio/mp4"), (".webm", "audio/webm"),
+    (".opus", "audio/ogg"), (".ogg", "audio/ogg"), (".mp3", "audio/mpeg"),
+])
+def test_deepgram_original_content_type(tmp_path, monkeypatch, extension, content_type):
+    audio = tmp_path / ("audio" + extension)
+    audio.write_bytes(b"audio")
+    def post(url, **kwargs):
+        assert kwargs["headers"]["Content-Type"] == content_type
+        assert kwargs["data"].read() == b"audio"
+        return FakeResponse(200, DG_PAYLOAD)
+    monkeypatch.setattr(transcript.requests, "post", post)
+    assert transcript.transcribe_deepgram(audio, "k", STT, [])["text"]
+
+
+def test_original_400_retries_once_through_ffmpeg(env, tmp_path, monkeypatch):
+    calls = []
+    def post(url, **kwargs):
+        calls.append((kwargs["headers"]["Content-Type"], kwargs["data"].read()))
+        return FakeResponse(400) if len(calls) == 1 else FakeResponse(200, DG_PAYLOAD)
+    monkeypatch.setattr(transcript, "transcribe_deepgram", _REAL_TRANSCRIBE_DEEPGRAM)
+    monkeypatch.setattr(transcript.requests, "post", post)
+    usage = []
+    timings = {}
+    with transcript.observe_usage(usage.append), transcript.observe_timing(
+            lambda stage, seconds: timings.__setitem__(stage, timings.get(stage, 0) + seconds)):
+        minutes = transcript.get_transcript(_video(duration_s=30), "k", STT, [], tmp_path)
+    assert calls == [("audio/mp4", b"raw"), ("audio/mpeg", b"ID3")]
+    assert env.extract_starts == [0]
+    assert minutes == 61.5 / 60
+    assert usage == [0.0, 61.5 / 60]
+    assert set(timings) == {"tải audio", "ffmpeg", "Deepgram"}
+    assert not env.raw_path.exists() and not env.audio_path.exists()
+
+
+def test_original_400_fallback_does_not_retry_a_second_400(env, tmp_path, monkeypatch):
+    calls = []
+    def post(url, **kwargs):
+        calls.append(kwargs["headers"]["Content-Type"])
+        return FakeResponse(400)
+    monkeypatch.setattr(transcript, "transcribe_deepgram", _REAL_TRANSCRIBE_DEEPGRAM)
+    monkeypatch.setattr(transcript.requests, "post", post)
+    with pytest.raises(requests.HTTPError):
+        transcript.get_transcript(_video(duration_s=30), "k", STT, [], tmp_path)
+    assert calls == ["audio/mp4", "audio/mpeg"]
+    assert env.extract_starts == [0]

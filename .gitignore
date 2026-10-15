@@ -9,6 +9,8 @@ __pycache__/
 # Distribution / packaging
 .Python
 build/
+# Pinned FFmpeg archive/executable and incomplete downloads
+build/ffmpeg-cache/
 develop-eggs/
 dist/
 downloads/

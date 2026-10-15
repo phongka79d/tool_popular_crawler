@@ -164,6 +164,17 @@ def open_output_folder() -> dict:
     return {"ok": True}
 
 
+def open_guide() -> dict:
+    for path in (config.ROOT / "HUONG-DAN.pdf", config.ROOT / "docs" / "HUONG-DAN.pdf"):
+        if path.is_file():
+            try:
+                os.startfile(path)
+            except (OSError, AttributeError):
+                return fail("Không thể mở file hướng dẫn trên máy này.")
+            return {"ok": True}
+    return fail("Không tìm thấy file HUONG-DAN.pdf cạnh ứng dụng.")
+
+
 def save_result_copy(name: str, dest: str) -> dict:
     try:
         source, target = _named_path(name), Path(dest).resolve()

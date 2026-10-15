@@ -158,9 +158,8 @@ def test_post_ignores_ratio():
     assert not passes(make_video(format="post", interactions=10), min_interactions=200, min_ratio_follow=10, match_all=False)
 
 
-@pytest.mark.parametrize("kind,expected", [("video", True), ("reel", False),
-                                          ("video_live", True), ("reel_live", False)])
-def test_length_limits_are_independent_and_live_uses_base(kind, expected):
+@pytest.mark.parametrize("kind,expected", [("video", True), ("reel", False)])
+def test_length_limits_are_independent(kind, expected):
     video = make_video(format=kind, duration_s=120, views=100_000)
     limits = {"video": (60, None), "reel": (None, 90)}
     assert passes(video, min_views=50_000, match_all=False, length_limits=limits) is expected

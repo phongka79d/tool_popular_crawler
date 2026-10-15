@@ -1,2 +1,88 @@
-:root{color-scheme:light;--bg:#F6F7FB;--surface:#fff;--surface-hover:#f0f1f8;--text:#202332;--muted:#666c80;--border:#e3e5ee;--primary:#5b5bd6;--primary-hover:#4949bf;--primary-soft:#eeeefe;--success:#24724c;--success-soft:#eaf7ef;--warning:#925f0c;--warning-soft:#fff6e2;--danger:#bd3549;--danger-soft:#ffedf0;--info:#3264af;--info-soft:#edf4ff;--radius:12px;--shadow:0 2px 8px #20233205,0 10px 30px #20233203;--ring:0 0 0 3px #5b5bd640;--space:8px;--font:"Segoe UI Variable Text","Segoe UI",system-ui,sans-serif;--mono:Consolas,"Cascadia Code",monospace;--chart-1:#6868dd;--chart-2:#2ba58d;--chart-3:#d99740;--chart-4:#ba6bcd}
-@media(prefers-color-scheme:dark){:root{color-scheme:dark;--bg:#14151c;--surface:#1c1e28;--surface-hover:#272a37;--text:#eceef7;--muted:#a2a8bf;--border:#323545;--primary:#a09aff;--primary-hover:#b7b2ff;--primary-soft:#302d50;--success:#80d5a6;--success-soft:#1b352b;--warning:#efc578;--warning-soft:#3b301c;--danger:#ff94a4;--danger-soft:#3d2430;--info:#9bbfff;--info-soft:#223149;--shadow:0 4px 16px #0002;--chart-1:#a09aff;--chart-2:#67cbb5;--chart-3:#efbd70;--chart-4:#d395e4}}
+/* Design tokens. Visual language follows the earlier Streamlit version the users liked:
+   neutral canvas, thin translucent borders, one warm primary (coral red), status colors as text tints. */
+:root {
+  color-scheme: light;
+
+  --bg: #ffffff;
+  --surface: #ffffff;
+  --surface-2: #f0f2f6;          /* inputs, segmented controls, code blocks */
+  --surface-hover: #e8ebf1;
+  --text: #31333f;
+  --text-strong: #14151a;
+  --muted: #6b6f7d;
+  --border: rgba(49, 51, 63, 0.16);
+  --border-strong: rgba(49, 51, 63, 0.28);
+
+  --primary: #ff4b4b;
+  --primary-hover: #e93d3d;
+  --primary-soft: rgba(255, 75, 75, 0.1);
+  --on-primary: #ffffff;
+
+  --success: #177233;
+  --success-soft: rgba(33, 195, 84, 0.12);
+  --warning: #926c05;
+  --warning-soft: rgba(255, 189, 69, 0.18);
+  --danger: #c62a2a;
+  --danger-soft: rgba(255, 43, 43, 0.1);
+  --info: #0054a3;
+  --info-soft: rgba(28, 131, 225, 0.1);
+
+  --chart-1: #0068c9;
+  --chart-2: #83c9ff;
+  --chart-3: #ff2b2b;
+  --chart-4: #ffabab;
+
+  --radius: 10px;
+  --radius-sm: 8px;
+  --shadow: 0 1px 2px rgba(20, 21, 26, 0.04);
+  --shadow-pop: 0 12px 32px rgba(20, 21, 26, 0.18);
+  --ring: 0 0 0 3px rgba(255, 75, 75, 0.28);
+
+  --font: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --font-display: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+  --mono: "Cascadia Mono", Consolas, monospace;
+
+  --fs-xs: 12px;
+  --fs-sm: 13px;
+  --fs-md: 15px;
+  --fs-lg: 17px;
+  --fs-xl: 22px;
+  --fs-2xl: 30px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+
+    --bg: #0e1117;
+    --surface: #0e1117;
+    --surface-2: #262730;
+    --surface-hover: #31333f;
+    --text: #e6e8ee;
+    --text-strong: #fafafa;
+    --muted: #a3a8b8;
+    --border: rgba(250, 250, 250, 0.14);
+    --border-strong: rgba(250, 250, 250, 0.26);
+
+    --primary: #ff4b4b;
+    --primary-hover: #ff6a6a;
+    --primary-soft: rgba(255, 75, 75, 0.16);
+
+    --success: #3dd56d;
+    --success-soft: rgba(61, 213, 109, 0.14);
+    --warning: #ffd16a;
+    --warning-soft: rgba(255, 209, 106, 0.14);
+    --danger: #ff6c6c;
+    --danger-soft: rgba(255, 108, 108, 0.14);
+    --info: #60b4ff;
+    --info-soft: rgba(96, 180, 255, 0.14);
+
+    --chart-1: #83c9ff;
+    --chart-2: #0068c9;
+    --chart-3: #ff4b4b;
+    --chart-4: #ffabab;
+
+    --shadow: none;
+    --shadow-pop: 0 16px 40px rgba(0, 0, 0, 0.55);
+  }
+}

@@ -36,6 +36,7 @@ BRIDGE_CALLS = [
     ("delete_result", results, ("result.xlsx",)),
     ("open_result", results, ("result.xlsx",)),
     ("open_output_folder", results, ()),
+    ("open_guide", results, ()),
 ]
 
 

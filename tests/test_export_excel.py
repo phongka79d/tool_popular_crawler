@@ -458,17 +458,16 @@ def test_summary_ranks_score_then_count_with_missing_last(field, table):
     rows = xl.build_summary_tables(videos)[table]
     assert [row["label"] for row in rows] == ["Best", "Tie", "Popular", "Zero", "Missing"]
 
-def test_live_labels_in_details_and_log_params(tmp_path):
-    videos = [Video(kind, kind, "page", format=kind.removesuffix("_live"), is_live=kind.endswith("_live"))
-              for kind in ("video", "reel", "video_live", "reel_live", "post")]
-    path = xl.export(videos, {}, {"params": {"formats": ["video_live", "reel_live"]}}, out_dir=tmp_path, now=NOW)
+def test_kind_labels_in_details_and_log_params(tmp_path):
+    videos = [Video(kind, kind, "page", format=kind) for kind in ("video", "reel", "post")]
+    path = xl.export(videos, {}, {"params": {"formats": ["video", "reel"]}}, out_dir=tmp_path, now=NOW)
     workbook = load_workbook(path)
     try:
         detail = workbook[xl.SHEET_DETAIL]
-        assert {detail.cell(row, _col("Định dạng")).value for row in range(3, 8)} == {
-            "Video", "Reel", "Video (Live)", "Reel (Live)", "Bài đăng"}
+        assert {detail.cell(row, _col("Định dạng")).value for row in range(3, 6)} == {
+            "Video", "Reel", "Bài đăng"}
         values = [cell.value for row in workbook[xl.SHEET_LOG] for cell in row]
-        assert "Reel (Live), Video (Live)" in values
+        assert "Reel, Video" in values
     finally:
         workbook.close()
 

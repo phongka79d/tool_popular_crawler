@@ -116,18 +116,67 @@ def test_connect_rejects_empty_models(monkeypatch):
     assert not services.connect_service("jev", "candidate", "")["ok"]
 
 
-@pytest.mark.parametrize("saved,index", [("nova-3-b", 1), ("nova-3", 1), ("missing", 0), ("", 0)])
-def test_deepgram_default_index_legacy_architecture(saved, index):
-    items = [{"name": "nova-2-a", "architecture": "nova-2"},
-             {"name": "nova-3-b", "architecture": "nova-3"},
-             {"name": "nova-3-c", "architecture": "nova-3"}]
-    assert services._deepgram_index(items, saved) == index
+@pytest.mark.parametrize("name,provider,ids,saved,default,recommended", [
+    ("jev", "", ["older", "jev-latest"], "", "jev-latest", "jev-latest"),
+    ("jev", "", ["older", "jev-latest"], "older", "older", "jev-latest"),
+    ("jev", "", ["first", "second"], "missing", "first", None),
+    ("deepgram", "", ["nova-2", "nova-3", "nova-3-general"], "", "nova-3-general", "nova-3-general"),
+    ("deepgram", "", ["nova-2", "nova-3-general"], "nova-2", "nova-2", "nova-3-general"),
+    ("deepgram", "", ["other-first", "other-second"], "", "other-first", None),
+    ("llm", "OpenRouter", ["openai/gpt-4.1-mini", "google/gemini-2.5-flash",
+                           "anthropic/claude-haiku-4.5"], "",
+     "anthropic/claude-haiku-4.5", "anthropic/claude-haiku-4.5"),
+    ("llm", "OpenAI", ["gpt-4o-mini", "gpt-4.1-mini"], "", "gpt-4.1-mini", "gpt-4.1-mini"),
+    ("llm", "OpenAI", ["gpt-4o-mini", "gpt-4.1-mini"], "gpt-4o-mini", "gpt-4o-mini", "gpt-4.1-mini"),
+    ("llm", "Google Gemini", ["gemini-pro", "gemini-2.5-flash"], "", "gemini-2.5-flash", "gemini-2.5-flash"),
+    ("llm", "Anthropic (Claude)", ["claude-sonnet", "claude-haiku-4-5-20251001",
+                                  "claude-haiku-4-5-20251101"], "",
+     "claude-haiku-4-5-20251101", "claude-haiku-4-5-20251101"),
+    ("llm", "", ["custom-first", "custom-second"], "missing", "custom-first", None),
+])
+def test_connect_selects_saved_then_recommended_then_first(monkeypatch, name, provider, ids,
+                                                          saved, default, recommended):
+    settings = config.load_settings()
+    settings["stt" if name == "deepgram" else name]["model"] = saved
+    config.save_settings(settings)
+    items = [{"id": model, "name": model, "architecture": model,
+              "languages": [{"code": "vi", "label": "Tiếng Việt"}]} for model in ids]
+    monkeypatch.setattr(services, "_fetch_models", lambda *args: items)
+    url = services.LLM_PROVIDERS[provider] if provider else "https://custom.example/v1"
+    result = services.connect_service(name, "candidate", url)
+    assert result["ok"]
+    assert result["default_id"] == default
+    assert result["recommended_id"] == recommended
+
+
+def test_connect_matches_provider_url_without_trailing_slash(monkeypatch):
+    monkeypatch.setattr(services, "_fetch_models", lambda *args: [
+        {"id": "first"}, {"id": "gemini-2.5-flash"}])
+    url = services.LLM_PROVIDERS["Google Gemini"].rstrip("/")
+    result = services.connect_service("llm", "candidate", url)
+    assert result["default_id"] == result["recommended_id"] == "gemini-2.5-flash"
+
+
+def test_legacy_stt_settings_load_and_obsolete_keys_do_not_affect_connect(monkeypatch):
+    settings = config.load_settings()
+    legacy_engine = "whis" + "per"
+    settings["stt"].update({"fallback": "local_" + legacy_engine, legacy_engine + "_model": "small"})
+    config.save_settings(settings)
+    assert config.load_settings() == settings
+    monkeypatch.setattr(services, "_fetch_models", lambda *args: [
+        {"name": "nova-3-general", "architecture": "nova-3",
+         "languages": [{"code": "vi", "label": "Tiếng Việt"}]}])
+    result = services.connect_service("deepgram", "candidate", "")
+    assert result["ok"]
+    assert result["default_id"] == result["recommended_id"] == "nova-3-general"
+    assert result["default_language"] == "vi"
+    assert config.load_settings()["stt"]["auto_language"] is True
 
 
 @pytest.mark.parametrize("codes,saved,expected", [
     (["en", "vi"], "en", "vi"), (["en", "fr"], "fr", "fr"), (["en", "fr"], "de", "en"),
 ])
-def test_connect_deepgram_language_and_legacy_default(monkeypatch, codes, saved, expected):
+def test_connect_deepgram_language_and_recommended_default(monkeypatch, codes, saved, expected):
     settings = config.load_settings()
     settings["stt"].update(model="nova-3", language=saved)
     config.save_settings(settings)

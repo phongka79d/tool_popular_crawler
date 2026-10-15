@@ -31,9 +31,8 @@ from backend.core.models import VIDEO_KINDS, Video
 
 logger = logging.getLogger(__name__)
 
-# Số video phân tích cùng lúc. Mỗi video chủ yếu chờ mạng (Deepgram, Jev, LLM ~1 phút/lần gọi),
-# nên chạy song song rút ngắn thời gian gần bằng số luồng mà không tốn thêm CPU.
-ANALYZE_WORKERS = 4
+# Chỉ tăng song song các API phân tích, không tăng request tới Facebook.
+ANALYZE_WORKERS = 6
 MAX_POST_IMAGES = 4
 _METRICS = ("views", "reactions", "comments", "shares", "posted_at", "duration_s")
 
@@ -105,6 +104,15 @@ def llm_speed(output_tokens: float, seconds: float) -> int | None:
 
 def _seconds_text(seconds: float) -> str:
     return f"{seconds:.1f}".replace(".", ",")
+
+
+def analyze_workers(settings: dict) -> int:
+    """Giới hạn số video phân tích song song để không tạo quá nhiều request API."""
+    try:
+        value = int(settings["scan"].get("analyze_workers", ANALYZE_WORKERS))
+    except (TypeError, ValueError, OverflowError):
+        value = ANALYZE_WORKERS
+    return max(1, min(8, value))
 
 
 def _speed_text(meter: dict) -> str:
@@ -188,9 +196,15 @@ def run(
 
     `ask_user` chờ lựa chọn khi LLM hết hạn mức; CLI mặc định tiếp tục không có gợi ý.
     Mỗi kênh được bổ sung số liệu và lọc riêng; video đạt ngưỡng bắt đầu phân tích ngay,
-    song song với nghỉ lịch sự và quét kênh tiếp theo. Tối đa ANALYZE_WORKERS video cùng lúc;
+    song song với nghỉ lịch sự và quét kênh tiếp theo; số luồng lấy từ scan.analyze_workers.
     `on_progress` và `ask_user` có thể được gọi từ các luồng đó.
     """
+    run_started = time.monotonic()
+    run_times = {"quét kênh": 0.0, "nghỉ giữa kênh": 0.0,
+                 "chờ phân tích sau khi quét xong": 0.0, "xuất Excel": 0.0}
+    analyses_done_at = None
+    scan_finished_at = None
+    export_started = None
     config.ensure_dirs()
     db.init_db()
     params_log = asdict(params)
@@ -365,6 +379,19 @@ def run(
     def analyze(number: int, video: Video, taxonomy: dict, ban_words: list[str],
                 keyterms: list[str], turn: dict) -> str:
         """Phân tích một video trên luồng phân tích; trả kết quả ngắn để báo tiến độ."""
+        started = time.monotonic()
+        durations: dict[str, float] = {}
+
+        def add_time(stage: str, seconds: float) -> None:
+            with lock:
+                durations[stage] = durations.get(stage, 0.0) + seconds
+
+        def measured(stage: str, function, *args, **kwargs):
+            before = time.monotonic()
+            try:
+                return function(*args, **kwargs)
+            finally:
+                add_time(stage, time.monotonic() - before)
 
         def say(text: str) -> None:
             with lock:  # giữ thứ tự sự kiện đúng với bộ đếm video đã xong
@@ -388,7 +415,7 @@ def run(
                         images = download_images(video.image_urls)
                         say(f"AI đọc {len(images)} ảnh…")
                         if images:
-                            (video.transcript, _), meter = call_llm(
+                            (video.transcript, _), meter = measured("LLM", call_llm,
                                 turn, llm_client.describe_images,
                                 llm_instance(), settings["llm"]["model"], images, video.caption,
                                 llm_client.reasoning_effort(settings), tokens=lambda result: result[1],
@@ -409,7 +436,7 @@ def run(
                     deepgram_calls += 1
                     add_usage({"deepgram_minutes": minutes, "deepgram_calls": 1}, turn, video=video)
 
-                with transcript.observe_usage(deepgram_completed):
+                with transcript.observe_usage(deepgram_completed), transcript.observe_timing(add_time):
                     minutes = transcript.get_transcript(
                         video, credentials["deepgram"], settings["stt"], keyterms, config.DATA_DIR / "tmp",
                         warnings,
@@ -424,13 +451,16 @@ def run(
                     with lock:
                         run_log["messages"].append(warning)
                     say(warning)
+            def translate() -> None:
                 if (video.transcript_language.startswith("en") and video.transcript
                         and not video.transcript_vi):
+                    llm_client.meter_take()
                     say("LLM dịch thoại sang tiếng Việt…")
                     try:
-                        (video.transcript_vi, _), _ = call_llm(
-                            turn, llm_client.translate_to_vi, settings["llm"]["base_url"],
-                            credentials["llm"], settings["llm"]["model"], video.transcript,
+                        (video.transcript_vi, _), _ = measured(
+                            "dịch", call_llm, turn, llm_client.translate_to_vi,
+                            settings["llm"]["base_url"], credentials["llm"],
+                            settings["llm"]["model"], video.transcript,
                             tokens=lambda result: _tokens(result[1]), video=video,
                         )
                         db.save_transcript(
@@ -448,10 +478,23 @@ def run(
                         with lock:
                             run_log["messages"].append(warning)
                         say(warning)
+
             checkpoint()
-            say("Jev gắn nhãn chủ đề, kiểu hook, cấu trúc…")
-            raw, _ = call_jev(turn, jev_client.ask_labels, jev_instance(), video, taxonomy,
-                                  settings, video=video)
+            if (video.transcript_language.startswith("en") and video.transcript
+                    and not video.transcript_vi):
+                with ThreadPoolExecutor(max_workers=1, thread_name_prefix="dich") as translation_pool:
+                    translation = translation_pool.submit(translate)
+                    try:
+                        say("Jev gắn nhãn chủ đề, kiểu hook, cấu trúc…")
+                        raw, _ = measured("Jev", call_jev, turn, jev_client.ask_labels,
+                                          jev_instance(), video, taxonomy, settings, video=video)
+                    finally:
+                        # Luôn chờ dịch, chuyển AuthError về luồng chính trước khi gọi LLM.
+                        translation.result()
+            else:
+                say("Jev gắn nhãn chủ đề, kiểu hook, cấu trúc…")
+                raw, _ = measured("Jev", call_jev, turn, jev_client.ask_labels,
+                                  jev_instance(), video, taxonomy, settings, video=video)
             video.jev = jev_client.interpret_labels(raw, settings, taxonomy)
             video.score = filters.formula_score(
                 video.ratio_median, video.jev.get("replicable_p"), video.jev.get("hook_strength"),
@@ -475,7 +518,7 @@ def run(
                 checkpoint()
                 say("LLM viết phân tích và gợi ý (thường dưới 1 phút)…" if attempt == 0
                     else "Jev loại hết gợi ý; LLM viết lại lần 2…")
-                analysis, _ = call_llm(
+                analysis, _ = measured("LLM", call_llm,
                     turn, llm_client.write_analysis, llm_instance(), settings["llm"]["model"],
                     video, video.jev, settings, tokens=lambda result: _tokens(result.get("_usage")),
                     video=video,
@@ -490,7 +533,7 @@ def run(
                 kept: list = []
                 if suggestions:
                     say(f"Jev kiểm tra {len(suggestions)} gợi ý…")
-                    kept, check_raw, usage = call_jev(
+                    kept, check_raw, usage = measured("Jev duyệt", call_jev,
                         turn, jev_client.check_suggestions, jev_instance(), video, suggestions,
                         settings, video=video,
                     )
@@ -513,6 +556,12 @@ def run(
         except Exception as exc:
             video.notes.append(add_error(exc, video))
             return "lỗi, xem Nhật ký"
+        finally:
+            order = ("tải audio", "ffmpeg", "Deepgram", "dịch", "Jev", "LLM", "Jev duyệt")
+            with lock:
+                parts = [f"{stage} {_seconds_text(durations[stage])}s" for stage in order if stage in durations]
+            parts.append(f"tổng {_seconds_text(time.monotonic() - started)}s")
+            logger.info("%s %s · thời gian: %s", item_label.capitalize(), number, " · ".join(parts))
 
     def analyze_all(pool: ThreadPoolExecutor, page_passed: list[Video]) -> None:
         """Đưa video đạt ngưỡng của từng kênh vào cùng một hàng đợi phân tích."""
@@ -524,6 +573,7 @@ def run(
         keyterms = [] if post_run else config.load_lines(settings["stt"].get("keyterms_file", "config/keyterms.txt"))
         def task(number: int, video: Video) -> None:
             nonlocal analyzed_count
+            nonlocal analyses_done_at
             turn = new_turn(f"{item_label.capitalize()} {number}")
             try:
                 result = analyze(number, video, taxonomy, ban_words, keyterms, turn)
@@ -535,6 +585,8 @@ def run(
                 return
             finally:
                 take_llm(turn, video=video)  # tính cả lượt thành công trước khi xử lý kết quả gặp lỗi
+                with lock:
+                    analyses_done_at = time.monotonic()
             meter = {"calls": turn["llm_calls"], "output_tokens": turn["llm_output_tokens"],
                      "seconds": turn["llm_seconds"]}
             with lock:
@@ -551,7 +603,7 @@ def run(
 
     @contextmanager
     def analysis_pool():
-        pool = ThreadPoolExecutor(max_workers=ANALYZE_WORKERS, thread_name_prefix="phan-tich")
+        pool = ThreadPoolExecutor(max_workers=analyze_workers(settings), thread_name_prefix="phan-tich")
         try:
             yield pool
         finally:
@@ -607,8 +659,16 @@ def run(
                         continue
                     emit("scan", f"{where}: mở trang, đọc tên và số người theo dõi…")
                     page_items: list[Video] = []
+                    header_seconds = 0.0
+                    scan_seconds = 0.0
+                    tab_times = {}
                     try:
-                        page = scanner.get_page_info(page_url)
+                        header_started = time.monotonic()
+                        try:
+                            page = scanner.get_page_info(page_url)
+                        finally:
+                            header_seconds = time.monotonic() - header_started
+                            scan_finished_at = time.monotonic()
                         checkpoint()
                         entry.update(name=page.name, followers=page.followers)
                         db.upsert_page(page)
@@ -619,6 +679,7 @@ def run(
                             entry["errors"].append("Chưa xác định được follower của kênh")
                         scan_failure = None
                         try:
+                            scan_started = time.monotonic()
                             rows = scanner.scan_page(
                                 page_url, days=params.days, formats=params.formats,
                                 max_videos=settings["scan"]["max_videos_per_page"], stop_event=scan_stop,
@@ -628,6 +689,10 @@ def run(
                         except ServiceError as exc:
                             rows = getattr(exc, "partial_rows", [])
                             scan_failure = exc
+                        finally:
+                            scan_finished_at = time.monotonic()
+                            scan_seconds = scan_finished_at - scan_started
+                            tab_times = dict(getattr(scanner, "scan_timings", {}))
                         entry["errors"].extend(getattr(scanner, "scan_errors", []))
                         for row in rows:
                             # Giữ các mục đã thu được khi Dừng trong lúc cuộn.
@@ -653,6 +718,12 @@ def run(
                         raise
                     except Exception as exc:
                         add_error(exc)
+                    finally:
+                        run_times["quét kênh"] += header_seconds + scan_seconds
+                        parts = [f"đầu trang {_seconds_text(header_seconds)}s"]
+                        parts.extend(f"tab {label} {_seconds_text(seconds)}s"
+                                     for label, seconds in tab_times.items())
+                        logger.info("%s · thời gian quét: %s", where, " · ".join(parts))
                     checkpoint()
                     missing = [] if post_run else [video for video in page_items
                                if not video.caption or any(getattr(video, metric) is None for metric in _METRICS)]
@@ -683,8 +754,12 @@ def run(
                     if page_index < len(channels):
                         rest = "Nghỉ giữa hai kênh như người dùng thật, tránh bị Facebook chặn"
                         emit("scan", f"{rest}…")
-                        scanner.polite_page_pause(stop_event=scan_stop, on_tick=lambda left: emit(
-                            "scan", f"{rest} · còn {left} giây", transient=True))
+                        pause_started = time.monotonic()
+                        try:
+                            scanner.polite_page_pause(stop_event=scan_stop, on_tick=lambda left: emit(
+                                "scan", f"{rest} · còn {left} giây", transient=True))
+                        finally:
+                            run_times["nghỉ giữa kênh"] += time.monotonic() - pause_started
                         checkpoint()
             checkpoint()
         except (LoginRequired, BrowserUnavailable) as exc:
@@ -728,6 +803,7 @@ def run(
         if stop_event.is_set() and not collected:
             emit("done", "Đã dừng theo yêu cầu.", done=True)
             return None
+        export_started = time.monotonic()
         summary = export_excel.build_summary_tables(passed)
         if not partial and not llm_unavailable and not stop_event.is_set():
             try:
@@ -761,6 +837,13 @@ def run(
         emit("done", f"{done_text} {usage_summary(run_log['usage'])}".strip(), done=True)
         return result
     finally:
+        if scan_finished_at is not None and analyses_done_at is not None:
+            run_times["chờ phân tích sau khi quét xong"] = max(0.0, analyses_done_at - scan_finished_at)
+        if export_started is not None:
+            run_times["xuất Excel"] = time.monotonic() - export_started
+        logger.info("Tổng thời gian: %s · tổng %ss",
+                    " · ".join(f"{stage} {_seconds_text(seconds)}s" for stage, seconds in run_times.items()),
+                    _seconds_text(time.monotonic() - run_started))
         if run_log["finished_at"] is None:
             run_log["finished_at"] = datetime.now(timezone.utc).isoformat()
         db.finish_run(run_id, run_log)
@@ -775,7 +858,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Quét video hoặc bài đăng Facebook và xuất công thức nội dung ra Excel.")
     parser.add_argument("--days", type=int, default=14)
     parser.add_argument("--formats", default="video,reel",
-                        help="video,reel,video_live,reel_live hoặc riêng post")
+                        help="video,reel hoặc riêng post")
     parser.add_argument("--min-views", type=int, default=None)
     parser.add_argument("--min-interactions", type=int, default=None)
     parser.add_argument("--min-ratio", type=float, default=None,
@@ -789,7 +872,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     formats = {item.strip() for item in args.formats.split(",") if item.strip()}
     if args.days <= 0 or not formats or (formats != {"post"} and not formats <= VIDEO_KINDS):
-        parser.error("Số ngày phải lớn hơn 0; định dạng gồm video,reel,video_live,reel_live hoặc riêng post.")
+        parser.error("Số ngày phải lớn hơn 0; định dạng gồm video,reel hoặc riêng post.")
     settings = config.load_settings()
     min_views = args.min_views if args.min_views is not None else settings["scan"].get("min_views", 10000)
     min_interactions = args.min_interactions if args.min_interactions is not None else settings["scan"].get("min_interactions", 200)

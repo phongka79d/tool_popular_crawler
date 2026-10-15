@@ -468,7 +468,7 @@ def test_excluded_kinds_count_unique_in_range_items_per_tab(monkeypatch):
                    {**ordinary, "video_id": "unknown", "posted_at": None,
                     "url": "https://www.facebook.com/Example/videos/1004/"}], "video")
     note = collector.excluded_summary("video")
-    assert "bỏ qua 1 mục Video (Live) vì chưa chọn Video (Live)" in note
+    assert "bỏ qua 1 mục Live (tool không quét video phát trực tiếp)" in note
     assert "bỏ qua 1 mục Video thường vì chưa chọn Video thường" in note
     assert "(trong số ngày quét)" in note
     assert collector.excluded_summary("reel") == ""
@@ -487,10 +487,7 @@ def test_reel_does_not_hide_different_ordinary_video_with_same_story_id():
     ]
 
 
-@pytest.mark.parametrize("include_live", [False, True])
-def test_scan_page_reports_unselected_replays_without_counting_them_twice(
-    monkeypatch, caplog, include_live,
-):
+def test_scan_page_reports_excluded_replays_without_counting_them_twice(monkeypatch, caplog):
     progress = []
     scanner = facebook.FacebookScanner(settings={"scan": {}})
     scanner._page = SimpleNamespace(on=lambda *args: None, remove_listener=lambda *args: None)
@@ -507,15 +504,15 @@ def test_scan_page_reports_unselected_replays_without_counting_them_twice(
 
     monkeypatch.setattr(scanner, "_scan_tab", scan_tab)
     caplog.set_level("INFO", logger="backend.collectors.facebook")
-    formats = {"video", "reel", "video_live"} if include_live else {"video", "reel"}
+    formats = {"video", "reel"}
     rows = scanner.scan_page("https://www.facebook.com/Example", 30, formats, 100,
                              on_progress=progress.append)
-    assert len(rows) == (2 if include_live else 1)
+    assert len(rows) == 1
     completed = next(message for message in progress if message.startswith("Tab Video xong"))
     assert "thêm 0 video mới" in completed
-    note = "bỏ qua 1 mục Video (Live) vì chưa chọn Video (Live) (trong số ngày quét)"
-    assert (note in completed) is not include_live
-    assert (note in caplog.text) is not include_live
+    note = "bỏ qua 1 mục Live (tool không quét video phát trực tiếp)"
+    assert note in completed
+    assert note in caplog.text
 
 
 def test_posts_without_media_id_in_link_dedupe_by_post_id():
@@ -528,10 +525,10 @@ def test_posts_without_media_id_in_link_dedupe_by_post_id():
 
 @pytest.mark.parametrize("kinds,expected", [
     ({"video", "reel"}, {"video", "reel"}),
-    ({"video_live"}, {"video_live"}), ({"reel_live"}, {"reel_live"}),
-    ({"video", "video_live", "reel", "reel_live"}, {"video", "video_live", "reel", "reel_live"}),
+    ({"video"}, {"video"}), ({"reel"}, {"reel"}),
+    ({"video", "video_live", "reel", "reel_live"}, {"video", "reel"}),
 ])
-def test_collector_filters_live_kinds(kinds, expected):
+def test_collector_always_excludes_live_even_with_legacy_matching_formats(kinds, expected):
     collector = facebook._Collector(kinds, 30, 100)
     rows = [{"video_id": kind, "format": kind.removesuffix("_live"), "is_live": kind.endswith("_live"), "posted_at": 1_900_000_000}
             for kind in ("video", "reel", "video_live", "reel_live")]
@@ -544,6 +541,18 @@ def test_unrequested_old_live_still_stops_base_video_tab(monkeypatch):
     collector = facebook._Collector({"video"}, 30, 100)
     collector.add([{"video_id": "old-live", "format": "video", "is_live": True, "posted_at": 1}], "video")
     assert collector.done("video")
+    assert collector.videos() == []
+    assert collector.excluded_summary("video") == ""
+
+
+def test_recent_live_does_not_mark_tab_old_or_fill_limit(monkeypatch):
+    monkeypatch.setattr(facebook, "is_older_than", lambda timestamp, days: False)
+    collector = facebook._Collector({"video"}, 30, 1)
+    collector.add([{"video_id": "broadcast", "format": "video", "is_live": True,
+                    "posted_at": 2}], "video")
+    assert not collector.done("video")
+    assert not collector.full()
+    assert collector.items_seen == 1
     assert collector.videos() == []
 
 
@@ -810,18 +819,19 @@ def test_download_audio_first_seconds_falls_back_to_full_audio(monkeypatch, tmp_
 
 def test_collector_later_live_evidence_removes_default_record():
     collector = facebook._Collector({"video", "reel"}, 30, 100)
-    record = {"video_id": "123", "format": "video"}
+    record = {"video_id": "123", "format": "video", "posted_at": 1_900_000_000}
     collector.add([record], "video")
     collector.add([{**record, "is_live": True}], "video")
     collector.add([record], "video")
     assert collector.videos() == []
+    assert "bỏ qua 1 mục Live" in collector.excluded_summary("video")
 
 
 @pytest.mark.parametrize("kinds,bases", [
-    ({"video_live"}, {"video"}), ({"reel_live"}, {"reel"}),
-    ({"video", "video_live", "reel_live"}, {"video", "reel"}),
+    ({"video"}, {"video"}), ({"reel"}, {"reel"}),
+    ({"video", "reel"}, {"video", "reel"}),
 ])
-def test_live_kinds_select_each_base_tab_once(monkeypatch, kinds, bases):
+def test_selected_kinds_open_each_tab_once(monkeypatch, kinds, bases):
     scanner = facebook.FacebookScanner(settings={"scan": {}})
     scanner._page = SimpleNamespace(on=lambda *args: None, remove_listener=lambda *args: None)
     calls = []

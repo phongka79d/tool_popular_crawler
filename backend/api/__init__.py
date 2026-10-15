@@ -122,6 +122,9 @@ class Bridge:
     def open_output_folder(self):
         return self._call(results.open_output_folder)
 
+    def open_guide(self):
+        return self._call(results.open_guide)
+
     def save_result_as(self, name):
         return self._call(self._save_result_as, name)
 

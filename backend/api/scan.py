@@ -16,7 +16,7 @@ from backend.api.common import error_message, redact, fail
 
 SCAN_STAGES = (("keys", "Kiểm tra key"), ("scan", "Quét kênh"), ("filter", "Lọc nội dung"),
                ("analyze", "Phân tích"), ("export", "Xuất Excel"))
-KINDS = (("video", "Video thường"), ("reel", "Reel"), ("video_live", "Video (Live)"), ("reel_live", "Reel (Live)"))
+KINDS = (("video", "Video thường"), ("reel", "Reel"))
 _lock = threading.Lock()
 
 
@@ -57,7 +57,7 @@ def _filter_summary(params: pipeline.RunParams) -> str:
     lengths = [
         f"{label} {filters.length_limit_text(params.length_limits.get(kind, (None, None)))}"
         for kind, label in (("video", "Video"), ("reel", "Reel"))
-        if params.formats & {kind, f"{kind}_live"} and any(params.length_limits.get(kind, (None, None)))
+        if kind in params.formats and any(params.length_limits.get(kind, (None, None)))
     ]
     if lengths:
         return (summary + " · " if parts else "") + " · ".join(lengths)
@@ -150,14 +150,18 @@ def _turn_speed(turn: dict) -> float | None:
     seconds, tokens = turn.get("llm_seconds", 0.0), turn.get("llm_output_tokens", 0)
     return round(tokens / seconds, 2) if seconds > 0 and tokens > 0 else None
 
+def _saved_video_kinds(saved):
+    return [kind for kind, _ in KINDS if kind in (saved.get("video_kinds") or [])] or ["video", "reel"]
+
+
 def _params(options, settings=None):
     settings = settings if settings is not None else config.load_settings()
     saved = settings.get("scan", {})
     post = options.get("kind", "video") == "post"
-    formats = {"post"} if post else set(options.get("formats", saved.get("video_kinds", ["video", "reel"])))
+    formats = {"post"} if post else set(options.get("formats", _saved_video_kinds(saved)))
     limits = options.get("length_limits", saved.get("length_limits", {}))
     limits = {kind: tuple(value or None for value in limits.get(kind, (None, None)))
-              for kind in ("video", "reel") if not post and formats & {kind, f"{kind}_live"}}
+              for kind in ("video", "reel") if not post and kind in formats}
     return pipeline.RunParams(int(options.get("days", 7)), formats,
         min_views=0 if post else int(options.get("min_views", saved.get("min_views", 10000))),
         min_interactions=int(options.get("min_interactions", saved.get("min_interactions", 200))) if post else 0,
@@ -185,7 +189,7 @@ def _problems(params):
 def get_scan_options():
     settings = config.load_settings()
     saved = settings.get("scan", {})
-    defaults = dict(days=7, kind="video", formats=saved.get("video_kinds", ["video", "reel"]),
+    defaults = dict(days=7, kind="video", formats=_saved_video_kinds(saved),
                     length_limits={kind: list(saved.get("length_limits", {}).get(kind, (None, None)))
                                    for kind in ("video", "reel")},
                     min_views=saved.get("min_views", 10000), min_ratio_follow=saved.get("min_ratio_follow", 0),
@@ -219,6 +223,8 @@ def set_read_images(enabled):
         if _session["running"]:
             return fail("Không thể đổi tùy chọn khi đang quét.")
         settings = config.load_settings()
+        saved = settings.setdefault("scan", {})
+        saved["video_kinds"] = _saved_video_kinds(saved)
         message = None
         enabled = bool(enabled)
         if enabled:
@@ -246,6 +252,8 @@ def accept_terms():
         if not accepted:
             accepted = datetime.now().astimezone().isoformat(timespec="seconds")
             settings["terms_accepted_at"] = accepted
+            saved = settings.setdefault("scan", {})
+            saved["video_kinds"] = _saved_video_kinds(saved)
             config.save_settings(settings)
         return {"ok": True, "accepted_at": accepted}
 
@@ -295,6 +303,7 @@ def start_scan(options):
         if not channels:
             return fail("Danh sách kênh trống. Vào Cài đặt để nhập các kênh cần quét.")
         scan = settings.setdefault("scan", {})
+        scan["video_kinds"] = _saved_video_kinds(scan)
         if pipeline.is_post_run(params):
             scan["min_interactions"] = params.min_interactions
         else:

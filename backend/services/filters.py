@@ -44,7 +44,7 @@ def length_limit_text(bounds: tuple[float | None, float | None]) -> str:
 def _length_reason(video: Video, limits: LengthLimits) -> str | None:
     if video.format == "post":
         return None
-    base = video.format.removesuffix("_live")
+    base = video.format
     minimum, maximum = limits.get(base, (None, None))
     if not minimum and not maximum:
         return None

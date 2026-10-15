@@ -1,9 +1,8 @@
 {
-  "jev": {"model": "jev-1.13", "yes_threshold": 0.5, "min_confidence": 0.6},
+  "jev": {"model": "", "yes_threshold": 0.5, "min_confidence": 0.6},
   "llm": {"base_url": "", "model": "", "temperature": 0.4, "reasoning_effort": "low", "vision": {"base_url": "", "model": "", "ok": false}},
-  "stt": {"provider": "deepgram", "model": "nova-3", "language": "vi",
-          "keyterms_file": "config/keyterms.txt", "fallback": "local_whisper",
-          "whisper_model": "small"},
+  "stt": {"provider": "deepgram", "model": "", "language": "vi", "auto_language": true,
+          "keyterms_file": "config/keyterms.txt"},
   "scan": {"read_images": false, "video_kinds": ["video", "reel"], "min_views": 10000, "min_ratio_follow": 0, "match_all": true, "min_interactions": 200, "delay_min_s": 3, "delay_max_s": 8,
            "length_limits": {"video": [null, null], "reel": [null, null]},
            "page_delay_min_s": 30, "page_delay_max_s": 60,

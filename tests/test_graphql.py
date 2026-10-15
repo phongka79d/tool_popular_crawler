@@ -502,7 +502,7 @@ def test_videos_tab_tiles_become_records_with_play_count_as_views():
     }
 
 
-def test_recent_videos_tab_replay_is_video_live_not_reel():
+def test_recent_videos_tab_detects_replay_for_exclusion():
     # Sanitized Pharmacity /videos/ HTML: a three-hour broadcast replay and a reel.
     replay = _channel_tile("1001", "https://www.facebook.com/Example/videos/1001/")
     video = replay["node"]["channel_tab_thumbnail_renderer"]["video"]

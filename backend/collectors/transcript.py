@@ -1,16 +1,16 @@
-"""Tách audio, chuyển thoại (Deepgram; dự phòng faster-whisper chạy máy) và lấy câu hook.
+"""Tách audio, chuyển thoại bằng Deepgram và lấy câu hook.
 
 Xem PLAN-JEV.md mục 4 (bước 1–6) và mục 11.5.
 """
 from __future__ import annotations
 
-import functools
 import logging
 import re
 import shutil
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -39,6 +39,11 @@ FFMPEG_TIMEOUT_S = 600
 # Chỉ chép lời 10 phút: hook và cấu trúc nằm ở đầu video, Jev chỉ đọc 3000 ký tự đầu,
 # còn livestream 3 giờ sẽ tốn ~3 phút Deepgram, tiền và một prompt LLM rất dài.
 MAX_AUDIO_SECONDS = 600
+MAX_DIRECT_AUDIO_BYTES = 50 * 1024 * 1024
+_AUDIO_TYPES = {
+    ".m4a": "audio/mp4", ".mp4": "audio/mp4", ".webm": "audio/webm",
+    ".opus": "audio/ogg", ".ogg": "audio/ogg", ".mp3": "audio/mpeg",
+}
 # Livestream thường mở đầu bằng nhạc chờ nhiều phút: tải 30 phút đầu, chép từng đoạn 10 phút
 # tới khi gặp thoại.
 SPEECH_SEARCH_SECONDS = 1800
@@ -62,8 +67,6 @@ _SENTENCE_END = re.compile(r"[.!?…][\"'”’)\]»]*$")
 _POPEN_KWARGS: dict[str, Any] = (
     {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
 )
-# faster-whisper dùng hết CPU: các video phân tích song song chạy lần lượt, mô hình chỉ nạp một lần.
-_WHISPER_LOCK = threading.Lock()
 
 
 @contextmanager
@@ -76,6 +79,33 @@ def observe_usage(callback: Callable[[float], None]) -> Iterator[None]:
     finally:
         _usage.callback = previous
 
+
+@contextmanager
+def observe_timing(callback: Callable[[str, float], None]) -> Iterator[None]:
+    """Báo thời gian từng bước trên luồng phân tích, không thêm sự kiện UI."""
+    previous = getattr(_usage, "timing", None)
+    _usage.timing = callback
+    try:
+        yield
+    finally:
+        _usage.timing = previous
+
+
+@contextmanager
+def _timed(stage: str) -> Iterator[None]:
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        callback = getattr(_usage, "timing", None)
+        if callback is not None:
+            callback(stage, time.monotonic() - started)
+
+
+def _can_send_original(path: Path, duration_s: float | None) -> bool:
+    return (duration_s is not None and 0 < duration_s <= MAX_AUDIO_SECONDS
+            and path.suffix.lower() in _AUDIO_TYPES
+            and 0 < path.stat().st_size < MAX_DIRECT_AUDIO_BYTES)
 
 # --- audio -----------------------------------------------------------------
 
@@ -153,7 +183,7 @@ def _parse_deepgram(payload: Any, language: str = "") -> dict:
 
 
 def transcribe_deepgram(path: Path | str, api_key: str, stt: dict, keyterms: list[str]) -> dict:
-    """Gửi file mp3 tới Deepgram /v1/listen; trả text, duration, words và ngôn ngữ.
+    """Gửi audio với Content-Type theo định dạng tới Deepgram; trả text, duration, words và ngôn ngữ.
 
     Raises: AuthError (401/403), QuotaError (402, hoặc 429/529 quá số lần thử), NetworkError.
     """
@@ -164,8 +194,9 @@ def transcribe_deepgram(path: Path | str, api_key: str, stt: dict, keyterms: lis
         ("smart_format", "true"),
     ]
     params += [("keyterm", term) for term in keyterms]
-    headers = {"Authorization": f"Token {api_key}", "Content-Type": "audio/mpeg"}
     audio = Path(path)
+    headers = {"Authorization": f"Token {api_key}",
+               "Content-Type": _AUDIO_TYPES.get(audio.suffix.lower(), "audio/mpeg")}
 
     def _post() -> Any:
         with audio.open("rb") as fh:
@@ -176,35 +207,6 @@ def transcribe_deepgram(path: Path | str, api_key: str, stt: dict, keyterms: lis
 
     language = "" if stt.get("auto_language", True) else stt["language"]
     return _parse_deepgram(with_retry(_post, service="deepgram"), language)
-
-
-@functools.lru_cache(maxsize=1)
-def _load_whisper(model_size: str) -> Any:
-    from faster_whisper import WhisperModel  # import muộn: chỉ cần khi bật dự phòng chạy máy
-
-    return WhisperModel(model_size, device="cpu", compute_type="int8", download_root=str(config.MODELS_DIR))
-
-
-def transcribe_local(path: Path | str, model_size: str, stt: dict | None = None) -> dict:
-    """faster-whisper chạy CPU, tự nhận ngôn ngữ hoặc dùng cấu hình, có timestamp từng từ."""
-    stt = stt if stt is not None else {}
-    language = None if stt.get("auto_language", True) else stt.get("language", "vi")
-    with _WHISPER_LOCK:
-        model = _load_whisper(model_size)
-        segments, info = model.transcribe(str(path), language=language, word_timestamps=True)
-        texts: list[str] = []
-        words: list[dict] = []
-        for seg in segments:  # segments chạy dần khi đọc: phải đọc hết trong khóa
-            seg_text = seg.text.strip()
-            if seg_text:
-                texts.append(seg_text)
-            for w in seg.words or []:
-                token = w.word.strip()
-                if token:
-                    words.append({"punctuated_word": token, "start": float(w.start), "end": float(w.end)})
-    return {"text": " ".join(texts), "duration": float(info.duration), "words": words,
-            "language": getattr(info, "language", "") or language or "",
-            "language_confidence": None}
 
 
 def check_key(api_key: str, stt: dict | None = None) -> None:
@@ -320,7 +322,7 @@ def _save(video: Video, text: str, status: str, words: list[dict], minutes: floa
 
 def _transcribe(audio: Path, api_key: str, stt: dict, keyterms: list[str],
                 warnings: list[str]) -> tuple[dict | None, float]:
-    """Trả (kết quả, phút Deepgram đã tính phí); ghi cảnh báo hạn mức và trạng thái dự phòng."""
+    """Trả (kết quả, phút Deepgram đã tính phí); ghi cảnh báo khi hết hạn mức."""
     minutes = 0.0
     uncertain = False
     try:
@@ -328,7 +330,8 @@ def _transcribe(audio: Path, api_key: str, stt: dict, keyterms: list[str],
             result = None
             call_settings = {**stt, "auto_language": False, "language": "vi"} if attempt else stt
             try:
-                result = transcribe_deepgram(audio, api_key, call_settings, keyterms)
+                with _timed("Deepgram"):
+                    result = transcribe_deepgram(audio, api_key, call_settings, keyterms)
             finally:
                 billed = result["duration"] / 60.0 if result is not None else 0.0
                 minutes += billed
@@ -347,21 +350,9 @@ def _transcribe(audio: Path, api_key: str, stt: dict, keyterms: list[str],
     except QuotaError as exc:
         log.warning("Deepgram không dùng được: %s", exc)
 
-    warning = "Tài khoản Deepgram đã hết credit/hạn mức."
-    if stt.get("fallback") != "local_whisper":
-        warnings.append(f"{warning} Không dùng local whisper (đã tắt dự phòng).")
-        return None, minutes
-
-    model_size = stt.get("whisper_model", "small")
-    log.info("Chuyển sang faster-whisper (%s) chạy máy", model_size)
-    try:
-        result = transcribe_local(audio, model_size, stt)
-        warnings.append(f"{warning} Đã dùng local whisper.")
-        return result, minutes
-    except Exception:
-        log.exception("faster-whisper lỗi, bỏ qua thoại của video")
-        warnings.append(f"{warning} Đã thử local whisper nhưng không lấy được thoại.")
-        return None, minutes
+    warnings.append("Tài khoản Deepgram đã hết credit/hạn mức. "
+                    "Nạp thêm hoặc đổi key Deepgram trong Cài đặt rồi quét lại.")
+    return None, minutes
 
 
 def _remove(path: Path | None) -> None:
@@ -380,8 +371,8 @@ def get_transcript(video: Video, api_key: str, stt_settings: dict,
 
     Cache: transcript "ok" hoặc "no_speech" trong SQLite được dùng lại, không tải lại audio.
     Transcript "failed" không nằm trong cache nên lần chạy sau sẽ thử lại.
-    AuthError được chuyển cho bên gọi để tạm dừng; chỉ QuotaError dùng local whisper.
-    Nếu truyền `warnings`, thêm cảnh báo hạn mức và kết quả dự phòng vào danh sách này.
+    AuthError được chuyển cho bên gọi để tạm dừng; QuotaError đánh dấu thất bại.
+    Nếu truyền `warnings`, thêm cảnh báo hạn mức vào danh sách này.
     """
     cached = db.get_transcript(video.video_id)
     if cached is not None and cached[1] in _CACHED_STATUSES:
@@ -394,30 +385,48 @@ def get_transcript(video: Video, api_key: str, stt_settings: dict,
     audio: Path | None = None
     try:
         long_video = bool(video.duration_s and video.duration_s > MAX_AUDIO_SECONDS)
-        if long_video:
-            # Không tải cả livestream nhiều giờ: chỉ phần đủ để tìm đoạn có thoại.
-            downloaded = download_audio(video.url, tmp, first_seconds=SPEECH_SEARCH_SECONDS, ffmpeg=_ffmpeg_exe())
-            starts = list(range(0, int(min(video.duration_s, SPEECH_SEARCH_SECONDS)), MAX_AUDIO_SECONDS))
-        else:
-            downloaded = download_audio(video.url, tmp)
-            starts = [0]
+        with _timed("tải audio"):
+            if long_video:
+                # Không tải cả livestream nhiều giờ: chỉ phần đủ để tìm đoạn có thoại.
+                downloaded = download_audio(video.url, tmp, first_seconds=SPEECH_SEARCH_SECONDS, ffmpeg=_ffmpeg_exe())
+                starts = list(range(0, int(min(video.duration_s, SPEECH_SEARCH_SECONDS)), MAX_AUDIO_SECONDS))
+            else:
+                downloaded = download_audio(video.url, tmp)
+                starts = [0]
         if downloaded is None:
             log.warning("Không có audio để chuyển thoại: %s", video.video_id)
             return _save(video, "", STATUS_FAILED, [], 0.0)
 
         minutes = 0.0
         result: dict | None = None
+        direct = _can_send_original(downloaded, video.duration_s)
         start = 0
         for start in starts:
-            _remove(audio)
-            audio = extract_audio(downloaded, tmp / f"{video.video_id}_stt.mp3", start_s=start)
+            _remove(audio if audio != downloaded else None)
+            if direct:
+                audio = downloaded
+            else:
+                with _timed("ffmpeg"):
+                    audio = extract_audio(downloaded, tmp / f"{video.video_id}_stt.mp3", start_s=start)
             if audio is None:
                 if start == 0:
                     log.warning("Không có audio để chuyển thoại: %s", video.video_id)
                     return _save(video, "", STATUS_FAILED, [], 0.0)
                 break  # tệp ngắn hơn dự kiến: giữ kết quả đoạn trước
-            result, billed = _transcribe(audio, api_key, stt_settings, keyterms,
-                                         warnings if warnings is not None else [])
+            try:
+                result, billed = _transcribe(audio, api_key, stt_settings, keyterms,
+                                             warnings if warnings is not None else [])
+            except requests.HTTPError as exc:
+                if not direct or exc.response is None or exc.response.status_code != 400:
+                    raise
+                # Chỉ file gốc bị từ chối mới thử lại một lần bằng đường mp3 cũ.
+                direct = False
+                with _timed("ffmpeg"):
+                    audio = extract_audio(downloaded, tmp / f"{video.video_id}_stt.mp3", start_s=start)
+                if audio is None:
+                    return _save(video, "", STATUS_FAILED, [], minutes)
+                result, billed = _transcribe(audio, api_key, stt_settings, keyterms,
+                                             warnings if warnings is not None else [])
             minutes += billed
             if result is not None:
                 video.transcript_language = result.get("language") or video.transcript_language

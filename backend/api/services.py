@@ -14,8 +14,7 @@ DEFAULT_SETTINGS = {
     "jev": {"model": "", "yes_threshold": 0.5, "min_confidence": 0.6},
     "llm": {"base_url": "", "model": "", "temperature": 0.4},
     "stt": {"provider": "deepgram", "model": "", "language": "vi", "auto_language": True,
-            "keyterms_file": "config/keyterms.txt", "fallback": "local_whisper",
-            "whisper_model": "small"},
+            "keyterms_file": "config/keyterms.txt"},
     "scan": {"video_kinds": ["video", "reel"], "min_views": 10000, "min_ratio_follow": 0, "match_all": True,
              "min_interactions": 200, "delay_min_s": 3, "delay_max_s": 8,
              "page_delay_min_s": 30, "page_delay_max_s": 60,
@@ -41,6 +40,17 @@ LLM_PROVIDERS = {
     "Anthropic (Claude)": "https://api.anthropic.com/v1/",
 }
 LLM_CUSTOM = "Khác (tự nhập)"
+RECOMMENDED_MODELS = {
+    "jev": ["jev-latest"],
+    "deepgram": ["nova-3-general", "nova-3"],
+    "llm": {
+        LLM_PROVIDERS["OpenRouter"]: ["anthropic/claude-haiku-4.5", "google/gemini-2.5-flash",
+                                     "openai/gpt-4.1-mini"],
+        LLM_PROVIDERS["OpenAI"]: ["gpt-4.1-mini", "gpt-4o-mini"],
+        LLM_PROVIDERS["Google Gemini"]: ["gemini-2.5-flash"],
+        LLM_PROVIDERS["Anthropic (Claude)"]: ["claude-haiku"],
+    },
+}
 
 
 def _configured(name: str, settings: dict, saved: str | None) -> bool:
@@ -88,14 +98,19 @@ def _fetch_models(name: str, candidate: str, base_url: str) -> list[dict]:
     return llm_client.list_models(base_url, candidate)
 
 
-def _deepgram_index(items: list[dict], saved: str) -> int:
-    names = [item["name"] for item in items]
-    if saved in names:
-        return names.index(saved)
-    for index, item in enumerate(items):
-        if saved and item["architecture"] == saved:
-            return index
-    return 0
+def _recommended_model(name: str, models: list[dict], base_url: str) -> dict | None:
+    preferences = RECOMMENDED_MODELS[name]
+    if name == "llm":
+        preferences = next((ids for url, ids in preferences.items()
+                            if url.rstrip("/") == base_url.rstrip("/")), [])
+    for preferred in preferences:
+        exact = next((model for model in models if model["id"] == preferred), None)
+        if exact is not None:
+            return exact
+        matches = [model for model in models if model["id"].startswith(preferred)]
+        if matches:
+            return max(matches, key=lambda model: model["id"])
+    return None
 
 
 def _llm_option_label(item: dict) -> str:
@@ -131,16 +146,16 @@ def connect_service(name: str, key: str, base_url: str) -> dict:
         if name == "deepgram":
             models = [{"id": item["name"], "label": item["name"], "architecture": item["architecture"],
                        "languages": item["languages"]} for item in items]
-            chosen = models[_deepgram_index(items, saved)]
         elif name == "jev":
             models = [{"id": item["name"], "label": item["name"],
                        "detail": " · ".join(part for part in (item.get("description", ""),
                                   f"phát hành {item['release_date']}" if item.get("release_date") else "") if part)}
                       for item in items]
-            chosen = next((item for item in models if item["id"] == saved), models[0])
         else:
             models = [{"id": item["id"], "label": _llm_option_label(item)} for item in items]
-            chosen = next((item for item in models if item["id"] == saved), models[0])
+        recommended = _recommended_model(name, models, base_url)
+        chosen = next((model for model in models if model["id"] == saved),
+                      recommended if recommended is not None else models[0])
         # Provider-supplied metadata must not echo the candidate credential to JS.
         for model in models:
             for field in ("id", "label", "detail", "architecture"):
@@ -150,7 +165,8 @@ def connect_service(name: str, key: str, base_url: str) -> dict:
                 model["languages"] = [{"code": redact(lang["code"], (candidate,)),
                                        "label": redact(lang["label"], (candidate,))}
                                       for lang in model["languages"]]
-        result = {"ok": True, "models": models, "count": len(models), "default_id": chosen["id"]}
+        result = {"ok": True, "models": models, "count": len(models), "default_id": chosen["id"],
+                  "recommended_id": recommended["id"] if recommended is not None else None}
         if name == "deepgram":
             codes = [lang["code"] for lang in chosen["languages"]]
             language = settings["stt"]["language"]
