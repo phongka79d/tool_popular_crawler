@@ -80,11 +80,39 @@
   font-size: 24px;
 }
 
-.scan-current {
-  gap: 2px;
+.scan-lanes {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 14px;
 }
 
-.scan-current a {
+.scan-lane {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.scan-lane-current {
+  border-color: var(--primary);
+  box-shadow: inset 3px 0 0 var(--primary);
+}
+
+.scan-lane-done {
+  background: var(--surface-2);
+}
+
+.scan-lane-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.scan-lane a {
   width: fit-content;
   overflow-wrap: anywhere;
 }
@@ -143,7 +171,8 @@
   .scan-field-pair,
   .scan-kind-grid,
   .scan-chart-grid,
-  .scan-usage-grid {
+  .scan-usage-grid,
+  .scan-lanes {
     grid-template-columns: 1fr;
   }
 

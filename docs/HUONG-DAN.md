@@ -269,13 +269,18 @@ Khi quét bài đăng, có thể bật **Đọc nội dung ảnh trong bài (AI 
 
 ### Theo dõi khi đang quét
 
-Các bước gồm **Kiểm tra key → Quét kênh → Lọc nội dung → Phân tích → Xuất Excel**. **Tiến độ tổng (ước tính)** chỉ là ước tính, không phải giờ kết thúc bảo đảm. Quét và phân tích có thể chạy song song nên bước đang hoạt động có thể thay đổi.
+Khung **Đang quét** chia thành hai ô chạy song song, mỗi ô có thanh tiến độ và việc đang làm riêng:
+
+- **1 · Quét Facebook:** số kênh đã quét xong (ví dụ `1/3 kênh`), tab và lần cuộn hiện tại, thời gian nghỉ còn lại giữa hai kênh và link page đang quét. Trong lúc nghỉ, ứng dụng đồng thời bổ sung số liệu còn thiếu (yt-dlp) của kênh vừa quét.
+- **2 · Phân tích AI:** số mục đã phân tích trên số mục đạt ngưỡng (ví dụ `8/14 video`) và mục đang chép lời/phân tích. Ô này bắt đầu khi kênh đầu tiên có mục đạt ngưỡng; hiện **Chờ kênh tiếp theo** khi đã phân tích hết phần hiện có.
+
+**Tiến độ tổng (ước tính)** chỉ là ước tính, không phải giờ kết thúc bảo đảm. Lúc kiểm tra key và xuất Excel, dòng thông báo chung hiện phía trên hai ô.
 
 Bảng **Tiến độ từng kênh** cho biết kênh nào đang làm, follower, số mục tìm thấy, đạt ngưỡng và đã phân tích. Dấu — là chưa có số liệu, không phải số 0. Dùng **Mở kênh** khi muốn đối chiếu page gốc.
 
 ![Tiến độ chạy](img/15-dang-quet.png)
 
-① Tiến độ tổng ② Bảng từng kênh ③ Dừng quét khi cần.
+① Hai ô Quét Facebook / Phân tích AI ② Bảng từng kênh ③ Dừng quét khi cần.
 
 **Ứng dụng cố ý nghỉ 30–60 giây giữa các kênh để giảm rủi ro bị chặn.** Thời gian chờ này không có nghĩa bị treo. Đọc thông báo đếm ngược và diễn biến thay vì bấm lại liên tục. Khi Facebook phản hồi chậm hoặc giới hạn truy cập, thời gian có thể dài hơn. Không đóng cửa sổ trình duyệt quét bên ngoài dù bạn chỉ thấy biểu tượng của nó trên thanh tác vụ.
 

@@ -100,7 +100,7 @@ export function mount(target, ctx) {
     }
     logs = [];
     logSince = 0;
-    state = { running: true, elapsed_s: 0, overall: 0, stages: [], channels: [], log: [], errors: [], item_label: options.kind === "post" ? "bài đăng" : "video" };
+    state = { running: true, elapsed_s: 0, overall: 0, lanes: [], message: "Đang bắt đầu lần quét…", channels: [], log: [], errors: [], item_label: options.kind === "post" ? "bài đăng" : "video" };
     mode = "running";
     render();
     ctx.refreshApp();

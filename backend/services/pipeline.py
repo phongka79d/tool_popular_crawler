@@ -728,40 +728,81 @@ def run(
                     checkpoint()
                     missing = [] if post_run else [video for video in page_items
                                if not video.caption or any(getattr(video, metric) is None for metric in _METRICS)]
-                    for number, video in enumerate(missing, 1):
-                        checkpoint()
-                        emit("filter", f"Bổ sung số liệu còn thiếu (yt-dlp): video {number}/{len(missing)}…",
-                             step=number - 1, steps=len(missing))
-                        try:
-                            ytdlp.fill_missing(video)
-                        except Exception as exc:
-                            video.notes.append(add_error(exc))
-                        db.upsert_video(video)
-                        checkpoint()
-                    emit("filter", f"Tính chỉ số và lọc {len(page_items)} {item_label} theo ngưỡng…")
-                    filters.compute_metrics(page_items)
-                    page_passed = filters.apply_filter(page_items, params.min_views, params.min_interactions,
-                                                       params.min_ratio_follow, params.match_all,
-                                                       params.length_limits, entry["errors"])
-                    passed.extend(page_passed)
-                    filtered_pages.add(page_url)
-                    entry["passed"] = len(page_passed)
-                    for video in page_items:
-                        for note in video.notes:
-                            if note not in entry["errors"]:
-                                entry["errors"].append(note)
-                    emit("filter", f"Đạt ngưỡng: {len(passed)}/{len(collected)} {item_label}.")
-                    analyze_all(pool, page_passed)
-                    if page_index < len(channels):
-                        rest = "Nghỉ giữa hai kênh như người dùng thật, tránh bị Facebook chặn"
+
+                    def finish_page(page_items=page_items, missing=missing, entry=entry,
+                                    page_url=page_url, report=None) -> None:
+                        """Bổ sung số liệu (yt-dlp), lọc theo ngưỡng rồi đưa vào hàng đợi phân tích."""
+                        for number, video in enumerate(missing, 1):
+                            checkpoint()
+                            if report is None:
+                                emit("filter", f"Bổ sung số liệu còn thiếu (yt-dlp): video {number}/{len(missing)}…",
+                                     step=number - 1, steps=len(missing))
+                            else:
+                                report(number - 1)
+                            try:
+                                ytdlp.fill_missing(video)
+                            except Exception as exc:
+                                video.notes.append(add_error(exc))
+                            db.upsert_video(video)
+                            checkpoint()
+                        if report is not None:
+                            report(len(missing))
+                        emit("filter", f"Tính chỉ số và lọc {len(page_items)} {item_label} theo ngưỡng…")
+                        filters.compute_metrics(page_items)
+                        page_passed = filters.apply_filter(page_items, params.min_views, params.min_interactions,
+                                                           params.min_ratio_follow, params.match_all,
+                                                           params.length_limits, entry["errors"])
+                        with lock:
+                            passed.extend(page_passed)
+                            filtered_pages.add(page_url)
+                        entry["passed"] = len(page_passed)
+                        for video in page_items:
+                            for note in video.notes:
+                                if note not in entry["errors"]:
+                                    entry["errors"].append(note)
+                        emit("filter", f"Đạt ngưỡng: {len(passed)}/{len(collected)} {item_label}.")
+                        analyze_all(pool, page_passed)
+
+                    if page_index == len(channels):
+                        finish_page()
+                        continue
+                    # Bổ sung số liệu chạy trong lúc nghỉ giữa kênh thay vì trước đó: cùng số request,
+                    # không chồng lên lúc cuộn kênh sau vì luôn chờ xong trước khi mở kênh tiếp.
+                    rest = "Nghỉ giữa hai kênh như người dùng thật, tránh bị Facebook chặn"
+                    side = {"left": None, "done": 0, "total": len(missing)}
+
+                    def side_text() -> str:
+                        parts = [rest if side["left"] is not None else "Hết giờ nghỉ, chờ bổ sung số liệu xong"]
+                        if side["left"] is not None:
+                            parts.append(f"còn {side['left']} giây")
+                        if side["done"] < side["total"]:
+                            parts.append(f"bổ sung số liệu (yt-dlp) {side['done']}/{side['total']} video")
+                        return " · ".join(parts)
+
+                    def report(done: int) -> None:
+                        side["done"] = done
+                        emit("scan", side_text(), transient=True)
+
+                    def tick(left: int) -> None:
+                        side["left"] = left
+                        emit("scan", side_text(), transient=True)
+
+                    if missing:
+                        emit("scan", f"{rest}; đồng thời bổ sung số liệu còn thiếu cho {len(missing)} video…")
+                    else:
                         emit("scan", f"{rest}…")
+                    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="bo-sung") as side_pool:
+                        finishing = side_pool.submit(finish_page, report=report)
                         pause_started = time.monotonic()
                         try:
-                            scanner.polite_page_pause(stop_event=scan_stop, on_tick=lambda left: emit(
-                                "scan", f"{rest} · còn {left} giây", transient=True))
+                            scanner.polite_page_pause(stop_event=scan_stop, on_tick=tick)
                         finally:
                             run_times["nghỉ giữa kênh"] += time.monotonic() - pause_started
-                        checkpoint()
+                            side["left"] = None
+                        if not finishing.done():
+                            emit("scan", side_text(), transient=True)
+                        finishing.result()
+                    checkpoint()
             checkpoint()
         except (LoginRequired, BrowserUnavailable) as exc:
             add_error(exc)

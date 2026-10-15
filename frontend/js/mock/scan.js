@@ -47,7 +47,7 @@ function setApp(running, question = false) {
     appState.next_step = { text: "Xem file Excel và phân tích nội dung trong Kết quả.", page: "results" };
 }
 function empty() {
-  return { ok: true, running: false, stopping: false, elapsed_s: 0, item_label: "video", overall: 0, stage: null, stages: stageList.map(([id, label]) => ({ id, label, state: "pending" })), step: null, message: "", page_url: null, channels: [], usage: null, usage_history: [], turns: [], log: [], log_total: 0, errors: [], question: null, result: null, ended_without_result: false };
+  return { ok: true, running: false, stopping: false, elapsed_s: 0, item_label: "video", overall: 0, stage: null, lanes: [], message: "", channels: [], usage: null, usage_history: [], turns: [], log: [], log_total: 0, errors: [], question: null, result: null, ended_without_result: false };
 }
 function snapshot(since = 0) {
   if (!session)
@@ -103,7 +103,12 @@ function snapshot(since = 0) {
     s.registered = true;
     registerScanResult({ name: result.name, count: result.count, kind: post ? "post" : "video" });
   }
-  return { ok: true, running: s.running, stopping: s.running && s.stopping, elapsed_s: elapsed, item_label: post ? "bài đăng" : "video", overall: result ? 1 : Math.min(0.97, elapsed / 41), stage, stages: stageList.map(([id, label], i) => ({ id, label, state: i < position ? "done" : i === position ? "current" : "pending" })), step: { fraction: position === 3 ? done / total : Math.min(1, elapsed / 40), label: position === 3 ? `Đã phân tích ${done}/${total} ${post ? "bài đăng" : "video"}` : "Đang xử lý các kênh" }, message: question ? "Đang chờ bạn chọn cách tiếp tục." : result ? "Đã xuất kết quả Excel." : s.stopping ? "Đang hoàn tất bước hiện tại…" : stageList[Math.min(position, 4)][1], page_url: channels[Math.min(2, Math.floor(elapsed / 13))].url, channels, usage, usage_history, turns, log: s.log.slice(Math.max(0, Number(since) || 0)), log_total: s.log.length, errors: [], question, result, ended_without_result: !!s.ended };
+  const item = post ? "bài đăng" : "video", scanned = channels.filter((c) => c.found !== null).length, finished = !s.running || position >= 4, known = scanned * total / 3;
+  const scanLane = finished || scanned === 3 ? { state: "done", message: `Đã quét xong ${scanned}/3 kênh.` } : position === 0 ? { state: "pending", message: "Bắt đầu sau khi kiểm tra API key." } : { state: "current", message: Math.floor(elapsed) % 4 < 2 ? `Kênh ${scanned + 1}/3 · Tab Reels · cuộn lần ${Math.floor(elapsed) % 4 + 1}: đã thấy ${12 + scanned * 7} video` : `Nghỉ giữa hai kênh như người dùng thật, tránh bị Facebook chặn · còn ${40 - Math.floor(elapsed) % 40} giây · bổ sung số liệu (yt-dlp) ${Math.floor(elapsed) % 8}/8 video`, page_url: channels[Math.min(2, scanned)].url };
+  const analyzeLane = finished ? { state: "done", message: `Đã phân tích ${done} ${item}.` } : !known ? { state: "pending", message: `Bắt đầu khi có ${item} đạt ngưỡng từ bước quét.` } : done < known ? { state: "current", message: `${item[0].toUpperCase()}${item.slice(1)} ${done + 1}: tải audio và chép lời…` } : { state: "waiting", message: `Đã phân tích hết ${item} đạt ngưỡng; chờ kênh tiếp theo.` };
+  const lanes = [{ id: "scan", title: "Quét Facebook", fraction: scanned / 3, label: `${scanned}/3 kênh`, ...scanLane }, { id: "analyze", title: "Phân tích AI", fraction: known ? Math.min(1, done / known) : finished ? 1 : 0, label: `${Math.min(done, known)}/${known} ${item}`, ...analyzeLane }];
+  const message = question ? "Đang chờ bạn chọn cách tiếp tục." : result ? "Đã xuất kết quả Excel." : s.stopping ? "Đang hoàn tất bước hiện tại…" : position === 0 ? "Đang kiểm tra 3 API key (Jev, Deepgram, LLM)…" : position === 4 ? "Đang tổng hợp và xuất Excel…" : "";
+  return { ok: true, running: s.running, stopping: s.running && s.stopping, elapsed_s: elapsed, item_label: item, overall: result ? 1 : Math.min(0.97, elapsed / 41), stage, lanes, message, channels, usage, usage_history, turns, log: s.log.slice(Math.max(0, Number(since) || 0)), log_total: s.log.length, errors: [], question, result, ended_without_result: !!s.ended };
 }
 export default {
   get_scan_options: async () => ({ ok: true, defaults: { ...structuredClone(defaults), read_images: readImages }, kinds: [{ id: "video", label: "Video thường" }, { id: "reel", label: "Reel" }], presets: structuredClone(presets), terms: { ...structuredClone(terms), accepted_at: acceptedAt } }),

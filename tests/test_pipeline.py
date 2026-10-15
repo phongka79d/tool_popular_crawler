@@ -503,6 +503,32 @@ def test_stop_during_metadata_fallback_prevents_more_calls(harness, monkeypatch)
     assert h.commentary_calls == []
 
 
+def test_metadata_backfill_runs_during_pause_and_finishes_before_next_channel(harness, monkeypatch):
+    h = harness
+    h.channels = ["large", "small"]
+    h.pages["small"] = Page("small", "Kênh nhỏ", 1000)
+    h.rows["small"] = [dict(h.rows["large"][0], video_id="v2", url="https://facebook.test/v2")]
+    h.rows["large"][0]["views"] = None
+    order, pausing = [], Event()
+
+    def fill(video):
+        assert pausing.wait(5), "bổ sung số liệu phải chạy song song với lúc nghỉ"
+        order.append(f"fill {video.video_id}")
+        video.views = video.views or 90_000
+
+    def pause(stop_event):
+        order.append("pause")
+        pausing.set()
+
+    h.pause_hook = pause
+    h.scan_hook = lambda url, stop_event: order.append(f"scan {url}")
+    monkeypatch.setattr(pipeline.ytdlp, "fill_missing", fill)
+    h.run()
+    assert order == ["scan large", "pause", "fill v1", "scan small", "fill v2"]
+    assert sorted(video.video_id for video in h.exports[0][0]) == ["v1", "v2"]
+    assert [page["passed"] for page in h.exports[0][2]["pages"]] == [1, 1]
+
+
 def test_deepgram_auth_pauses_and_exports_partial(harness, monkeypatch):
     def fail(*args):
         raise AuthError("deepgram", "Key bị từ chối")

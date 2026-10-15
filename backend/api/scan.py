@@ -14,8 +14,6 @@ from backend.services import pipeline, filters, llm_client
 from backend.api import services, results
 from backend.api.common import error_message, redact, fail
 
-SCAN_STAGES = (("keys", "Kiểm tra key"), ("scan", "Quét kênh"), ("filter", "Lọc nội dung"),
-               ("analyze", "Phân tích"), ("export", "Xuất Excel"))
 KINDS = (("video", "Video thường"), ("reel", "Reel"))
 _lock = threading.Lock()
 
@@ -25,7 +23,7 @@ def _new_session():
                 scan_started=None, scan_elapsed=0, scan_log=[], scan_errors=[], progress=None,
                 scan_result=None, question=None, scan_usage=None, scan_usage_history=[],
                 scan_turns=[], scan_channels=[], scan_passed_total=0, scan_overall=0.0,
-                scan_item_label="video")
+                scan_item_label="video", scan_lanes={}, scan_analyzed=(0, 0))
 
 
 _session = _new_session()
@@ -143,6 +141,12 @@ def _record_scan_progress(state, event: pipeline.Progress, now: datetime, redact
         state.setdefault("scan_errors", []).append(redact(event.error))
     else:
         state["progress"] = event
+        # Quét Facebook và phân tích AI chạy song song: giữ thông báo cuối của từng luồng riêng.
+        lane = "analyze" if event.stage == "analyze" else "scan" if event.stage in ("scan", "filter") else None
+        if lane:
+            state.setdefault("scan_lanes", {})[lane] = event
+        if event.stage == "analyze" and event.steps:
+            state["scan_analyzed"] = (event.step, event.steps)
     if not event.transient:
         _track_channels(state, event)
 
@@ -392,27 +396,45 @@ def _turn_rows(turns):
                  deepgram_minutes=round(turn.get("deepgram_minutes", 0), 2)) for turn in reversed(turns)]
 
 
+def _lanes(state, stage):
+    """Hai luồng chạy song song: quét Facebook theo kênh và phân tích AI theo từng mục."""
+    finished = stage in ("export", "done") or (state["scan_started"] is not None and not state["running"])
+    events, item = state.get("scan_lanes", {}), state["scan_item_label"]
+    channels = state.get("scan_channels", [])
+    total = len(channels)
+    scanned = sum(1 for row in channels if row["found"] is not None or row["status"] in ("Bỏ qua", "Có lỗi"))
+    scan_event = events.get("scan")
+    scan_done = finished or (total > 0 and scanned >= total)
+    if scan_done:
+        scan = dict(state="done", message=f"Đã quét xong {scanned}/{total} kênh." if total else "Đã quét xong.")
+    elif scan_event is not None:
+        scan = dict(state="current", message=scan_event.message, page_url=scan_event.page_url or None)
+    else:
+        scan = dict(state="pending", message="Bắt đầu sau khi kiểm tra API key.")
+    scan.update(id="scan", title="Quét Facebook", fraction=scanned / total if total else (1.0 if scan_done else 0.0),
+                label=f"{scanned}/{total} kênh")
+    done, known = state.get("scan_analyzed", (0, 0))
+    analyze_event = events.get("analyze")
+    if finished:
+        analyze = dict(state="done", message=f"Đã phân tích {done} {item}." if known else f"Không có {item} nào cần phân tích.")
+    elif analyze_event is not None and done < known:
+        analyze = dict(state="current", message=analyze_event.message)
+    elif analyze_event is not None:
+        analyze = dict(state="waiting", message=f"Đã phân tích hết {item} đạt ngưỡng; chờ kênh tiếp theo.")
+    else:
+        analyze = dict(state="pending", message=f"Bắt đầu khi có {item} đạt ngưỡng từ bước quét.")
+    analyze.update(id="analyze", title="Phân tích AI", fraction=done / known if known else (1.0 if finished else 0.0),
+                   label=f"{done}/{known} {item}")
+    return [scan, analyze]
+
+
 def get_scan_state(log_since=0):
     with _lock:
         _drain_scan_queue()
         s = _session
         progress = s["progress"]
         stage = progress.stage if progress else None
-        ids = [name for name, _ in SCAN_STAGES]
-        position = len(ids) if stage == "done" else ids.index(stage) if stage in ids else -1
-        stages = [dict(id=name, label=label, state="done" if index < position else
-                       "current" if index == position else "pending")
-                  for index, (name, label) in enumerate(SCAN_STAGES)]
-        step = None
-        if progress:
-            if progress.steps:
-                fraction = progress.step / progress.steps
-                label = ("Đã phân tích " if stage == "analyze" else "") + f"{progress.step}/{progress.steps} {s['scan_item_label']}"
-            elif progress.page_total and stage == "scan":
-                fraction, label = (progress.page_index - 1) / progress.page_total, f"Kênh {progress.page_index}/{progress.page_total}"
-            else:
-                fraction, label = (1, "Xong") if progress.done else (0, "")
-            step = dict(fraction=min(1, max(0, fraction)), label=label)
+        lanes = _lanes(s, stage)
         elapsed = (time.monotonic() - s["scan_started"] if s["running"] else s["scan_elapsed"])
         usage = dict(s["scan_usage"]) if s["scan_usage"] is not None else None
         if usage is not None:
@@ -426,8 +448,9 @@ def get_scan_state(log_since=0):
         result = s["scan_result"]
         result = dict(name=Path(result).name, count=results.summary_count(Path(result)), elapsed_s=elapsed) if result else None
         return _redacted(dict(ok=True, running=s["running"], stopping=s["running"] and s["stop_event"].is_set(),
-            elapsed_s=elapsed, item_label=s["scan_item_label"], overall=s["scan_overall"], stage=stage, stages=stages,
-            step=step, message=progress.message if progress else "", page_url=progress.page_url or None if progress else None,
+            elapsed_s=elapsed, item_label=s["scan_item_label"], overall=s["scan_overall"], stage=stage, lanes=lanes,
+            # Thông báo chung chỉ cho bước không thuộc hai luồng (kiểm tra key, xuất Excel).
+            message=progress.message if progress and stage not in ("scan", "filter", "analyze") else "",
             channels=_channel_rows(s["scan_channels"]), usage=usage, usage_history=[
                 dict(t=row["Thời gian"].strftime("%H:%M:%S"), llm=row["Token LLM"], jev=row["Token Jev"])
                 for row in s["scan_usage_history"]], turns=_turn_rows(s["scan_turns"]),

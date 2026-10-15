@@ -207,9 +207,10 @@ def test_turn_events_keep_usage_after_finish_and_freeze_elapsed(monkeypatch):
 
 
 def test_countdown_displayed_not_logged(monkeypatch):
-    _enqueue(monkeypatch, [_progress_event(message="Nghỉ · còn 5 giây", transient=True, usage={"llm_tokens": 10})])
+    _enqueue(monkeypatch, [_progress_event(stage="scan", message="Nghỉ · còn 5 giây", transient=True,
+                                           usage={"llm_tokens": 10})])
     result = scan.get_scan_state(0)
-    assert result["message"] == "Nghỉ · còn 5 giây" and result["log"] == []
+    assert result["lanes"][0]["message"] == "Nghỉ · còn 5 giây" and result["log"] == []
     assert result["usage"]["llm_tokens"] == 10
 
 
@@ -339,9 +340,35 @@ def test_reject_running_and_empty_channels(configured, monkeypatch):
     assert scan.start_scan({})["error"] == "Danh sách kênh trống. Vào Cài đặt để nhập các kênh cần quét."
 
 
-def test_usage_speed_and_structured_stages(monkeypatch):
-    _enqueue(monkeypatch, [_progress_event(step=1, steps=2, usage={"llm_output_tokens": 100, "llm_seconds": 4})])
+def _channel(url, **values):
+    return dict(url=url, status="Chờ quét", found=None, passed=None, analyzed=0) | values
+
+
+def test_scan_and_analysis_lanes_keep_their_own_progress(monkeypatch):
+    _enqueue(monkeypatch, [
+        _progress_event(stage="scan", page_url="a", message="Kênh 1/2: thu được 5 video trong 7 ngày."),
+        _progress_event(stage="filter", page_url="a", message="Đạt ngưỡng: 2/5 video."),
+        _progress_event(stage="analyze", page_url="a", message="Video 1: đang chép lời", step=0, steps=2,
+                        usage={"llm_output_tokens": 100, "llm_seconds": 4}),
+        _progress_event(stage="scan", page_url="b", message="Kênh 2/2 · cuộn lần 3", transient=True),
+    ], scan_channels=[_channel("a"), _channel("b")])
     state = scan.get_scan_state(0)
     assert state["usage"]["llm_speed"] == 25
-    assert state["step"] == {"fraction": 0.5, "label": "Đã phân tích 1/2 video"}
-    assert [row["state"] for row in state["stages"]] == ["done", "done", "done", "current", "pending"]
+    scan_lane, analyze_lane = state["lanes"]
+    assert (scan_lane["state"], scan_lane["label"], scan_lane["fraction"]) == ("current", "1/2 kênh", 0.5)
+    assert scan_lane["message"] == "Kênh 2/2 · cuộn lần 3" and scan_lane["page_url"] == "b"
+    assert (analyze_lane["state"], analyze_lane["label"]) == ("current", "0/2 video")
+    assert analyze_lane["message"] == "Video 1: đang chép lời"
+    assert state["message"] == ""
+
+
+def test_analysis_lane_waits_between_channels_and_finishes(monkeypatch):
+    _enqueue(monkeypatch, [
+        _progress_event(stage="analyze", message="Video 1: xong", step=1, steps=1),
+        _progress_event(stage="scan", page_url="b", message="Kênh 2/2: mở trang…"),
+    ], scan_channels=[_channel("a", found=3, passed=1, analyzed=1), _channel("b")])
+    assert scan.get_scan_state(0)["lanes"][1]["state"] == "waiting"
+    scan._session["scan_queue"].put(_progress_event(stage="export", message="Đang xuất Excel…"))
+    state = scan.get_scan_state(0)
+    assert [lane["state"] for lane in state["lanes"]] == ["done", "done"]
+    assert state["message"] == "Đang xuất Excel…"

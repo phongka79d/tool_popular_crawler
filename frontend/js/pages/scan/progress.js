@@ -7,16 +7,10 @@ export function scanProgress(state, logs, actions, view) {
   if (state.running) {
     const main = card({ title: `Đang quét · ${duration(state.elapsed_s)}` });
     main.body.classList.add("stack");
-    main.body.append(progressBar({ value: state.overall, label: `Tiến độ tổng (ước tính) · ${Math.round((state.overall || 0) * 100)}%`, showValue: false }), el("div", "row", (state.stages || []).map((stage) => badge({ label: `${stage.state === "done" ? "✓" : stage.state === "current" ? "●" : "○"} ${stage.label}`, state: stage.state }))), el("p", "hint", "Quét kênh và phân tích có thể chạy song song; bước đang hoạt động có thể thay đổi."));
-    if (state.step)
-      main.body.append(progressBar({ value: state.step.fraction, label: state.step.label || "Đang chuẩn bị quét…" }));
-    const message = el("div", "stack scan-current", el("p", "scan-current-message", state.message || "Đang chuẩn bị quét…"));
-    if (state.page_url) {
-      const link = el("a", "hint", state.page_url);
-      link.href = state.page_url;
-      message.append(link);
-    }
-    main.body.append(message);
+    main.body.append(progressBar({ value: state.overall, label: `Tiến độ tổng (ước tính) · ${Math.round((state.overall || 0) * 100)}%`, showValue: false }));
+    if (state.message)
+      main.body.append(el("p", "scan-current-message", state.message));
+    main.body.append(el("div", "scan-lanes", (state.lanes || []).map((lane, index) => lanePanel(lane, index))));
     if (state.question) {
       const question = card({ title: "Cần bạn chọn để tiếp tục", body: el("div", "stack", el("p", "", state.question.message), el("div", "row", state.question.options.map((option, index) => button({ label: option.label, variant: index === 0 ? "primary" : "secondary", disabled: state.stopping || actions.pending(), onClick: () => actions.answer(option.id) })))) });
       question.classList.add("scan-question");
@@ -48,4 +42,15 @@ export function scanProgress(state, logs, actions, view) {
     root.append(expander({ title: `Toàn bộ diễn biến lần quét (${num(logs.length)} bước)`, body: el("pre", "scan-log scan-log-full", logs.join(`
 `)), open: view.logs, onToggle: (value) => view.logs = value }));
   return root;
+}
+const LANE_BADGES = { current: ["● Đang chạy", "current"], waiting: ["◌ Chờ kênh tiếp theo", "pending"], pending: ["○ Chưa bắt đầu", "pending"], done: ["✓ Xong", "success"] };
+function lanePanel(lane, index) {
+  const [label, state] = LANE_BADGES[lane.state] || LANE_BADGES.pending;
+  const panel = el("section", `scan-lane scan-lane-${lane.state}`, el("div", "scan-lane-head", el("h4", "", `${index + 1} · ${lane.title}`), badge({ label, state })), progressBar({ value: lane.fraction, label: lane.label }), el("p", "scan-current-message", lane.message || "—"));
+  if (lane.page_url) {
+    const link = el("a", "hint", lane.page_url);
+    link.href = lane.page_url;
+    panel.append(link);
+  }
+  return panel;
 }
