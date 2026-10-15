@@ -10,10 +10,10 @@ from typing import Any
 import pytest
 import requests
 
-import config
-from collectors import transcript
-from errors import AuthError, QuotaError, ServiceError
-from models import Video
+from backend.core import config
+from backend.collectors import transcript
+from backend.core.errors import AuthError, QuotaError, ServiceError
+from backend.core.models import Video
 
 STT = {
     "provider": "deepgram",

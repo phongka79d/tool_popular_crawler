@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from collectors import graphql as gql
+from backend.collectors import graphql as gql
 
 FIXTURES = Path(__file__).parent / "fixtures"
 SAMPLE_TEXT = (FIXTURES / "graphql_sample.txt").read_text(encoding="utf-8")
@@ -579,7 +579,7 @@ def test_tile_live_evidence_enriches_existing_story():
 
 @pytest.mark.parametrize("reverse", [False, True])
 def test_exact_counters_replace_reduced_counters_across_batches(reverse):
-    from collectors.facebook import _Collector
+    from backend.collectors.facebook import _Collector
     story = _video_story(url="https://www.facebook.com/reel/123", feedback={
         "play_count_reduced": "454K", "i18n_reaction_count": "1K",
         "total_comment_count": "2K", "share_count_reduced": 3000,

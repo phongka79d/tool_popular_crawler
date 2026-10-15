@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from filters import (
+from backend.services.filters import (
     NOTE_TOO_FEW_FOR_MEDIAN,
     NOTE_ZERO_MEDIAN,
     apply_filter,
@@ -12,7 +12,7 @@ from filters import (
     formula_score,
     passes,
 )
-from models import Video
+from backend.core.models import Video
 
 # Trọng số như settings["score_weights"] mặc định.
 WEIGHTS = {"ratio_median": 40, "ratio_median_cap": 5, "replicable": 25, "hook_strength": 20, "relevant": 15, "jev_viral": 20}

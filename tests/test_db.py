@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-import db
-import jev_client
-from models import Page, Video
+from backend.core import db
+from backend.services import jev_client
+from backend.core.models import Page, Video
 
 
 @pytest.fixture

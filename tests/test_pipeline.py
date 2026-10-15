@@ -6,11 +6,11 @@ from types import SimpleNamespace
 
 import pytest
 
-import pipeline
-from errors import AuthError, LoginRequired, NetworkError, QuotaError, ServiceError
-from collectors.facebook import page_url_problem
-from collectors.transcript import get_transcript as get_cached_transcript
-from models import Page
+from backend.services import pipeline
+from backend.core.errors import AuthError, LoginRequired, NetworkError, QuotaError, ServiceError
+from backend.collectors.facebook import page_url_problem
+from backend.collectors.transcript import get_transcript as get_cached_transcript
+from backend.core.models import Page
 
 
 @pytest.fixture

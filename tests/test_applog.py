@@ -1,7 +1,7 @@
 """Nhật ký ứng dụng: không bao giờ ghi API key nguyên văn; bộ lọc lỗi giữ nguyên traceback."""
 import pytest
 
-import applog
+from backend.core import applog
 
 STORED = "dg-secret-0123456789abcd"
 TYPED = "sk-typed-but-not-saved-9876"

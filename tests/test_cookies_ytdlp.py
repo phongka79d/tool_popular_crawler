@@ -10,9 +10,9 @@ import pytest
 import yt_dlp
 from yt_dlp.utils import DownloadError
 
-import config
-from collectors import cookies, facebook, ytdlp
-from models import Video
+from backend.core import config
+from backend.collectors import cookies, facebook, ytdlp
+from backend.core.models import Video
 
 
 @pytest.fixture(autouse=True)
@@ -506,7 +506,7 @@ def test_scan_page_reports_unselected_replays_without_counting_them_twice(
         return "không có video mới sau 4 lần cuộn"
 
     monkeypatch.setattr(scanner, "_scan_tab", scan_tab)
-    caplog.set_level("INFO", logger="collectors.facebook")
+    caplog.set_level("INFO", logger="backend.collectors.facebook")
     formats = {"video", "reel", "video_live"} if include_live else {"video", "reel"}
     rows = scanner.scan_page("https://www.facebook.com/Example", 30, formats, 100,
                              on_progress=progress.append)

@@ -1,55 +1,39 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""Build the local Streamlit launcher; mutable config stays outside the bundle."""
+"""Build the pywebview desktop app; mutable user data stays outside app/."""
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_all, collect_submodules, copy_metadata
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules, copy_metadata
 
-root = Path(SPECPATH) / "src"
-project_modules = [
-    "app", "pipeline", "filters", "normalize", "db", "export_excel",
-    "errors", "retry", "keys", "jev_client", "llm_client", "config", "models", "applog", "browser_setup",
+root = Path(SPECPATH)
+datas = collect_data_files("webview") + [
+    (str(root / "backend" / "assets"), "assets"),
+    (str(root / "frontend"), "frontend"),
 ]
-collector_sources = sorted((root / "collectors").rglob("*.py"))
-collector_modules = []
-for source in collector_sources:
-    parts = list(source.relative_to(root).with_suffix("").parts)
-    if parts[-1] == "__init__":
-        parts.pop()
-    collector_modules.append(".".join(parts))
-
-streamlit_datas, streamlit_binaries, streamlit_hiddenimports = collect_all("streamlit")
-# streamlit/.agents chứa mẫu cho trợ lý AI, app không dùng; bỏ đi để đường dẫn khi giải nén ngắn hơn.
-streamlit_datas = [(src, dest) for src, dest in streamlit_datas
-                   if ".agents" not in Path(dest).parts]
-datas = streamlit_datas + [
-    (str(root / f"{module}.py"), ".") for module in project_modules
-]
-datas += [
-    (str(source), str(source.relative_to(root).parent))
-    for source in collector_sources
-]
-datas.append((str(root / "assets"), "assets"))
-for distribution in ("streamlit", "typesafe-sdk", "openai", "yt-dlp", "playwright", "keyring"):
+for distribution in ("typesafe-sdk", "openai", "yt-dlp", "playwright", "keyring", "pywebview"):
     datas += copy_metadata(distribution)
 
+# Keep the original webview/lib/ hierarchy, including per-architecture WebView2Loader.dll.
+binaries = collect_dynamic_libs("webview")
+binaries += collect_dynamic_libs("clr_loader")
+datas += collect_data_files("pythonnet")
+binaries += collect_dynamic_libs("pythonnet")
 hiddenimports = (
-    project_modules
-    + collector_modules
-    + streamlit_hiddenimports
-    + ["keyring.backends.Windows", "win32ctypes"]
+    collect_submodules("backend")
+    + ["keyring.backends.Windows", "win32ctypes",
+       "webview.platforms.edgechromium", "webview.platforms.winforms", "clr_loader", "pythonnet"]
     + collect_submodules("win32ctypes")
 )
 
 a = Analysis(
-    [str(root / "launcher.py")],
+    [str(root / "backend" / "main.py")],
     pathex=[str(root)],
-    binaries=streamlit_binaries,
+    binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=["streamlit", "pandas", "pyarrow", "altair", "matplotlib", "tkinter"],
     noarchive=False,
 )
 pyz = PYZ(a.pure)
@@ -63,8 +47,7 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    console=False,  # chỉ hiện cửa sổ ứng dụng; nhật ký ghi vào data/app.log (launcher.py)
-    # Program files go to app/ so the folder root only shows the exe and user data.
+    console=False,  # Nhật ký ghi vào data/app.log (backend/main.py).
     contents_directory="app",
 )
 coll = COLLECT(

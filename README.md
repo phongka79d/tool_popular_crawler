@@ -4,9 +4,11 @@ Công cụ Windows quét video Facebook, lọc chỉ số viral, phân tích cô
 
 ## Cấu trúc thư mục
 
-- `src/`: mã nguồn (`app.py` giao diện, `pipeline.py`, `collectors/`, …) và `assets/`.
+- `backend/core/`: cấu hình, dữ liệu và tiện ích nền tảng; `backend/services/`: pipeline, dịch vụ AI và xuất Excel.
+- `backend/collectors/`: thu thập Facebook, phụ đề và chuẩn bị trình duyệt; `backend/api/`: cầu nối Python cho giao diện; `backend/assets/`: tài nguyên ứng dụng.
+- `frontend/`: giao diện HTML/CSS/JS; `frontend/js/components/`: thành phần dùng chung; `frontend/js/pages/`: các trang cài đặt, quét và kết quả.
 - `config/`: mẫu cấu hình; `data/`, `output/`, `profile/`: dữ liệu khi chạy từ mã nguồn (gitignore).
-- `tests/`, `tools/`: kiểm thử và công cụ thu fixture.
+- `tests/`: kiểm thử; `tools/`: công cụ thu fixture.
 - `docs/`: hướng dẫn người dùng (Markdown + PDF, ảnh trong `docs/img/`) và đặc tả.
 - `build.ps1`, `VideoCongThuc.spec`: đóng gói exe.
 
@@ -26,9 +28,9 @@ Nhập key Jev, Deepgram, LLM và endpoint/model LLM trong tab **Cài đặt**; 
 ## Chạy và kiểm thử
 
 ```powershell
-streamlit run src/app.py
+python -m backend.main
 # Hoặc chạy pipeline từ dòng lệnh:
-python src/pipeline.py
+python -m backend.services.pipeline
 
 pytest
 # Thu fixture Facebook để cập nhật parser (cần đăng nhập):

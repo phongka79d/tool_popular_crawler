@@ -7,8 +7,8 @@ from pathlib import Path
 import pytest
 from openpyxl import load_workbook
 
-import export_excel as xl
-from models import Video
+from backend.services import export_excel as xl
+from backend.core.models import Video
 
 NOW = datetime(2026, 10, 12, 9, 5)
 

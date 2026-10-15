@@ -6,7 +6,7 @@ import types
 
 import pytest
 
-import keys
+from backend.core import keys
 
 SERVICE = "VideoCongThuc"
 

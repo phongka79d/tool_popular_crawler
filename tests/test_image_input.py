@@ -5,12 +5,12 @@ from types import SimpleNamespace
 import pytest
 from PIL import Image
 
-import db
-import jev_client
-import llm_client
-import export_excel
-from collectors import graphql
-from models import Video
+from backend.core import db
+from backend.services import jev_client
+from backend.services import llm_client
+from backend.services import export_excel
+from backend.collectors import graphql
+from backend.core.models import Video
 
 
 def photo(url):

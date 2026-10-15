@@ -5,10 +5,10 @@ from types import SimpleNamespace
 
 import pytest
 
-import config
-import jev_client
-from errors import AuthError, ServiceError
-from models import Video
+from backend.core import config
+from backend.services import jev_client
+from backend.core.errors import AuthError, ServiceError
+from backend.core.models import Video
 
 TAXONOMY = config.load_json("taxonomy.json")
 SETTINGS = {
@@ -113,7 +113,7 @@ class FakeClient:
 class FakeDb:
     @staticmethod
     def analysis_cache_key(video):
-        import db
+        from backend.core import db
         return db.analysis_cache_key(video)
 
     def __init__(self):

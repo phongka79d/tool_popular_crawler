@@ -13,7 +13,7 @@ $Templates = @(
 )
 $Documents = @('THIRD_PARTY_NOTICES.txt', 'docs\HUONG-DAN.md')
 
-foreach ($Required in (@($Python, $Spec, (Join-Path $Root 'src\launcher.py')) +
+foreach ($Required in (@($Python, $Spec, (Join-Path $Root 'backend\main.py'), (Join-Path $Root 'frontend\index.html')) +
         @($Templates | ForEach-Object { Join-Path $Root "config\$_" }) +
         @($Documents | ForEach-Object { Join-Path $Root $_ }))) {
     if (-not (Test-Path -LiteralPath $Required -PathType Leaf)) {

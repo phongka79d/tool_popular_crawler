@@ -29,16 +29,16 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit, urlunsplit
 
-SRC = Path(__file__).resolve().parent.parent / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from playwright.sync_api import Error as PlaywrightError  # noqa: E402
 from playwright.sync_api import Page, Response, sync_playwright  # noqa: E402
 
-import config  # noqa: E402
-from collectors.cookies import has_login_cookies  # noqa: E402
-from collectors.facebook import _launch_options, tab_url as facebook_tab_url  # noqa: E402
+from backend.core import config  # noqa: E402
+from backend.collectors.cookies import has_login_cookies  # noqa: E402
+from backend.collectors.facebook import _launch_options, tab_url as facebook_tab_url  # noqa: E402
 
 log = logging.getLogger("capture_feed")
 

@@ -7,10 +7,10 @@ from types import SimpleNamespace
 
 import pytest
 
-import llm_client
-from config import load_lines
-from errors import AuthError, ServiceError
-from models import Video
+from backend.services import llm_client
+from backend.core.config import load_lines
+from backend.core.errors import AuthError, ServiceError
+from backend.core.models import Video
 
 
 class FakeStatusError(Exception):
@@ -406,7 +406,7 @@ class TestCheckKey:
             llm_client.check_key("https://llm.test/v1", "sk-bad", "m-1")
 
     def test_unlisted_model_fails_without_completion(self, monkeypatch):
-        from errors import ServiceError
+        from backend.core.errors import ServiceError
         client, comp = self._client(["other"])
         monkeypatch.setattr(llm_client, "make_client", lambda *args: client)
         with pytest.raises(ServiceError, match="không có"):

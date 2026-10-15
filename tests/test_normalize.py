@@ -7,7 +7,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
-from normalize import is_older_than, parse_count, to_iso, to_vn_datetime
+from backend.core.normalize import is_older_than, parse_count, to_iso, to_vn_datetime
 
 UTC = timezone.utc
 DAY = 86_400

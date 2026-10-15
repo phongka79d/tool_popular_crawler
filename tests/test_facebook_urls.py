@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from collectors.facebook import page_url_problem, tab_url
+from backend.collectors.facebook import page_url_problem, tab_url
 
 VANITY_URLS = [
     "https://www.facebook.com/PageX",

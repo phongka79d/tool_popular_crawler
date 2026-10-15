@@ -6,8 +6,8 @@ import types
 import pytest
 import requests
 
-from errors import AuthError, NetworkError, NotFoundError, QuotaError
-from retry import classify_status, parse_retry_after, with_retry
+from backend.core.errors import AuthError, NetworkError, NotFoundError, QuotaError
+from backend.core.retry import classify_status, parse_retry_after, with_retry
 
 
 class ApiStatusError(Exception):

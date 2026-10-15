@@ -1,6 +1,6 @@
 import pytest
 
-import config
+from backend.core import config
 
 
 @pytest.fixture
