@@ -7,6 +7,9 @@ const initialServices = [
   { name: "deepgram", label: "Deepgram", role: "Chuyển lời nói trong video thành chữ.", key_help: "Key lấy từ trang quản lý API key của Deepgram. Key chỉ được lưu sau khi kiểm tra thành công.", configured: false, saved_mask: null, model: "", needs_model: false, deepgram: { language: "vi", auto_language: true } },
   { name: "llm", label: "LLM", role: "Viết phân tích và gợi ý nhân bản. Dùng endpoint tương thích OpenAI.", key_help: "API key của nhà cung cấp đã chọn. Key chỉ được lưu sau khi kiểm tra thành công.", configured: appState.guide.configured.llm, saved_mask: appState.guide.configured.llm ? "••••demo" : null, model: appState.guide.configured.llm ? "openai/gpt-4.1-mini" : "", needs_model: false, llm: { base_url: providers[0].url, provider_label: "OpenRouter" } }
 ];
+if (new URLSearchParams(location.search).get("mockFresh") === "1")
+  for (const service of initialServices)
+    Object.assign(service, { configured: false, saved_mask: null, model: "" });
 let services = clone(initialServices), channelsText = ["# Các page công khai cần theo dõi", "https://www.facebook.com/TheThaoPharma", "https://www.facebook.com/nhathuoclongchau", "https://www.facebook.com/FPTShopOnline", "https://www.facebook.com/coccocbrowser", "https://www.facebook.com/vietnamairlines", "https://www.facebook.com/highlandscoffeevietnam", "https://www.facebook.com/PNJ.COM.VN", "https://www.facebook.com/Biti.s.official"].join(`
 `);
 let loginUntil = 0, loginNotice = null, reset = false;

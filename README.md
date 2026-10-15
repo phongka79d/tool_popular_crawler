@@ -1,6 +1,33 @@
 # Video Công Thức
 
-Công cụ Windows quét video Facebook, lọc chỉ số viral, phân tích công thức bằng Jev/LLM và xuất Excel. Giao diện HTML/CSS/JS chạy trong cửa sổ pywebview, dùng Microsoft Edge WebView2 Runtime. Chạy từ mã nguồn cần Python 3.11, Internet và `ffmpeg.exe` trong PATH. WebView2 thường có sẵn trên Windows 10/11 có Edge; nếu thiếu, cài [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/). Hướng dẫn người dùng: [docs/HUONG-DAN.md](docs/HUONG-DAN.md); đặc tả: [docs/PLAN-JEV.md](docs/PLAN-JEV.md).
+Công cụ Windows tìm video thường, Reel và bài đăng nổi bật trên các page Facebook, lọc chỉ số, phân tích công thức bằng Jev/LLM và xuất Excel. Giao diện chạy trong cửa sổ riêng, không cần biết lập trình.
+
+## Cài đặt cho người dùng
+
+Yêu cầu: **Windows 10/11 64-bit**, Internet và [Microsoft Edge WebView2 Runtime](https://go.microsoft.com/fwlink/p/?LinkId=2124703) (thường đã có). Bản đóng gói không cần Python.
+
+1. Chạy **`VideoCongThuc-Setup.exe`** (khoảng 90 MB). Cài theo tài khoản Windows hiện tại, không cần quyền quản trị; mặc định ở `%LOCALAPPDATA%\Programs\VideoCongThuc`. Mở từ Start menu hoặc biểu tượng Desktop tùy chọn; Start menu có lối tắt hướng dẫn PDF.
+2. Nếu SmartScreen hiện **Windows protected your PC**, chỉ khi đã xác minh nguồn tệp: **More info → Run anyway**. Bộ cài chưa ký số nên có thể bị cảnh báo; không tắt bảo vệ Windows.
+3. Hoặc dùng **`VideoCongThuc.zip`** (khoảng 123 MB): giải nén toàn bộ rồi mở `VideoCongThuc.exe`. Không chạy trong ZIP hoặc chép riêng EXE ra ngoài.
+
+**Nâng cấp:** chạy Setup mới lên bản cũ; bộ cài yêu cầu đóng ứng dụng và thay `app/`, giữ `config/`, `data/`, `output/`, `profile/`. **Gỡ cài đặt** qua Windows Settings → Apps cũng luôn giữ bốn thư mục dữ liệu này. Nên đóng ứng dụng và sao lưu trước khi nâng cấp/chuyển máy.
+
+## Sử dụng nhanh
+
+1. Mở ứng dụng; chờ chuẩn bị trình duyệt quét tự động ở lần đầu.
+2. Tab **Cài đặt**: lấy key Jev (tài khoản Jev/typesafe), Deepgram và một nhà cung cấp LLM. Với mỗi dịch vụ: dán key → **Kết nối** → giữ model **Đề xuất** → **Kiểm tra và lưu**. Chỉ đổi model trong phần **Nâng cao**. Key chỉ lưu trong Windows Credential Manager.
+3. Nhập mỗi dòng một link page Facebook → **Lưu danh sách kênh**. Không hỗ trợ nhóm. Đăng nhập Facebook bằng tài khoản phụ; nếu cần dùng **Không đăng nhập được? Nạp file cookie**.
+4. Tab **Chạy quét**: chọn ngày đăng, Video/Bài đăng, Video thường/Reel, thời lượng và ngưỡng lọc. Đọc tóm tắt, kiểm tra key, xác nhận lưu ý lần đầu rồi **Bắt đầu quét**. Bài đăng không cần Deepgram. Khi Deepgram hết credit, video tương ứng không có bản chép lời: nạp thêm/đổi key rồi quét lại.
+5. Theo dõi tiến độ, câu hỏi cần xử lý và lượng dùng dịch vụ. Nghỉ **30–60 giây giữa các kênh là có chủ ý**, không phải bị treo. Dùng **Dừng quét** và chờ lưu xong nếu muốn ngừng.
+6. Tab **Kết quả**: chọn file để xem thống kê/biểu đồ, **Mở bằng Excel**, **Lưu bản sao…** hoặc **Mở thư mục**. Nút **Nhật ký** ở góc trên giúp tra lỗi.
+
+**[Hướng dẫn chi tiết có ảnh (Markdown)](docs/HUONG-DAN.md) · [Tải/đọc hướng dẫn PDF](docs/HUONG-DAN.pdf)** — gồm cách lấy key, cài đặt, giải thích tùy chọn quét, các trang tính Excel và xử lý lỗi.
+
+**Bảo mật:** không chia sẻ `profile/`, `data/fb_cookies.txt`, key hoặc bản sao thư mục đang dùng. Chỉ thu thập nội dung được phép, tuân thủ điều khoản Facebook và kiểm tra gợi ý AI trước khi sử dụng. Dịch vụ AI có phí riêng; nên thử ít kênh trước.
+
+## Dành cho người phát triển
+
+Chạy từ mã nguồn cần Python 3.11, Internet và `ffmpeg.exe` trong PATH. Đặc tả: [docs/PLAN-JEV.md](docs/PLAN-JEV.md).
 
 ## Cấu trúc thư mục
 
@@ -61,10 +88,15 @@ Mở `http://localhost:8000/index.html?mock=1`. Có thể dùng máy chủ tĩnh
 
 ## Đóng gói Windows
 
-Sau khi thiết lập `.venv` và ffmpeg trong PATH, chạy tại repo:
+Xem **[installer/README.md](installer/README.md)** để chuẩn bị phụ thuộc build, tạo `VideoCongThuc-Setup.exe`/ZIP và hiểu cơ chế nâng cấp, giữ dữ liệu. Điểm vào build là `.\build.ps1`; cấu hình đóng gói nằm trong `VideoCongThuc.spec`. Không đóng gói dữ liệu hay phiên Facebook đang sử dụng.
+
+### Tạo lại hướng dẫn
+
+Khi máy chủ mock đã phục vụ `frontend/` tại `http://127.0.0.1:8765/`, chạy:
 
 ```powershell
-.\build.ps1
+.\.venv\Scripts\python tools/make_guide_images.py
+.\.venv\Scripts\python tools/make_guide_pdf.py
 ```
 
-Script dùng `VideoCongThuc.spec` để build **onedir**, chép đúng các mẫu `config/`, hướng dẫn và notices, kèm ffmpeg rồi tạo `dist/VideoCongThuc.zip`. Cạnh `VideoCongThuc.exe` chỉ có `HUONG-DAN.pdf` và các thư mục dữ liệu; mã, DLL, assets, ffmpeg, hướng dẫn Markdown và notices nằm trong `app/` (`config.BUNDLE_DIR`). `HUONG-DAN.pdf` được kèm nếu có. Không đóng gói `reference/`, `.venv` hay dữ liệu/phiên đăng nhập đang dùng; `data/`, `output/`, `profile/` trong bản ZIP là thư mục rỗng. Nếu một bản ứng dụng trong `dist/VideoCongThuc/` đã có dữ liệu người dùng, script từ chối ghi đè: chuyển nguyên bản đó ra ngoài `dist/` trước khi build lại.
+Ảnh dùng dữ liệu mô phỏng và chú thích đỏ đánh số; không nhập key thật. Script PDF dùng Chromium của Playwright, tự dùng bộ chuyển Markdown tối giản nếu chưa có gói `markdown`, không cài thêm phụ thuộc.

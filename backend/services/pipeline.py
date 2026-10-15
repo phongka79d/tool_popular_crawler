@@ -31,8 +31,9 @@ from backend.core.models import VIDEO_KINDS, Video
 
 logger = logging.getLogger(__name__)
 
-# Chỉ tăng song song các API phân tích, không tăng request tới Facebook.
-ANALYZE_WORKERS = 6
+# Mỗi luồng phân tích tải audio từ Facebook (yt-dlp); giữ 4 để không tăng tải lên Facebook.
+# Đo thực tế: phân tích đã chạy xong trong lúc quét kênh, thêm luồng không rút ngắn lần quét.
+ANALYZE_WORKERS = 4
 MAX_POST_IMAGES = 4
 _METRICS = ("views", "reactions", "comments", "shares", "posted_at", "duration_s")
 

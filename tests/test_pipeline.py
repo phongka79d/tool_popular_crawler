@@ -1089,8 +1089,8 @@ def test_translation_auth_error_pauses_before_llm_analysis(harness, monkeypatch)
 
 
 @pytest.mark.parametrize("value,expected", [
-    (None, 6), (-2, 1), (0, 1), (1, 1), (5, 5), (8, 8), (99, 8),
-    ("3", 3), ("invalid", 6),
+    (None, 4), (-2, 1), (0, 1), (1, 1), (5, 5), (8, 8), (99, 8),
+    ("3", 3), ("invalid", 4),
 ])
 def test_analysis_worker_setting_default_and_clamp(value, expected):
     scan = {} if value is None else {"analyze_workers": value}
