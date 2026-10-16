@@ -41,23 +41,25 @@ def test_completed_chromium_install_is_reused(monkeypatch, tmp_path):
     run.assert_not_called()
 
 
-def test_frozen_install_uses_local_browser_path_before_discovery(monkeypatch, tmp_path):
+def test_frozen_install_keeps_browsers_in_data_dir_before_discovery(monkeypatch, tmp_path):
     executable = tmp_path / "chromium-1" / "chrome-win64" / "chrome.exe"
     run = chromium_mocks(monkeypatch, executable)
     monkeypatch.setattr(browser_setup.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(browser_setup.config, "DATA_DIR", tmp_path / "data")
     monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", "other")
+    expected = str(tmp_path / "data" / "browsers")
     from playwright import sync_api
     original_sync = sync_api.sync_playwright
 
     def sync_playwright():
-        assert browser_setup.os.environ["PLAYWRIGHT_BROWSERS_PATH"] == "0"
+        assert browser_setup.os.environ["PLAYWRIGHT_BROWSERS_PATH"] == expected
         return original_sync()
 
     monkeypatch.setattr(sync_api, "sync_playwright", sync_playwright)
 
     def install(command, **kwargs):
         assert command == ["node", "cli.js", "install", "chromium", "--no-shell"]
-        assert kwargs["env"]["PLAYWRIGHT_BROWSERS_PATH"] == "0"
+        assert kwargs["env"]["PLAYWRIGHT_BROWSERS_PATH"] == expected
         executable.parent.mkdir(parents=True)
         executable.touch()
         (executable.parents[1] / "INSTALLATION_COMPLETE").touch()

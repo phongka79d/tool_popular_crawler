@@ -396,7 +396,7 @@ Bản Setup mặc định ở `%LOCALAPPDATA%\Programs\VideoCongThuc`. Có thể
 | Thư mục | Chứa gì? | Lưu ý |
 | --- | --- | --- |
 | config/ | Cài đặt, danh sách kênh và tệp cấu hình | Không sửa JSON nếu không hiểu; dùng giao diện trước. |
-| data/ | Cache, nhật ký và dữ liệu làm việc; có thể chứa fb_cookies.txt | Dữ liệu riêng tư, không chia sẻ cả thư mục. |
+| data/ | Cache, nhật ký và dữ liệu làm việc; có thể chứa fb_cookies.txt. Máy không có Edge thì Chromium tự tải (~150 MB) cũng nằm ở `data\browsers\` | Dữ liệu riêng tư, không chia sẻ cả thư mục. Không cần sao lưu `browsers\`: thiếu thì ứng dụng tự tải lại. |
 | output/ | Báo cáo Excel | Mở nhanh bằng Mở thư mục ở Kết quả. |
 | profile/ | Hồ sơ/phiên đăng nhập trình duyệt Facebook | Bảo vệ như thông tin đăng nhập. |
 | app/ | Tệp chương trình và thư viện | Không tự sửa/xóa; thay qua bộ cài mới. |

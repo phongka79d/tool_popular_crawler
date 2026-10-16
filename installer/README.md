@@ -18,4 +18,6 @@ Bộ cài chỉ dành cho Windows 64-bit, không cần quyền quản trị. M�
 
 Khi nâng cấp, trình cài đặt dùng Restart Manager để yêu cầu đóng ứng dụng đang chạy, thay toàn bộ `app/`, nhưng chỉ thêm mẫu `config/` chưa tồn tại. Không đóng gói nội dung `data/`, `output/`, `profile/`. Script từ chối build nếu các thư mục này trong bản portable ở `dist/VideoCongThuc` không rỗng; hãy chuyển bản đang sử dụng ra ngoài `dist/` trước.
 
+Trình duyệt quét dùng Edge cài sẵn. Chỉ khi máy không có Edge, ứng dụng mới tải Chromium (~150 MB) vào `data/browsers/` (bản đóng gói đặt `PLAYWRIGHT_BROWSERS_PATH` tới đó), nên nâng cấp không phải tải lại. Thư mục này cũng được giữ khi gỡ cài đặt như phần còn lại của `data/`.
+
 Gỡ cài đặt **luôn giữ nguyên** `config/`, `data/`, `output/`, `profile/`, không hỏi xóa dữ liệu. Nếu muốn xóa hẳn dữ liệu cá nhân, người dùng tự sao lưu rồi xóa các thư mục còn lại sau khi gỡ ứng dụng.
