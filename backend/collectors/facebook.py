@@ -39,7 +39,6 @@ _TAB_LABELS = {"reel": "Reels", "video": "Video", "post": "Bài đăng"}
 
 FB_HOME = "https://www.facebook.com/"
 FB_COOKIE_URLS = ("https://www.facebook.com/", "https://m.facebook.com/", "https://web.facebook.com/")
-LOCALE = "vi-VN"
 GRAPHQL_MARK = "/api/graphql/"
 NAV_TIMEOUT_MS = 60_000
 RESPONSE_WAIT_MS = 12_000
@@ -53,15 +52,16 @@ WHEEL_GAP_MS = (120, 480)         # nghỉ giữa các nấc
 WHEEL_MAX_STEPS = 14              # tối đa mỗi vòng cuộn
 NEAR_BOTTOM_PX = 1500             # tới gần cuối trang thì Facebook tải thêm
 WINDOW_SIZE = "1366,900"
-# Cửa sổ thật nhưng đặt ngoài màn hình: cùng đường render với trình duyệt người dùng (không phải
-# headless shell), và tắt cơ chế giảm tốc cửa sổ bị che để trang vẫn cuộn, tải bình thường.
-HIDDEN_WINDOW_ARGS = (
-    "--window-position=-32000,-32000",
+# Cửa sổ thật nhưng nằm ngay bên phải mép phải màn hình (như một màn hình phụ), không phải headless shell.
+# Tắt cơ chế giảm tốc cửa sổ bị che để trang vẫn cuộn, tải bình thường. Không thu nhỏ: cửa sổ thu nhỏ
+# báo outerWidth/outerHeight 160x28 và toạ độ -25600, bất thường hơn.
+BACKGROUND_ARGS = (
     "--disable-backgrounding-occluded-windows",
     "--disable-renderer-backgrounding",
     "--disable-background-timer-throttling",
     "--disable-features=CalculateNativeWinOcclusion",
 )
+FALLBACK_HIDDEN_POSITION = (-32000, -32000)
 LOGIN_POLL_S = 2.0
 LOGIN_REQUIRED_MSG = "Phiên Facebook đã hết hạn hoặc bị checkpoint. Vào Cài đặt → Đăng nhập Facebook."
 # Edge chuyển lệnh mở sang phiên đang chạy cùng profile rồi thoát; Playwright chỉ báo trình duyệt đã đóng.
@@ -190,11 +190,36 @@ def _save_user_agent(page: PwPage) -> None:
         logger.warning("Không lưu được User-Agent của trình duyệt: %s", exc)
 
 
+def _hidden_position() -> tuple[int, int]:
+    """Toạ độ (đơn vị DIP như --window-position) ngay sát mép phải của toàn bộ các màn hình.
+
+    Hỏi Windows ở chế độ DPI-unaware để nhận kích thước đã chia theo DPI hệ thống, khớp với
+    đơn vị Chromium dùng. Không đọc được thì dùng toạ độ ngoài màn hình cũ.
+    """
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        user32.SetThreadDpiAwarenessContext.restype = ctypes.c_void_p
+        previous = user32.SetThreadDpiAwarenessContext(ctypes.c_void_p(-1))  # DPI_AWARENESS_CONTEXT_UNAWARE
+        try:
+            left, top, width = (user32.GetSystemMetrics(i) for i in (76, 77, 78))
+        finally:
+            if previous:
+                user32.SetThreadDpiAwarenessContext(ctypes.c_void_p(previous))
+    except (AttributeError, OSError):
+        return FALLBACK_HIDDEN_POSITION
+    if width <= 0:
+        return FALLBACK_HIDDEN_POSITION
+    return left + width, top
+
+
+
 def _launch_options(hidden: bool) -> dict:
     """Tùy chọn mở trình duyệt giống người dùng thật nhất có thể.
 
     - Edge cài sẵn của Windows (channel msedge) khi có: trình duyệt thương mại đủ codec video, GPU thật,
       cập nhật tự động; không có Edge thì dùng Chromium của Playwright.
+    - Không ép ngôn ngữ: navigator.language/Accept-Language theo cài đặt ngôn ngữ thật của trình duyệt.
     - Luôn chạy có cửa sổ (không headless): UA không chứa "HeadlessChrome"; quét thì cửa sổ nằm ngoài màn hình.
     - Bỏ cờ tự động hóa (--enable-automation, AutomationControlled) để navigator.webdriver là false
       và không hiện thanh "đang bị điều khiển bởi phần mềm tự động".
@@ -202,10 +227,10 @@ def _launch_options(hidden: bool) -> dict:
     """
     args = ["--disable-blink-features=AutomationControlled", f"--window-size={WINDOW_SIZE}"]
     if hidden:
-        args += HIDDEN_WINDOW_ARGS
+        x, y = _hidden_position()
+        args += [f"--window-position={x},{y}", *BACKGROUND_ARGS]
     options: dict = {
         "headless": False,
-        "locale": LOCALE,
         "no_viewport": True,
         "args": args,
         "ignore_default_args": ["--enable-automation"],
