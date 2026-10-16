@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import socket
 import sys
 import threading
 from pathlib import Path
@@ -14,6 +15,9 @@ from backend.core import applog, config
 
 _REQUIRED_BUNDLE_FILES = ("base_library.zip", "ffmpeg.exe", "frontend/index.html")
 _ARCHIVE_TEMP_MARKERS = ("\\temp1_", "\\rar$", "\\7zo")
+# pywebview mặc định dùng cổng 42001 cho mọi app; app pywebview khác đang giữ cổng đó thì cửa sổ
+# này sẽ hiện nhầm giao diện của app kia. Dùng cổng riêng, cố định để giữ localStorage giữa các lần mở.
+PREFERRED_HTTP_PORT = 47231
 
 
 class BundleIncomplete(RuntimeError):
@@ -22,6 +26,32 @@ class BundleIncomplete(RuntimeError):
 
 class WebViewUnavailable(RuntimeError):
     """Không khởi động được bộ máy hiển thị Edge WebView2."""
+
+
+def _port_free(port: int) -> bool:
+    """Thử bind độc quyền: trên Windows SO_EXCLUSIVEADDRUSE không cho dùng chung cổng đang có app nghe."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        try:
+            probe.bind(("127.0.0.1", port))
+        except OSError:
+            return False
+    return True
+
+
+def http_port(preferred: int = PREFERRED_HTTP_PORT) -> int:
+    """Cổng máy chủ giao diện: cổng riêng của app nếu trống, không thì một cổng trống do hệ điều hành cấp.
+
+    Đổi cổng chỉ làm mất trang đang mở và cờ chào mừng lưu trong localStorage, không mất dữ liệu.
+    """
+    if _port_free(preferred):
+        return preferred
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    applog.log.warning("Cổng giao diện %s đang bị ứng dụng khác dùng; chuyển sang cổng %s.", preferred, port)
+    return port
 
 
 def bundle_problems(bundle_dir: Path, exe_path: Path) -> list[str]:
@@ -130,6 +160,7 @@ def _serve() -> None:
             debug=False,
             private_mode=False,
             storage_path=str(config.DATA_DIR / "webview"),
+            http_port=http_port(),
         )
     except Exception as exc:
         raise WebViewUnavailable(str(exc)) from exc

@@ -182,12 +182,32 @@ def _near_bottom(page: PwPage) -> bool:
         return True
 
 
+_LANGUAGE_TAG = re.compile(r"[A-Za-z]{1,8}(?:-[A-Za-z0-9]{1,8})*")
+
+
+def accept_language(languages: object) -> str:
+    """Dựng Accept-Language giống Chromium từ navigator.languages: "vi,en;q=0.9,en-GB;q=0.8"…
+
+    Chỉ nhận thẻ ngôn ngữ hợp lệ (không thể chèn header), tối đa 10 thẻ; q không xuống dưới 0.1.
+    """
+    if not isinstance(languages, list):
+        return ""
+    tags = [tag for tag in languages if isinstance(tag, str) and _LANGUAGE_TAG.fullmatch(tag)][:10]
+    return ",".join(tag if index == 0 else f"{tag};q={max(1, 10 - index) / 10:g}"
+                    for index, tag in enumerate(tags))
+
+
 def _save_user_agent(page: PwPage) -> None:
-    """Lưu UA thật của trình duyệt để yt-dlp gửi cùng UA khi phải dùng cookie (tránh 1 phiên, 2 thiết bị)."""
+    """Lưu UA và ngôn ngữ thật của trình duyệt để yt-dlp gửi giống hệt khi phải dùng cookie (tránh 1 phiên, 2 thiết bị)."""
     try:
         config.BROWSER_UA_FILE.write_text(page.evaluate("navigator.userAgent"), encoding="utf-8")
+        languages = accept_language(page.evaluate("Array.from(navigator.languages || [])"))
+        if languages:
+            config.BROWSER_LANG_FILE.write_text(languages, encoding="utf-8")
+        else:
+            config.BROWSER_LANG_FILE.unlink(missing_ok=True)
     except (PlaywrightError, OSError) as exc:
-        logger.warning("Không lưu được User-Agent của trình duyệt: %s", exc)
+        logger.warning("Không lưu được User-Agent/ngôn ngữ của trình duyệt: %s", exc)
 
 
 def _hidden_position() -> tuple[int, int]:

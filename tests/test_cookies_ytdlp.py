@@ -628,6 +628,7 @@ def test_fetch_metadata_tries_anonymous_before_account(monkeypatch, tmp_path, pu
     ua_path.write_text("Mozilla/5.0 Edg/141\n", encoding="utf-8")
     monkeypatch.setattr(config, "COOKIE_FILE", cookie_path)
     monkeypatch.setattr(config, "BROWSER_UA_FILE", ua_path)
+    monkeypatch.setattr(config, "BROWSER_LANG_FILE", tmp_path / "missing_lang.txt")
     attempts = []
 
     class FakeYoutubeDL:
@@ -656,6 +657,36 @@ def test_fetch_metadata_tries_anonymous_before_account(monkeypatch, tmp_path, pu
         assert len(attempts) == 2
         assert attempts[1]["cookiefile"] == str(cookie_path)
         assert attempts[1]["http_headers"] == {"User-Agent": "Mozilla/5.0 Edg/141"}
+
+
+def test_account_requests_reuse_browser_user_agent_and_language(monkeypatch, tmp_path):
+    cookie_path = tmp_path / "fb.txt"
+    cookies.write_netscape([_c_user(), _xs()], cookie_path)
+    (tmp_path / "ua.txt").write_text("Mozilla/5.0 Edg/155\n", encoding="utf-8")
+    (tmp_path / "lang.txt").write_text("vi,en;q=0.9,en-US;q=0.8", encoding="utf-8")
+    monkeypatch.setattr(config, "COOKIE_FILE", cookie_path)
+    monkeypatch.setattr(config, "BROWSER_UA_FILE", tmp_path / "ua.txt")
+    monkeypatch.setattr(config, "BROWSER_LANG_FILE", tmp_path / "lang.txt")
+    assert ytdlp._cookie_opts()["http_headers"] == {
+        "User-Agent": "Mozilla/5.0 Edg/155", "Accept-Language": "vi,en;q=0.9,en-US;q=0.8"}
+    # Tệp bị sửa tay thành nội dung lạ: bỏ header đó, không chèn được header khác.
+    (tmp_path / "lang.txt").write_text("vi\r\nX-Evil: 1", encoding="utf-8")
+    (tmp_path / "ua.txt").write_bytes(b"\xff\xfe")
+    assert "http_headers" not in ytdlp._cookie_opts()
+
+
+@pytest.mark.parametrize("languages,expected", [
+    (["vi", "en", "en-GB", "en-US"], "vi,en;q=0.9,en-GB;q=0.8,en-US;q=0.7"),
+    (["en-US"], "en-US"),
+    (["vi", "bad tag", 5, "en\r\nX-Evil", "fr"], "vi,fr;q=0.9"),
+    # Tối đa 10 thẻ, q dừng ở 0.1.
+    ([c * 2 for c in "abcdefghijkl"],
+     "aa,bb;q=0.9,cc;q=0.8,dd;q=0.7,ee;q=0.6,ff;q=0.5,gg;q=0.4,hh;q=0.3,ii;q=0.2,jj;q=0.1"),
+    (None, ""),
+])
+def test_accept_language_matches_chromium_format(languages, expected):
+    from backend.collectors.facebook import accept_language
+    assert accept_language(languages) == expected
 
 
 def test_fetch_metadata_ignores_non_netscape_cookie_file(monkeypatch, tmp_path):

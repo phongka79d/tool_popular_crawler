@@ -172,3 +172,23 @@ def test_open_url_uses_default_browser(monkeypatch):
     monkeypatch.setattr(api.webbrowser, "open", opener)
     assert Bridge().open_url("https://example.com/guide") == {"ok": True}
     opener.assert_called_once_with("https://example.com/guide")
+
+
+def test_ui_port_moves_away_when_another_app_already_listens():
+    import socket
+    with socket.socket() as other_app:
+        other_app.bind(("127.0.0.1", 0))
+        other_app.listen()
+        busy = other_app.getsockname()[1]
+        port = main.http_port(busy)
+        assert port != busy
+        with socket.socket() as ours:  # cổng được cấp phải bind được ngay
+            ours.bind(("127.0.0.1", port))
+
+
+def test_ui_port_keeps_preferred_port_when_free():
+    import socket
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        free = probe.getsockname()[1]
+    assert main.http_port(free) == free

@@ -25,6 +25,7 @@ DB_PATH = DATA_DIR / "cache.db"
 COOKIE_FILE = DATA_DIR / "fb_cookies.txt"
 SETTINGS_FILE = CONFIG_DIR / "settings.json"
 BROWSER_UA_FILE = DATA_DIR / "browser_ua.txt"  # Actual scanner UA, reused by yt-dlp
+BROWSER_LANG_FILE = DATA_DIR / "browser_lang.txt"  # Accept-Language thật của trình duyệt quét, yt-dlp gửi kèm UA
 
 
 def ensure_dirs() -> None:

@@ -50,11 +50,20 @@ def _is_empty(value: object) -> bool:
     return value is None or value == ""
 
 
+def _saved_header(path, pattern: str) -> str:
+    """Đọc giá trị header đã lưu; bỏ qua nếu thiếu tệp hoặc nội dung lạ (không để chèn header)."""
+    try:
+        value = path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
+        return ""
+    return value if re.fullmatch(pattern, value) else ""
+
+
 def _cookie_opts() -> dict:
-    """Cookie Netscape đã xuất từ profile trình duyệt của tool, kèm đúng User-Agent của trình duyệt đó.
+    """Cookie Netscape đã xuất từ profile trình duyệt của tool, kèm đúng User-Agent và ngôn ngữ của trình duyệt đó.
 
     Không đọc cookie của Chrome (PLAN §11.3). Cùng cookie nhưng khác UA trông như phiên bị đánh cắp,
-    nên gửi UA đã lưu khi quét/đăng nhập.
+    nên gửi UA và Accept-Language đã lưu khi quét/đăng nhập (thiếu thì yt-dlp dùng mặc định).
     """
     path = config.COOKIE_FILE
     if not path.exists():
@@ -63,12 +72,15 @@ def _cookie_opts() -> dict:
         logger.warning("Tệp cookie %s không đúng định dạng Netscape; bỏ qua cookie.", path)
         return {}
     opts: dict = {"cookiefile": str(path)}
-    try:
-        user_agent = config.BROWSER_UA_FILE.read_text(encoding="utf-8").strip()
-    except OSError:
-        user_agent = ""
+    headers = {}
+    user_agent = _saved_header(config.BROWSER_UA_FILE, r"[\x20-\x7e]{1,512}")
     if user_agent:
-        opts["http_headers"] = {"User-Agent": user_agent}
+        headers["User-Agent"] = user_agent
+    languages = _saved_header(config.BROWSER_LANG_FILE, r"[A-Za-z0-9,;=.\-]{1,200}")
+    if languages:
+        headers["Accept-Language"] = languages
+    if headers:
+        opts["http_headers"] = headers
     return opts
 
 
